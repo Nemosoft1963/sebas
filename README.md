@@ -1,6 +1,6 @@
-# Local Cowork + Local Voice AI
+# セバス
 
-Windows 11、Docker Desktop、Ollamaを使うローカル優先の作業AI環境です。従来の音声会話・プロジェクト別コンテキスト・複数外部AI調査を維持し、Open WebUIとOpen WebUI Computerを追加しています。
+セバスは、Windows 11、Docker Desktop、Ollamaを使うローカル優先の目標達成型作業AI環境です。従来の音声会話・プロジェクト別コンテキスト・複数外部AI調査を維持し、Open WebUIとOpen WebUI Computerを追加しています。
 
 ## 3つの画面
 

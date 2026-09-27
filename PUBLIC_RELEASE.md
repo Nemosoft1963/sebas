@@ -1,6 +1,6 @@
 # Public release notes
 
-This repository is a privacy-filtered source release of LOCALSAPORTER (Sebas).
+This repository is a privacy-filtered source release of Sebas（セバス）.
 
 Excluded from this release:
 
