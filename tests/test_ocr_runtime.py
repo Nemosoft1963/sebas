@@ -23,7 +23,7 @@ from app.ocr_store import OcrStore
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "paddlex_layout_parsing_sample.json"
-BASE_COMPOSE_HASH = "664f570d709ae94516fb49a08cc48208450ea30d"
+BASE_COMPOSE_HASH = "d621bf203da7e7f377ba748416e54e8095778ea2"
 
 
 def _fixture():
