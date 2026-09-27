@@ -1,6 +1,6 @@
 # 変更記録 2026-09-21(2): `None` の扱いと `FRONT_AI_PROVIDER` の既定値
 
-対象: LOCALSAPORTER
+対象: セバス（内部識別子: LOCALSAPORTER）
 作業ツール: ジェンキンス(実装は Claude)
 種別: 既存ファイルの修正(各1行)+ テスト追加
 指示書: `docs/改修依頼_2_None処理と既定値.md`

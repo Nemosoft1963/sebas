@@ -412,7 +412,7 @@ Googleログイン、2FA、CAPTCHA、OAuth同意、SNS投稿そのものは人�
 PowerShell:
 
 ```powershell
-Set-Location 'C:\LocalCowork\LOCALSAPORTER'
+Set-Location 'C:\LocalCowork\sebas'
 .\scripts\start.ps1
 .\scripts\status.ps1
 .\scripts\healthcheck.ps1

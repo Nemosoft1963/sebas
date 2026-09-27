@@ -1,6 +1,6 @@
 ---
 document_type: system_description_for_ai
-system_name: Local Cowork + Local Voice AI
+system_name: セバス
 product_version: 1.0.0
 document_revision: 2026-09-01
 language: ja-JP
@@ -17,7 +17,7 @@ source_of_truth_priority:
   - README.md
 ---
 
-# Local Cowork + Local Voice AI — 他AI向けシステム説明書
+# セバス — 他AI向けシステム説明書
 
 ## 0. この文書の目的
 
@@ -100,7 +100,7 @@ flowchart TB
 | コンポーネント | 実装／配置 | 既定URL | 主な責任 |
 |---|---|---|---|
 | Integrated Front | Docker `web` / FastAPI | `http://127.0.0.1:8099` | 統合UI、チャット、プロジェクト、計画、外部AI調査、音声、会計Excel、API |
-| Local Cowork dashboard | Integrated Front内 | `http://127.0.0.1:8099/cowork` | コンポーネント状態の確認 |
+| セバス・ダッシュボード | Integrated Front内 | `http://127.0.0.1:8099/cowork` | コンポーネント状態の確認 |
 | Open WebUI | Docker `open-webui` | `http://127.0.0.1:3000` | ローカルモデルチャット、Knowledge/RAG |
 | Open WebUI Computer | Docker `cptr` | `http://127.0.0.1:8000` | `/workspace`内のファイル、Editor、Terminal、Git、Agent/MCP |
 | Ollama | Windowsホスト | `http://127.0.0.1:11434` | ローカルモデルの推論とロード／アンロード |

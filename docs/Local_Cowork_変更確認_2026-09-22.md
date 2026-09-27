@@ -10,7 +10,7 @@
 
 ## 配備と稼働
 
-Local Coworkの4サービスは停止中。webコンテナは2026-09-21 22:47 JSTに作成され、22:48起動、22:53停止した記録がある。イメージIDはsha256:5da40aa7cd33bc06872c27bb4702f8c56c5df4c0bff93672b5d1c17e53570ccdへ更新。
+セバスの4サービスは停止中。webコンテナは2026-09-21 22:47 JSTに作成され、22:48起動、22:53停止した記録がある。イメージIDはsha256:5da40aa7cd33bc06872c27bb4702f8c56c5df4c0bff93672b5d1c17e53570ccdへ更新。
 停止コンテナからweb.py、triz_common.py、triz_import.py、vehicle_auto.py、vehicle_workflow.pyを読み出し、現行ソースと全5件ハッシュ一致を確認。
 
 ## 本番データの確認

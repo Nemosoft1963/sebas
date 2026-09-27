@@ -1,6 +1,6 @@
 # 変更履歴 2026-09-25: 車両損益Excel生成の修正(単位0〜9)+ フォールバックPDF読取(OCR)スキル(Phase 1〜4)
 
-対象システム: LOCALSAPORTER(ユーザーの呼称「セバス」)
+対象システム: セバス（内部識別子: LOCALSAPORTER）
 作業ツール: ジェンキンス(自作コーディングエージェント。実装は Grok、検証・是正・本番反映は Claude)
 本番反映日: 2026-09-25(`localsaporter-web:vehicle-ocr-20260925`)
 最終テスト: 全体 **656 passed**(本番イメージ内で実測。ジェンキンス側は 655 passed, 1 skipped)

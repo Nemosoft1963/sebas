@@ -1,6 +1,6 @@
 # 変更記録 2026-09-21: TRIZ収集データの取り込み機能の追加
 
-対象: LOCALSAPORTER(Local Cowork + Local Voice AI)
+対象: セバス（内部識別子: LOCALSAPORTER）(セバス)
 作業ツール: ジェンキンス(汎用コード作成エージェント)
 種別: 機能追加(既存ファイルの変更・削除なし)
 

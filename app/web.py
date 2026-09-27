@@ -373,7 +373,7 @@ async def lifespan(_: FastAPI):
         await orchestrator.shutdown()
 
 
-app = FastAPI(title="Local Cowork + Local Voice AI", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="セバス", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/")
@@ -695,7 +695,7 @@ def _send_approved_email(action: dict) -> str:
         raise RuntimeError("SMTP_HOST、SMTP_FROM、有効な送信先が必要です")
     subject, separator, body = action["content"].partition("\n")
     if not separator:
-        subject, body = "Local Coworkからのご連絡", subject
+        subject, body = "セバスからのご連絡", subject
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient

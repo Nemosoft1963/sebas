@@ -1,21 +1,21 @@
-# Operations
+# セバス 運用ガイド
 
 ## Start
 
-+[Environment]::NewLine+Set-Location
-Set-Location 'C:\LocalCowork\LOCALSAPORTER'
+```powershell
+Set-Location 'C:\LocalCowork\sebas'
 .\scripts\start.ps1
 ```
 
 初回またはフロント再ビルド時:
 
-+[Environment]::NewLine+Set-Location
+```powershell
 .\scripts\start.ps1 -BuildFront -Check
 ```
 
 ## Stop
 
-+[Environment]::NewLine+Set-Location
+```powershell
 .\scripts\stop.ps1
 ```
 
@@ -23,7 +23,7 @@ AIモデルをアンロードし、マイクブリッジと3コンテナを停�
 
 ## Status and health
 
-+[Environment]::NewLine+Set-Location
+```powershell
 .\scripts\status.ps1
 .\scripts\healthcheck.ps1
 ```
@@ -37,7 +37,7 @@ AIモデルをアンロードし、マイクブリッジと3コンテナを停�
 
 ## Logs
 
-+[Environment]::NewLine+Set-Location
+```powershell
 docker compose logs --tail 200 web
 docker compose logs --tail 200 open-webui
 docker compose logs --tail 200 cptr
@@ -47,7 +47,7 @@ Computer初回setup URL/tokenは `docker compose logs cptr` で確認します�
 
 ## Models
 
-+[Environment]::NewLine+Set-Location
+```powershell
 .\scripts\pull-models.ps1
 .\scripts\smoke-test.ps1
 ```
@@ -130,7 +130,7 @@ Integrated Frontの「調査フォルダ追加」は、ブラウザで選んだ�
 
 ## Backup
 
-+[Environment]::NewLine+Set-Location
+```powershell
 .\scripts\backup.ps1
 ```
 
