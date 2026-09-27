@@ -199,3 +199,134 @@ async def test_oversized_output_blocked_before_spend(tmp_path):
     with memory_scope(m,'p','v',external_allowed=True) as scope:
         with pytest.raises(MemoryPolicyError):await m.external(scope,'url',{'max_tokens':10000},send)
     assert m.store.stats('p')['requests']==[]
+
+
+@pytest.mark.asyncio
+async def test_import_success_cases_api_and_rag(tmp_path):
+    from fastapi.testclient import TestClient
+    import app.web as web_module
+
+    db_path = tmp_path / 'memory' / 'conversations.db'
+    from app.memory.short_term import ShortTermMemory
+    mem = ShortTermMemory(db_path)
+    p_off = mem.create_project('proj_off')['id']
+    p_shadow = mem.create_project('proj_shadow')['id']
+    p_enforce = mem.create_project('proj_enforce')['id']
+
+    # Prepare config file for experience_memory using generated project ids
+    config_data = {
+        'projects': {
+            p_off: 'off',
+            p_shadow: 'shadow',
+            p_enforce: 'enforce',
+        },
+        'embedding_model': 'dummy-model',
+    }
+    cfg_path = tmp_path / 'memory' / 'experience_memory.json'
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(config_data), encoding='utf-8')
+
+    # Override web module constants/globals for testing
+    orig_memory = web_module.memory
+    orig_db_path = web_module.DB_PATH
+    web_module.memory = mem
+    web_module.DB_PATH = db_path
+
+    client = TestClient(web_module.app)
+
+    valid_item_1 = {
+        'kind': 'success',
+        'content': '【事例】架空の製造ライン効率化【状況】ライン停止が頻発していた。【施策】センサー点検を日次化し、異常値を検知した。【成果】停止時間が半減した。',
+        'evidence': {'source': 'synthetic-test-1'},
+    }
+    valid_item_2 = {
+        'kind': 'success',
+        'content': '【事例】架空の在庫適正化【状況】過剰在庫が発生していた。【施策】発注リードタイムを見直した。【成果】在庫回転率が20%向上した。',
+        'evidence': {'source': 'synthetic-test-2'},
+    }
+    invalid_item = {
+        'kind': 'success',
+        'content': '',  # empty content -> conversion error
+        'evidence': {'source': 'synthetic-test-invalid'},
+    }
+
+    try:
+        # (f) mode='off' のプロジェクトは EXPERIENCE_OFF で 409
+        resp_off = client.post(
+            f'/api/projects/{p_off}/experience/import-success-cases',
+            json={
+                'items': [valid_item_1],
+                'actor': 'operator',
+                'confirm_rag': True,
+            },
+        )
+        assert resp_off.status_code == 409
+        assert resp_off.json()['detail']['code'] == 'EXPERIENCE_OFF'
+
+        # (g) mode='shadow' または 'enforce' なら登録され、registered 件数が返る
+        resp_shadow = client.post(
+            f'/api/projects/{p_shadow}/experience/import-success-cases',
+            json={
+                'items': [valid_item_1],
+                'actor': 'operator',
+                'confirm_rag': True,
+            },
+        )
+        assert resp_shadow.status_code == 200
+        data = resp_shadow.json()
+        assert data['registered'] == 1
+        assert data['skipped_duplicate'] == 0
+        assert data['failed'] == []
+
+        # (h) 同一内容 (ハッシュ一致) の再送は skipped_duplicate に数えられ二重登録しない
+        resp_dup = client.post(
+            f'/api/projects/{p_shadow}/experience/import-success-cases',
+            json={
+                'items': [valid_item_1],
+                'actor': 'operator',
+                'confirm_rag': True,
+            },
+        )
+        assert resp_dup.status_code == 200
+        data_dup = resp_dup.json()
+        assert data_dup['registered'] == 0
+        assert data_dup['skipped_duplicate'] == 1
+        assert data_dup['failed'] == []
+
+        # (i) 変換に失敗した項目は failed に理由付きで返り、他の項目には影響しない
+        resp_mixed = client.post(
+            f'/api/projects/{p_enforce}/experience/import-success-cases',
+            json={
+                'items': [valid_item_1, invalid_item, valid_item_2],
+                'actor': 'operator',
+                'confirm_rag': True,
+            },
+        )
+        assert resp_mixed.status_code == 200
+        data_mixed = resp_mixed.json()
+        assert data_mixed['registered'] == 2
+        assert data_mixed['skipped_duplicate'] == 0
+        assert len(data_mixed['failed']) == 1
+        assert data_mixed['failed'][0]['index'] == 1
+        assert 'error' in data_mixed['failed'][0]
+
+        # (j) 登録された行が既存の経験RAG参照系 (reindex や プロンプト補強) から見えること
+        from app.experience_memory import configured_memory
+        exp_mem, mode = configured_memory(db_path, p_enforce)
+        verified_rows = exp_mem.store.list(p_enforce, verified_only=True)
+        assert len(verified_rows) == 2
+        exp_mem.index = Index([r['id'] for r in verified_rows])
+        with memory_scope(exp_mem, p_enforce, 'v1', mode='enforce'):
+            augmented = await augment_local_prompt('ライン停止の対策')
+            assert '過去の経験' in augmented
+            assert any(r['content'] in augmented for r in verified_rows)
+    finally:
+        web_module.memory = orig_memory
+        web_module.DB_PATH = orig_db_path
+
+
+
+def test_import_success_cases_requires_explicit_rag_confirmation(tmp_path):
+    from app.experience_memory import import_success_cases
+    with pytest.raises(ValueError, match="confirm_rag=true"):
+        import_success_cases(tmp_path / "memory" / "conversations.db", "p", [], actor="operator")

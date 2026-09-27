@@ -201,9 +201,9 @@ def test_candidate_not_applied_before_adopt_and_limited_rerun_revokes(tmp_path):
 
 
 def test_defined_library_is_not_business_recovered():
-    """7. 74件 defined を業務回復済みとみなす試験が無いこと。表示は定義済みであり検証済みにならない。"""
+    """7. defined を業務回復済みとみなす試験が無いこと。表示は定義済みであり検証済みにならない。"""
     items = load_export_items(EXPORT)
-    assert len(items) == 74
+    assert len(items) == 145
     from app.triz_import import export_item_to_values
     item = {}
     session = create(item, export_item_to_values(items[0]))

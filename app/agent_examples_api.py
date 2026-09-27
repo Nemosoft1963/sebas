@@ -20,6 +20,10 @@ class ChangeBody(BaseModel):
     revision:int
     values:dict=Field(default_factory=dict)
 
+class ArchiveBody(BaseModel):
+    reason:str=Field(min_length=3)
+    actor:str=Field(min_length=1)
+
 
 def install(app,env):
     router=APIRouter(prefix='/api/projects/{pid}/agent-examples')
@@ -45,14 +49,23 @@ def install(app,env):
         raise Conflict('更新が競合しています')
 
     @router.get('')
-    async def listing(pid:str,q:str=''):
+    async def listing(pid:str,q:str='',include_archived:bool=False):
         require(pid)
-        return execute(lambda:[i for i in store().list(pid) if not q or q.lower() in (i['filename']+json.dumps(i['extraction'],ensure_ascii=False)).lower()])
+        return execute(lambda:[i for i in store().list(pid,include_archived=include_archived) if not q or q.lower() in (i['filename']+json.dumps(i.get('extraction',{}),ensure_ascii=False)).lower()])
 
     @router.post('')
     async def importing(pid:str,body:ImportBody):
         require(pid)
         return execute(lambda:store().import_text(pid,body.filename,body.source,body.agent))
+
+    @router.post('/{eid}/archive')
+    async def archive(pid:str,eid:str,body:ArchiveBody):
+        require(pid)
+        if not body.reason.strip() or len(body.reason.strip()) < 3:
+            raise HTTPException(422, '理由は3文字以上必要です')
+        if not body.actor.strip():
+            raise HTTPException(422, '実行者が必要です')
+        return execute(lambda:store().archive(pid,eid,body.reason,body.actor))
 
     @router.get('/template')
     async def template(pid:str):

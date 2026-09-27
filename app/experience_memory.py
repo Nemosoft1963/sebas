@@ -5,6 +5,8 @@ import functools
 import hashlib
 import json
 import os
+import re
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -197,6 +199,195 @@ def register_approved_ocr(memory, project, content, evidence, reviewer, proof, e
         store, project_id=project, content=content, evidence=evidence,
         reviewer=reviewer, proof=proof, expires=expires,
     )
+
+
+LABELS = (
+    "事例",
+    "状況",
+    "施策",
+    "成果",
+    "成功要因",
+    "条件・限界",
+    "条件",
+    "限界",
+)
+LABEL_RE = re.compile(
+    r"【(?P<label>" + "|".join(LABELS) + r")】\s*(?P<body>.*?)(?=(?:\n|\s)*【(?:" + "|".join(LABELS) + r")】|\Z)",
+    re.DOTALL,
+)
+JP_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+
+
+def _parse_labelled_content(content: str) -> dict[str, str]:
+    text = str(content or "").strip()
+    fields: dict[str, str] = {}
+    for match in LABEL_RE.finditer(text):
+        label = match.group("label")
+        body = " ".join(match.group("body").strip().split())
+        if body:
+            fields[label] = body
+    return fields
+
+
+def _is_japanese(text: str) -> bool:
+    return bool(JP_RE.search(text or ""))
+
+
+def _take_sentences(text: str, count: int, max_chars: int) -> str:
+    text = " ".join(str(text or "").split())
+    if not text:
+        return ""
+    japanese = _is_japanese(text)
+    if japanese:
+        chunks = [part.strip() for part in re.split(r"(?<=。)", text) if part.strip()]
+        selected = "".join(chunks[:count])
+    else:
+        chunks = [part.strip() for part in re.split(r"(?<=\.)\s+", text) if part.strip()]
+        selected = " ".join(chunks[:count])
+    if len(selected) <= max_chars:
+        return selected
+    if japanese and "。" in selected[:max_chars]:
+        return selected[: selected.rfind("。", 0, max_chars) + 1]
+    if (not japanese) and "." in selected[:max_chars]:
+        return selected[: selected.rfind(".", 0, max_chars) + 1]
+    return selected[: max_chars - 1].rstrip("、,; ") + "…"
+
+
+def _strip_end(text: str) -> str:
+    return re.sub(r"[。．.\s]+$", "", text or "")
+
+
+def _build_lesson(fields: dict[str, str], fallback: str) -> str:
+    situation = _take_sentences(fields.get("状況", ""), 1, 240)
+    action = _take_sentences(fields.get("施策", ""), 2, 280)
+    outcome = _take_sentences(fields.get("成果", ""), 1, 200)
+    sample = " ".join(part for part in (situation, action, outcome) if part)
+    japanese = _is_japanese(sample or fallback)
+    parts: list[str] = []
+    if japanese:
+        situation_core = _strip_end(situation)
+        action_core = _strip_end(action)
+        if situation_core and action_core:
+            if situation_core.endswith(("た", "だ", "である", "です", "ます", "った", "いた")):
+                parts.append(f"{situation_core}ときは、{action_core}。")
+            else:
+                parts.append(f"{situation_core}という状況で、{action_core}。")
+        elif action_core:
+            parts.append(f"{action_core}。")
+        elif situation_core:
+            parts.append(f"{situation_core}。")
+        if outcome:
+            parts.append(f"その結果、{_strip_end(outcome)}。")
+        lesson = "".join(parts).strip()
+    else:
+        for part in (situation, action, outcome):
+            if not part:
+                continue
+            parts.append(part if part.endswith(".") else _strip_end(part) + ".")
+        lesson = " ".join(parts).strip()
+    if not lesson:
+        lesson = _take_sentences(fallback, 2, 400)
+    lesson = " ".join(lesson.split())
+    if len(lesson) > 700:
+        lesson = _take_sentences(lesson, 3, 700)
+    if lesson and not lesson.endswith(("。", ".", "…")):
+        lesson += "。" if _is_japanese(lesson) else "."
+    return lesson
+
+
+def convert_success_case_item(item: dict) -> dict:
+    if not isinstance(item, dict):
+        raise ValueError("item must be an object")
+    kind = item.get("kind") or "success"
+    if kind != "success":
+        raise ValueError("unsupported kind: %s" % kind)
+    content = item.get("content") or ""
+    fields = _parse_labelled_content(content)
+    if not fields:
+        for k in ("状況", "施策", "成果", "成功要因", "条件・限界", "条件", "限界"):
+            if item.get(k):
+                fields[k] = str(item[k])
+        if "situation" in item:
+            fields["状況"] = str(item["situation"])
+        if "action" in item:
+            fields["施策"] = str(item["action"])
+        if "outcome" in item:
+            fields["成果"] = str(item["outcome"])
+    lesson = _build_lesson(fields, content or str(item.get("lesson") or ""))
+    if not lesson.strip():
+        raise ValueError("empty lesson content")
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    source = str(evidence.get("source") or item.get("source") or "success_case_export").strip()
+    if not source:
+        raise ValueError("evidence.source is required")
+    return {
+        "kind": "success",
+        "content": lesson,
+        "applicability": item.get("applicability") if isinstance(item.get("applicability"), dict) else {},
+        "evidence": {"source": source},
+    }
+
+
+def import_success_cases(memory_path, project, export_items, proof="成功事例収集エージェントでの人手レビュー済み", actor="operator", confirm_rag=False):
+    if confirm_rag is not True:
+        raise ValueError("confirm_rag=true is required for experience RAG registration")
+    setting = configured_memory(memory_path, project)
+    if setting is None:
+        raise MemoryPolicyError("Experience memory is disabled for this project")
+    if not str(actor or "").strip():
+        raise ValueError("actor is required")
+    proof = str(proof or "成功事例収集エージェントでの人手レビュー済み").strip()
+    if not proof:
+        proof = "成功事例収集エージェントでの人手レビュー済み"
+    if not isinstance(export_items, list):
+        raise ValueError("export_items must be a list")
+
+    memory, mode = setting
+    store = memory.store
+
+    existing = store.list(project)
+    seen_hashes = set()
+    for row in existing:
+        seen_hashes.add(hashlib.sha256(row["content"].encode()).hexdigest())
+        try:
+            ev = json.loads(row["evidence"]) if isinstance(row["evidence"], str) else row["evidence"]
+            if isinstance(ev, dict) and ev.get("content_sha256"):
+                seen_hashes.add(ev["content_sha256"])
+        except Exception:
+            pass
+
+    registered = 0
+    skipped_duplicate = 0
+    failed = []
+
+    for idx, item in enumerate(export_items):
+        try:
+            converted = convert_success_case_item(item)
+            content = converted["content"]
+            content_sha = hashlib.sha256(content.encode()).hexdigest()
+            if content_sha in seen_hashes:
+                skipped_duplicate += 1
+                continue
+
+            evidence = dict(converted["evidence"])
+            evidence["proof"] = proof
+            evidence["actor"] = actor
+            evidence["registered_at"] = time.time()
+            evidence["content_sha256"] = content_sha
+
+            rid = store.add(project, "success", content, converted.get("applicability", {}), evidence)
+            expires = time.time() + 365 * 86400
+            store.review(project, rid, "verified", actor, proof, expires)
+            seen_hashes.add(content_sha)
+            registered += 1
+        except Exception as exc:
+            failed.append({"index": idx, "error": str(exc)})
+
+    return {
+        "registered": registered,
+        "skipped_duplicate": skipped_duplicate,
+        "failed": failed,
+    }
 
 
 async def augment_project_prompt(memory_path, project, input_version, prompt):

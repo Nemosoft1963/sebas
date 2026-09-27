@@ -3442,6 +3442,29 @@ async def publish_ocr_run_api(project_id: str, run_id: str):
         raise _ocr_http_error(exc) from exc
 
 
+class ImportSuccessCasesPayload(BaseModel):
+    items: list[dict] = Field(min_length=1, max_length=200)
+    proof: str = Field(default="成功事例収集エージェントでの人手レビュー済み")
+    actor: str = Field(min_length=1)
+    confirm_rag: bool = False
+
+
+@app.post('/api/projects/{project_id}/experience/import-success-cases')
+async def import_success_cases_api(project_id: str, payload: ImportSuccessCasesPayload):
+    require_project(project_id)
+    if not payload.actor.strip():
+        raise HTTPException(422, "actor is required")
+    if payload.confirm_rag is not True:
+        raise HTTPException(409, detail={"code": "RAG_NOT_CONFIRMED", "message": "confirm_rag=true is required"})
+    from app.experience_memory import import_success_cases, MemoryPolicyError
+    try:
+        return import_success_cases(DB_PATH, project_id, payload.items, payload.proof, payload.actor, confirm_rag=payload.confirm_rag)
+    except MemoryPolicyError as exc:
+        raise HTTPException(409, detail={"code": "EXPERIENCE_OFF", "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')
 async def register_ocr_rag_api(project_id: str, run_id: str, payload: OcrRagPayload):
     require_project(project_id)

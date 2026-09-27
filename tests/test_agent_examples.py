@@ -101,3 +101,89 @@ def test_revoked_procedure_excluded_from_rag(tmp_path):
     assert memory.retrieve({'project':'p','mode':'enforce'},'query')
     s.resolve_issue('p',x['id'],x['revision'],x['issues'][0]['id'],'changed','new evidence')
     assert not memory.retrieve({'project':'p','mode':'enforce'},'query')
+
+
+def test_agent_examples_archive_store_and_api(tmp_path):
+    from types import SimpleNamespace
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    from app.agent_examples_api import install
+
+    # Store-level tests
+    s = ExampleStore(tmp_path / 'agent_examples')
+    x = s.import_text('p', 'test.md', '# Sample Report\nreported complete')
+    eid = x['id']
+
+    # (a) archive後 list はそれを返さない
+    assert len(s.list('p')) == 1
+    s.archive('p', eid, 'テスト目的でのアーカイブ', 'tester_operator')
+    assert s.list('p') == []
+
+    # (b) include_archived=True で返る
+    all_items = s.list('p', include_archived=True)
+    assert len(all_items) == 1
+    assert all_items[0]['id'] == eid
+    assert all_items[0]['archive_status'] == 'archived'
+
+    # (c) 存在しないeidはKeyError
+    with pytest.raises(KeyError):
+        s.archive('p', 'non-existent-eid', '有効な理由テキスト', 'tester')
+
+    # (d) 二重archiveは冪等 (audit重複記録なし)
+    res = s.archive('p', eid, '別の理由テキスト', 'tester')
+    assert res['id'] == eid
+    with s.connect() as db:
+        audits = db.execute("SELECT * FROM audit WHERE example=? AND action='archive'", (eid,)).fetchall()
+        assert len(audits) == 1
+
+    # (e) reasonやactorが空・不正ならValueError
+    with pytest.raises(ValueError):
+        s.archive('p', eid, '', 'tester')
+    with pytest.raises(ValueError):
+        s.archive('p', eid, 'ab', 'tester')  # 3文字未満
+    with pytest.raises(ValueError):
+        s.archive('p', eid, '理由テキスト', '')
+
+    # API-level tests
+    app = FastAPI()
+    def require(pid):
+        if pid != 'p':
+            raise HTTPException(404, 'Project not found')
+    env = SimpleNamespace(DATA_DIR=tmp_path / 'agent_examples_api', require_project=require, DB_PATH=tmp_path / 'memory' / 'db')
+    install(app, env)
+
+    with TestClient(app) as client:
+        # Create an example
+        created = client.post('/api/projects/p/agent-examples', json={'filename': 'api_test.md', 'source': '# API Test\nContent'}).json()
+        api_eid = created['id']
+
+        # (e) reasonやactorが空なら422
+        assert client.post(f'/api/projects/p/agent-examples/{api_eid}/archive', json={'reason': '', 'actor': 'tester'}).status_code == 422
+        assert client.post(f'/api/projects/p/agent-examples/{api_eid}/archive', json={'reason': 'ab', 'actor': 'tester'}).status_code == 422
+        assert client.post(f'/api/projects/p/agent-examples/{api_eid}/archive', json={'reason': '有効なアーカイブ理由', 'actor': ''}).status_code == 422
+        assert client.post(f'/api/projects/p/agent-examples/{api_eid}/archive', json={'actor': 'tester'}).status_code == 422
+
+        # (c) 存在しないeidは404
+        assert client.post('/api/projects/p/agent-examples/missing-id/archive', json={'reason': '有効な理由です', 'actor': 'tester'}).status_code == 404
+
+        # Listing before archive
+        resp = client.get('/api/projects/p/agent-examples')
+        assert any(i['id'] == api_eid for i in resp.json())
+
+        # (a) Archive via API
+        arch_resp = client.post(f'/api/projects/p/agent-examples/{api_eid}/archive', json={'reason': '不要になったため', 'actor': 'tester'})
+        assert arch_resp.status_code == 200
+        assert arch_resp.json()['id'] == api_eid
+        assert arch_resp.json()['archive_status'] == 'archived'
+
+        # Listing after archive
+        resp = client.get('/api/projects/p/agent-examples')
+        assert not any(i['id'] == api_eid for i in resp.json())
+
+        # (b) include_archived=True
+        resp_all = client.get('/api/projects/p/agent-examples?include_archived=true')
+        assert any(i['id'] == api_eid for i in resp_all.json())
+
+        # (d) 二重archiveは冪等 (200 OK)
+        arch_resp2 = client.post(f'/api/projects/p/agent-examples/{api_eid}/archive', json={'reason': '二重実行テスト', 'actor': 'tester'})
+        assert arch_resp2.status_code == 200

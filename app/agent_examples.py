@@ -24,26 +24,62 @@ class ExampleStore:
         with self.connect() as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS examples(
               id TEXT PRIMARY KEY, project TEXT NOT NULL, hash TEXT NOT NULL,
-              revision INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project,hash));
+              revision INTEGER NOT NULL, data TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+              UNIQUE(project,hash));
               CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, project TEXT,
               example TEXT, action TEXT, detail TEXT, created REAL);''')
+            try:
+                db.execute("ALTER TABLE examples ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+            except sqlite3.OperationalError:
+                pass
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=20)
         db.row_factory = sqlite3.Row
         return db
 
-    def list(self, project):
+    def list(self, project, include_archived=False):
         with self.connect() as db:
-            rows = db.execute('SELECT data FROM examples WHERE project=? ORDER BY rowid DESC', (project,))
-            return [{k:v for k,v in json.loads(r[0]).items() if k != 'source'} for r in rows]
+            if include_archived:
+                rows = db.execute('SELECT data, status FROM examples WHERE project=? ORDER BY rowid DESC', (project,)).fetchall()
+            else:
+                rows = db.execute("SELECT data, status FROM examples WHERE project=? AND status='active' ORDER BY rowid DESC", (project,)).fetchall()
+            result = []
+            for r in rows:
+                item = {k:v for k,v in json.loads(r['data']).items() if k != 'source'}
+                item['archive_status'] = r['status']
+                result.append(item)
+            return result
 
     def get(self, project, eid):
         with self.connect() as db:
-            row = db.execute('SELECT data FROM examples WHERE project=? AND id=?', (project,eid)).fetchone()
+            row = db.execute('SELECT data, status FROM examples WHERE project=? AND id=?', (project,eid)).fetchone()
         if not row:
             raise KeyError('このプロジェクトに実行例がありません')
-        return json.loads(row[0])
+        item = json.loads(row['data'])
+        item['archive_status'] = row['status']
+        return item
+
+    def archive(self, project, eid, reason, actor):
+        if not str(reason or '').strip() or len(str(reason or '').strip()) < 3:
+            raise ValueError('理由は3文字以上必要です')
+        if not str(actor or '').strip():
+            raise ValueError('実行者が必要です')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data, status FROM examples WHERE project=? AND id=?', (project, eid)).fetchone()
+            if not row:
+                raise KeyError(eid)
+            if row['status'] == 'archived':
+                item = json.loads(row['data'])
+                item['archive_status'] = 'archived'
+                return item
+            item = json.loads(row['data'])
+            item['archive_status'] = 'archived'
+            db.execute("UPDATE examples SET status='archived', data=? WHERE project=? AND id=?",
+                       (json.dumps(item, ensure_ascii=False), project, eid))
+            self.audit(db, item, 'archive', {'reason': str(reason).strip(), 'actor': str(actor).strip()})
+            return item
 
     def import_text(self, project, filename, source, agent=''):
         if Path(filename).suffix.lower() not in {'.md','.txt','.json'}:
@@ -62,7 +98,8 @@ class ExampleStore:
                 filename=Path(filename.replace('\\','/')).name[:180], source=source,
                 source_agent=agent[:120], status='needs_review', classification='restricted_local',
                 external_send_allowed=False, created=time.time(), extraction={}, bindings={}, issues=[], procedures=[], runs=[])
-            db.execute('INSERT INTO examples VALUES(?,?,?,?,?)',(item['id'],project,sha,1,json.dumps(item,ensure_ascii=False)))
+            db.execute('INSERT INTO examples(id,project,hash,revision,data,status) VALUES(?,?,?,?,?,?)',
+                       (item['id'],project,sha,1,json.dumps(item,ensure_ascii=False),'active'))
             self.audit(db,item,'import',{'hash':sha})
             return item
 
