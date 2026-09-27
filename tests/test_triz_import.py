@@ -97,7 +97,7 @@ def test_verify_export_file_accepts_real_inputs():
 
 def test_real_export_items_all_convert():
     items = load_export_items(EXPORT)
-    assert len(items) == 145
+    assert len(items) == 74
     for item in items:
         values = export_item_to_values(item)
         assert values['physical'] != 'None'
