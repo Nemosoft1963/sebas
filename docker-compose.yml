@@ -1,0 +1,165 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        INSTALL_EXPERIENCE_RAG: "1"
+    container_name: local-voice-ai-web
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:latest}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-1536}
+      OLLAMA_THINK: ${OLLAMA_THINK:-false}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0.2}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-300}
+      DATA_DIR: /data
+      WORKSPACE_ROOT: /workspace
+      FRONT_AI_PROVIDER: ${FRONT_AI_PROVIDER:-ollama}
+      FRONT_AI_REASONING_EFFORT: ${FRONT_AI_REASONING_EFFORT:-high}
+      FRONT_AI_MAX_TOKENS: ${FRONT_AI_MAX_TOKENS:-2400}
+      CONTEXT_TURNS: ${CONTEXT_TURNS:-12}
+      CONTEXT_MAX_CHARS: ${CONTEXT_MAX_CHARS:-24000}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-sol,gpt-5.2}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-6}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      XAI_MODEL: ${XAI_MODEL:-grok-4.6}
+      LLAMA_API_KEY: ${LLAMA_API_KEY:-}
+      META_MODEL: ${META_MODEL:-}
+      EXTERNAL_AI_TIMEOUT: ${EXTERNAL_AI_TIMEOUT:-180}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REFRESH_TOKEN: ${GOOGLE_OAUTH_REFRESH_TOKEN:-}
+      GOOGLE_MARKETING_ACCOUNT: ${GOOGLE_MARKETING_ACCOUNT:-}
+      GOOGLE_FORM_SYNC_INTERVAL: ${GOOGLE_FORM_SYNC_INTERVAL:-300}
+      GOOGLE_API_TIMEOUT: ${GOOGLE_API_TIMEOUT:-30}
+      GOOGLE_API_MAX_ATTEMPTS: ${GOOGLE_API_MAX_ATTEMPTS:-3}
+      CANVA_ACCESS_TOKEN: ${CANVA_ACCESS_TOKEN:-}
+      CANVA_BRAND_TEMPLATE_ID: ${CANVA_BRAND_TEMPLATE_ID:-}
+      CANVA_API_BASE: ${CANVA_API_BASE:-https://api.canva.com/rest/v1}
+      CANVA_API_TIMEOUT: ${CANVA_API_TIMEOUT:-30}
+      CANVA_API_MAX_ATTEMPTS: ${CANVA_API_MAX_ATTEMPTS:-4}
+      PUBLIC_OPERATOR_NAME: ${PUBLIC_OPERATOR_NAME:-Example Operator}
+      PUBLIC_OPERATOR_URL: ${PUBLIC_OPERATOR_URL:-https://example.com/}
+      PUBLIC_OPERATOR_ADDRESS: ${PUBLIC_OPERATOR_ADDRESS:-Example address}
+      GOOGLE_BROWSER_INTERNAL_URL: http://google-publisher-browser:8000
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "127.0.0.1:8099:8000"
+    volumes:
+      - app_data:/data
+      - "${WORKSPACE_PATH:-C:/Users/example/LocalCowork/workspace}:/workspace"
+    networks:
+      - local-cowork-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_TAG:-main}
+    container_name: local-cowork-open-webui
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?Run scripts/setup.ps1 to configure WEBUI_SECRET_KEY}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "127.0.0.1:${OPEN_WEBUI_PORT:-3000}:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    networks:
+      - local-cowork-net
+    restart: unless-stopped
+
+  cptr:
+    image: ghcr.io/open-webui/computer:${CPTR_TAG:-latest}
+    container_name: local-cowork-computer
+    environment:
+      CPTR_DATA_DIR: /data
+      CPTR_AUDIT_LOG_LEVEL: ${CPTR_AUDIT_LOG_LEVEL:-METADATA}
+      CPTR_LOG_LEVEL: ${CPTR_LOG_LEVEL:-INFO}
+      CPTR_LOG_FORMAT: ${CPTR_LOG_FORMAT:-text}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "127.0.0.1:${CPTR_PORT:-8000}:8000"
+    volumes:
+      - cptr_data:/data
+      - "${WORKSPACE_PATH:-C:/Users/example/LocalCowork/workspace}:/workspace"
+    working_dir: /workspace
+    networks:
+      - local-cowork-net
+    restart: unless-stopped
+
+  google-publisher-browser:
+    build:
+      context: .
+      dockerfile: docker/google-browser.Dockerfile
+      args:
+        CPTR_TAG: ${CPTR_TAG:-latest}
+    image: local-cowork/google-publisher-browser:${CPTR_TAG:-latest}
+    container_name: local-cowork-google-publisher-browser
+    environment:
+      CPTR_DATA_DIR: /data
+      CPTR_AUDIT_LOG_LEVEL: ${CPTR_AUDIT_LOG_LEVEL:-METADATA}
+      CPTR_LOG_LEVEL: ${CPTR_LOG_LEVEL:-INFO}
+      CPTR_LOG_FORMAT: ${CPTR_LOG_FORMAT:-text}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "127.0.0.1:${GOOGLE_BROWSER_PORT:-8010}:8000"
+    volumes:
+      - google_publisher_browser_data:/data
+    shm_size: "1gb"
+    networks:
+      - local-cowork-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "command -v chromium >/dev/null && test -S /tmp/.X11-unix/X99 && python -c \"import urllib.request; data=urllib.request.urlopen('http://localhost:8000/api/config', timeout=5).read(); assert b'needs_setup' in data\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["phase2"]
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - local-cowork-net
+
+volumes:
+  app_data:
+    name: localsaporter_app_data
+  qdrant_data:
+    name: localsaporter_qdrant_data
+  open_webui_data:
+    name: localsaporter_open_webui_data
+  cptr_data:
+    name: localsaporter_cptr_data
+  google_publisher_browser_data:
+    name: localsaporter_google_publisher_browser_data
+
+networks:
+  local-cowork-net:
+    name: localsaporter_local_cowork_net
+    driver: bridge

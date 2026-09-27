@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Local Supporter Google Sites Draft Assistant",
+  "version": "1.0.0",
+  "description": "Places an approved Local Supporter landing-page draft without publishing it.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://web:8000/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{"matches": ["https://sites.google.com/*"], "js": ["content.js"], "run_at": "document_idle"}]
+}

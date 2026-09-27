@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://altshuller.ru/world/eng/technique1.asp",
+    "title": "40 Inventive Principles for Solving Technical Contradictions",
+    "publisher": "Official G.S. Altshuller Foundation",
+    "publication": "1974; English translation 1997",
+    "claim": "発明原理には分割、抽出、事前作用、逆転、フィードバック、仲介などが含まれる。今回のソフトウェア向け適用例は独自設計である。",
+    "capture": "公開された40原理のうち、データ処理の構成変更に用いる12原理の名称と番号を確認した。",
+    "retrieved": "2026-09-18T16:48:48.818719+00:00",
+    "kind": "Web source",
+    "capture_kind": "verified paraphrase",
+    "capture_sha256": "3ff21ce9767979cde60f7bcf90f4e7c826f068fdc6b9b847ac9cb51dfcdec23c"
+  },
+  {
+    "url": "https://www.aitriz.org/articles/TRIZ_Body_of_Knowledge.pdf",
+    "title": "TRIZ Body of Knowledge",
+    "publisher": "MATRIZ / Altshuller Institute / ETRIA collaborative body of knowledge",
+    "publication": "unknown",
+    "claim": "理想最終結果、資源、技術的・物理的矛盾、発明原理、分離原理をTRIZの構成要素として列挙する。",
+    "capture": "3〜4ページで基本概念と矛盾解消手法を確認した。今回の実装は選択した手法を用いる支援機能であり、ARIZ全体や完全な矛盾マトリクスではない。",
+    "retrieved": "2026-09-18T16:48:48.819215+00:00",
+    "kind": "Web source",
+    "capture_kind": "verified paraphrase",
+    "capture_sha256": "7c442df30ac037e24a0a1ef678331bc7b3f8a518e12a57fc0ecc1bd77dae14fe"
+  }
+]

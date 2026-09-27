@@ -1,0 +1,7 @@
+{
+  "projects": {},
+  "embedding_model": "",
+  "embedding_revision": "",
+  "embedding_url": "http://127.0.0.1:11434",
+  "budget": {"daily_calls": 4, "daily_micro_usd": 1000000, "per_call_micro_usd": 250000}
+}

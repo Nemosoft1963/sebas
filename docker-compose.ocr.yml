@@ -1,0 +1,39 @@
+# OCRフォールバック専用。既存 docker-compose.yml は変更しない。
+# `docker compose -f docker-compose.yml -f docker-compose.ocr.yml --profile ocr up` 用。
+services:
+  web:
+    environment:
+      LOCALSAPORTER_OCR_ENABLED: "1"
+      LOCALSAPORTER_OCR_URL: http://127.0.0.1:8080
+
+  paddleocr-vlm:
+    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-genai-vllm-server@sha256:5713fd30ab76094b7b6a20d95fd8e26fa9dc452bcc90ccb16f1fb056bd2a0f4d
+    profiles: ["ocr"]
+    restart: "no"
+    network_mode: "service:web"
+    command: ["/bin/bash", "-c", "paddleocr genai_server --model_name PaddleOCR-VL-1.6-0.9B --host 127.0.0.1 --port 8081 --backend vllm"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  paddleocr-doc-parser:
+    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-vl@sha256:ad0b1f056a76967f9191cd06398e8babb21b49a4673a28c3de5fd31f481884db
+    profiles: ["ocr"]
+    restart: "no"
+    network_mode: "service:web"
+    depends_on:
+      - paddleocr-vlm
+    volumes:
+      - ./docker/ocr/pipeline_config_vllm.yaml:/home/paddleocr/pipeline_config_vllm.yaml:ro
+    command: ["paddlex", "--serve", "--pipeline", "/home/paddleocr/pipeline_config_vllm.yaml", "--host", "127.0.0.1", "--port", "8080"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

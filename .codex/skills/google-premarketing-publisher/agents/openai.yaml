@@ -1,0 +1,6 @@
+interface:
+  display_name: "Google Premarketing Publisher"
+  short_description: "承認済みキャンペーンをGoogleで公開・回答同期"
+  default_prompt: "Use $google-premarketing-publisher to publish the approved campaign and start consented lead synchronization."
+policy:
+  allow_implicit_invocation: true

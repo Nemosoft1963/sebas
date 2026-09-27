@@ -1,0 +1,10 @@
+llm:
+  url: http://127.0.0.1:11434
+  model: gpt-oss:20b
+asr:
+  backend: qwen
+  model: Qwen/Qwen3-ASR-0.6B
+tts:
+  backend: qwen
+  model: Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+  speaker: Ono_Anna

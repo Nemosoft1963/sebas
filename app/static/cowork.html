@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Local Cowork</title>
+<style>
+:root{color-scheme:dark;--bg:#08111f;--panel:#111d31;--line:#2b3d59;--text:#edf4ff;--muted:#9dafc6;--ok:#55d6ae;--bad:#ff7f91;--accent:#71a7ff}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,"Yu Gothic UI",sans-serif;background:radial-gradient(circle at 10% 0,#19345b,var(--bg) 45%);color:var(--text)}
+main{max-width:1080px;margin:auto;padding:32px 20px 48px}header{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}h1{font-size:28px;margin:0}.lead{color:var(--muted);margin-top:6px}.back{color:var(--text);text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:9px 14px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 18px 45px #0005}.card h2{font-size:17px;margin:0 0 8px}.card p{color:var(--muted);font-size:13px;line-height:1.6;min-height:62px}.state{display:flex;align-items:center;gap:8px;font-size:13px;margin:14px 0}.dot{width:9px;height:9px;border-radius:50%;background:#738098}.dot.ok{background:var(--ok);box-shadow:0 0 12px var(--ok)}.dot.bad{background:var(--bad)}.open{display:block;text-align:center;text-decoration:none;background:var(--accent);color:#07111f;font-weight:750;border-radius:10px;padding:10px}
+.info{margin-top:16px}.info h2{margin-top:0}.flow{display:grid;grid-template-columns:1fr 1fr;gap:16px}.info ul{color:var(--muted);line-height:1.8;padding-left:20px}.security{font-size:13px;color:var(--muted)}code{background:#0a1424;border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:#cfe2ff}
+@media(max-width:760px){header{align-items:flex-start;flex-direction:column}.grid,.flow{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>Local Cowork</h1><div class="lead">ローカルLLMが統制する、音声・複数AI・Workspace作業環境</div></div><a class="back" href="/">← 統合フロントへ</a></header>
+<section class="grid">
+<article class="card"><h2>統合フロント</h2><p>ローカルLLM統制、音声入出力、プロジェクト別共有コンテキスト、複数外部AI調査。</p><div class="state"><i id="controller-dot" class="dot"></i><span id="controller-state">確認中</span></div><a class="open" href="/">開く</a></article>
+<article class="card"><h2>Open WebUI</h2><p>ローカルモデル切替、通常チャット、Knowledge/RAG、Computer Agent接続。</p><div class="state"><i id="open-webui-dot" class="dot"></i><span id="open-webui-state">確認中</span></div><a class="open" href="http://127.0.0.1:3000" target="_blank" rel="noopener">開く</a></article>
+<article class="card"><h2>Computer</h2><p>制限Workspace内のファイル、Editor、Terminal、Git、Agent、MCP。</p><div class="state"><i id="computer-dot" class="dot"></i><span id="computer-state">確認中</span></div><a class="open" href="http://127.0.0.1:8000" target="_blank" rel="noopener">開く</a></article>
+</section>
+<section class="card info"><div class="flow"><div><h2>Workspace</h2><ul><li><code>/workspace/inbox</code> 入力原本</li><li><code>/workspace/projects</code> 作業中</li><li><code>/workspace/knowledge</code> 参照資料</li><li><code>/workspace/output</code> 完成成果物</li></ul></div><div><h2>安全境界</h2><ul><li>UIはlocalhostだけに公開</li><li>Docker socketは非公開</li><li>ホスト全体をマウントしない</li><li>外部AI送信は明示的な調査時のみ</li></ul></div></div><div id="security" class="security"></div></section>
+</main>
+<script>
+const setState=(id,ready,detail)=>{const dot=document.querySelector('#'+id+'-dot'),text=document.querySelector('#'+id+'-state');dot.className='dot '+(ready?'ok':'bad');text.textContent=(ready?'稼働中':'停止中')+(detail?' / '+detail:'')};
+async function refresh(){try{const response=await fetch('/api/cowork/status',{cache:'no-store'}),body=await response.json();setState('controller',body.controller.ready,body.controller.model);for(const service of body.services){setState(service.id,service.ready,service.status_code?'HTTP '+service.status_code:'未接続')}document.querySelector('#security').textContent='Workspace: '+body.workspace+' / localhost only / Docker socket: none'}catch(error){setState('controller',false,'APIエラー');setState('open-webui',false);setState('computer',false)}}
+refresh();setInterval(refresh,5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "source_url": "http://host.docker.internal:8088/api/export",
+  "fetched_at": "2026-09-21T12:02:57+00:00",
+  "sha256": "8d9462aca905d7f9ae8ccd26d6afb1c1258951248bab5d4670be4b7587adabc2",
+  "item_count": 74,
+  "format": "localsaporter-problem-definition",
+  "note": "人間が承認済みの設計ネタのみ。各itemのevidenceに出典URL・取得時刻・SHA-256・引用を含む。"
+}

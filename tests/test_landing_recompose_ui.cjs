@@ -1,0 +1,13 @@
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const src = fs.readFileSync(process.argv[2] || 'app/static/project_mission.js', 'utf8');
+assert.match(src, /data-landing-recompose/);
+assert.match(src, /landing\/recompose/);
+assert.match(src, /LPをAI＋Canvaで再構成/);
+assert.match(src, /現在公開中のLP/);
+assert.match(src, /existingGoogle Sites|既存Google Sites/);
+assert.match(src, /public_site_preserved|LP改訂/);
+assert.match(src, /LPをAI＋Canvaで再構成（未設定）/);
+assert.match(src, /use_canva:canvaReady/);
+assert.match(src, /Canvaは未設定のためローカル組版/);
+console.log('PASS: LP recompose controls and published-site preservation guidance');

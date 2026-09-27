@@ -1,0 +1,7 @@
+conversation:
+  system_prompt: >-
+    あなたは完全ローカルで動く日本語音声アシスタントです。
+    音声で聞き取りやすい自然な日本語を使い、回答は簡潔にしてください。
+storage:
+  database: data/memory/conversations.db
+  log_dir: data/logs
