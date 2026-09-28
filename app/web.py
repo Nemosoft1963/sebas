@@ -3061,6 +3061,11 @@ async def ocr_review_css():
     return FileResponse(ROOT/'app'/'static'/'ocr_review.css', media_type='text/css', headers={'Cache-Control':'no-store'})
 
 
+@app.get('/static/experience_import.js')
+async def experience_import_js():
+    return FileResponse(ROOT/'app'/'static'/'experience_import.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
 class PlanFeedbackPayload(BaseModel):
     signature: str
     task_id: str | None = None
