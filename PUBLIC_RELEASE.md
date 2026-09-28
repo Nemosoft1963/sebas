@@ -17,4 +17,4 @@ Known incomplete acceptance work:
 - end-to-end acceptance for the vehicle monthly profit/loss workflow
 - remaining business confirmation questions
 
-No open-source license has been selected yet. Public visibility alone does not grant reuse rights.
+Sebas is licensed under the Apache License, Version 2.0. Third-party libraries and container images remain subject to their respective licenses.
