@@ -4,7 +4,8 @@
 
 ## [Unreleased]
 
-- 変更はありません。
+- 公開用ダッシュボード画像をREADMEへ追加
+- ReleaseごとのCycloneDX SBOM生成・添付を自動化
 
 ## [0.1.0-preview] - 2026-09-29
 
