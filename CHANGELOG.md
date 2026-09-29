@@ -10,6 +10,10 @@
 - ReleaseごとのCycloneDX SBOM生成・添付を自動化
 - CodeQLによるPython静的解析を追加
 - TrivyによるDockerイメージ検査とGitHub SecurityへのSARIF登録を追加
+- Google Sites公開確認の接続先固定とリダイレクト再検証によりSSRFを防止
+- 公開Web検索のドメイン境界判定と、経験記憶の文末処理を安全化
+- 実行コンテナのCritical・High脆弱性を解消し、不要なpip/setuptoolsを削除
+- 2026-09-29時点でCodeQL Critical/High 0件、Trivy Critical/High 0件を確認
 
 ## [0.1.0-preview] - 2026-09-29
 
