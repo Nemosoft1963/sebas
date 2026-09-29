@@ -8,6 +8,8 @@
 - システム構成図をREADMEへ追加
 - 目標・計画、OCRレビュー、成果物一覧、経験RAG登録の公開用画面を追加
 - ReleaseごとのCycloneDX SBOM生成・添付を自動化
+- CodeQLによるPython静的解析を追加
+- TrivyによるDockerイメージ検査とGitHub SecurityへのSARIF登録を追加
 
 ## [0.1.0-preview] - 2026-09-29
 
