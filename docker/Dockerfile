@@ -3,6 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libreoffice-calc fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
+RUN python -m pip install --no-cache-dir --upgrade "pip>=26.1.2"
 RUN pip install --no-cache-dir "fastapi>=0.116,<1" "uvicorn[standard]>=0.35,<1" "httpx>=0.27,<1" "numpy>=1.26,<3" "faster-whisper>=1.2,<2" "python-multipart>=0.0.20,<1" "pypdf>=5,<7" "pypdfium2>=4,<6" "pillow>=10,<13" "openpyxl==3.1.5"
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
 ARG INSTALL_EXPERIENCE_RAG=0

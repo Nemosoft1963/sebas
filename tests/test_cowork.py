@@ -109,7 +109,8 @@ def test_google_publisher_image_contains_managed_chrome_runtime():
     assistant = (ROOT / "docker" / "google-sites-extension" / "content.js").read_text(
         encoding="utf-8"
     )
-    assert "sites.google.com" in manifest
+    manifest_data = yaml.safe_load(manifest)
+    assert "https://sites.google.com/*" in manifest_data["content_scripts"][0]["matches"]
     assert "Local Supporter：下書きを配置" in assistant
     assert 'location.assign("https://sites.new")' in assistant
     assert "localSupporterSitesDraftPendingAt" in assistant

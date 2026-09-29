@@ -254,7 +254,8 @@ def _take_sentences(text: str, count: int, max_chars: int) -> str:
 
 
 def _strip_end(text: str) -> str:
-    return re.sub(r"[。．.\s]+$", "", text or "")
+    # rstrip is linear and avoids running a backtracking expression over imported text.
+    return (text or "").rstrip("。．. \t\r\n\v\f")
 
 
 def _build_lesson(fields: dict[str, str], fallback: str) -> str:

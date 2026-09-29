@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -924,8 +924,25 @@ async def register_google_site(project_id: str, campaign_id: str,
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            response = await client.get(public_url, headers={"User-Agent": "LocalSupporter/1.0"})
+        async with httpx.AsyncClient(
+            base_url="https://sites.google.com", timeout=15, follow_redirects=False,
+            headers={"User-Agent": "LocalSupporter/1.0"}, trust_env=False,
+        ) as client:
+            current = public_url
+            for _ in range(4):
+                validated = validate_google_site_url(current)
+                parsed = urlparse(validated)
+                # Keep the network authority fixed; accept only a validated path/query.
+                relative = httpx.URL(path=parsed.path or "/", query=parsed.query.encode())
+                response = await client.get(relative)
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    break
+                location = response.headers.get("location", "")
+                if not location:
+                    break
+                current = urljoin(validated, location)
+            else:
+                raise httpx.TooManyRedirects("Google Sites redirect limit exceeded")
     except httpx.HTTPError as exc:
         memory.update_campaign_site(
             project_id, campaign_id, "failed", site_publication_error="公開URLへ接続できません",

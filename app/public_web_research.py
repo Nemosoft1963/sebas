@@ -152,7 +152,10 @@ class _ArticleParser(HTMLParser):
 def _result_url(href: str) -> str:
     target = urljoin("https://html.duckduckgo.com/", href)
     parsed = urlsplit(target)
-    if parsed.hostname and parsed.hostname.endswith("duckduckgo.com"):
+    if parsed.hostname and (
+        parsed.hostname == "duckduckgo.com"
+        or parsed.hostname.endswith(".duckduckgo.com")
+    ):
         redirected = parse_qs(parsed.query).get("uddg", [])
         if redirected:
             target = unquote(redirected[0])

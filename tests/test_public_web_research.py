@@ -10,6 +10,7 @@ from app.project_manager import (
 from app.public_web_research import (
     PublicWebResearchError,
     PublicWebResearcher,
+    _result_url,
     validate_public_https_url,
 )
 from app.structured_planning import compile_plan, compile_task, contract_of, verify_outputs
@@ -27,6 +28,15 @@ async def test_public_url_guard_rejects_local_addresses():
 
     with pytest.raises(PublicWebResearchError, match="プライベート"):
         await validate_public_https_url("https://localhost/private", local_resolver)
+
+
+def test_duckduckgo_redirect_parser_requires_exact_domain_boundary():
+    target = "https://example.com/source"
+    assert _result_url(
+        "https://html.duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fsource"
+    ) == target
+    malicious = "https://duckduckgo.com.attacker.example/l/?uddg=https%3A%2F%2Fprivate.example"
+    assert _result_url(malicious) == malicious
 
 
 @pytest.mark.asyncio

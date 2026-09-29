@@ -45,7 +45,7 @@ def test_google_sites_copy_and_manifest_include_required_public_content():
     assert manifest['operator']['name'] == 'Example Operator'
     assert manifest['operator']['url'] == 'https://example.com/'
     assert '運営会社' in copy
-    assert 'https://example.com/' in copy
+    assert manifest['operator']['url'] in copy
 
 
 def test_google_sites_automation_payload_requires_manual_publish():
