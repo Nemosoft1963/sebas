@@ -154,6 +154,10 @@ Set-Location C:\LocalCowork\sebas
 | [セキュリティ](SECURITY.md) | 信頼境界、ネットワーク、秘密情報 |
 | [経験RAG設計](EXPERIENCE_RAG_DESIGN.md) | 成功手順の保存と再利用 |
 | [公開版について](PUBLIC_RELEASE.md) | 公開時に除外したデータと既知の未完了事項 |
+| [対応環境](SUPPORTED_ENVIRONMENTS.md) | 対応OS、推奨メモリ、GPU、容量 |
+| [変更履歴](CHANGELOG.md) | 利用者向けの主な変更 |
+| [第三者ライセンス](THIRD_PARTY_NOTICES.md) | 主な依存関係と再配布時の注意 |
+| [貢献方法](CONTRIBUTING.md) | Issue、開発、Pull Request手順 |
 
 ## 開発とテスト
 
