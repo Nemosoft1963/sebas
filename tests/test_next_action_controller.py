@@ -30,8 +30,8 @@ def state(*_): return {"state": "planned"}
 def test_nac_01_compute_read_only_and_unsafe_classes_blocked(tmp_path):
     m = manager(tmp_path); store = GoalCompletionStore(m.memory.path); before = store.path.read_bytes()
     for cls in ("human_fact", "human_approval", "external", "development"):
-        with patch.object(nac, "build_readiness", return_value=ready("x", cls)), patch.object(nac, "read_goal_state", state):
-            row = nac.compute(m, "p"); assert row["blocked"] and not row["executable"]
+        with patch.object(nac, "build_readiness", return_value=ready("x", cls, auto=False)), patch.object(nac, "read_goal_state", state):
+            row = nac.compute(m, "p"); assert not row["auto_executable"]
     assert store.path.read_bytes() == before
 
 

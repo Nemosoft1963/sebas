@@ -107,11 +107,160 @@ def development_blockers(manager, pid, detail=None):
             and b.get('disposition') in {'development', 'business_fact', 'unresolved'}]
 
 
-def enabled(manager,pid):
+def load_review_policy(manager):
     path=Path(manager.memory.path).parent/'goal_review_policy.json'
-    if not path.exists():return False
-    config=json.loads(path.read_text(encoding='utf-8-sig'))
+    if not path.exists():
+        return {}
+    try:
+        config=json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def enabled(manager,pid):
+    config=load_review_policy(manager)
+    if not config:
+        return False
     return config.get('projects',{}).get(pid,config.get('required',False)) is True
+
+
+def _policy_section(config, pid):
+    projects=config.get('projects') or {}
+    row=projects.get(pid)
+    if isinstance(row, dict):
+        return row
+    return config
+
+
+def review_pass_policy(manager, pid, provider_count=None):
+    """最低合格数と必須provider。未設定時は全社成功が必要（既存テスト互換）。"""
+    config=load_review_policy(manager)
+    section=_policy_section(config, pid)
+    raw_required=section.get('required_providers', config.get('required_providers') or [])
+    if isinstance(raw_required, str):
+        raw_required=[raw_required]
+    required=[str(x).strip() for x in (raw_required or []) if str(x).strip()]
+    raw_min=section.get('min_success_count', config.get('min_success_count'))
+    if raw_min is None:
+        min_count=provider_count
+    else:
+        try:
+            min_count=int(raw_min)
+        except (TypeError, ValueError):
+            min_count=provider_count
+    if provider_count is not None and min_count is not None:
+        min_count=max(0, min(int(min_count), int(provider_count)))
+    return {
+        'min_success_count': min_count,
+        'required_providers': list(dict.fromkeys(required)),
+    }
+
+
+def provider_review_outcomes(parsed, providers):
+    by={x.get('provider'): x for x in parsed or []}
+    rows=[]
+    for provider in providers:
+        row=by.get(provider) or {}
+        status=row.get('status')
+        if not row:
+            outcome,label='not_run','未実施'
+        elif status=='connection_error':
+            outcome,label='connection_error','接続エラー'
+        elif status=='pass' and not row.get('issues'):
+            outcome,label='success','成功'
+        elif status in {'conditional','fail','unverifiable'} or (status=='pass' and row.get('issues')):
+            outcome,label='content_fail','計画内容の指摘'
+        elif status=='unverified':
+            response=row.get('response') or {}
+            if response.get('ok'):
+                outcome,label='failed','解析不能'
+            elif response:
+                outcome,label='connection_error' if response.get('outcome')=='connection_error' else 'failed','接続エラー' if response.get('outcome')=='connection_error' else '未取得'
+            else:
+                outcome,label='not_run','未実施'
+        else:
+            outcome,label='failed','失敗'
+        item={
+            'id': provider, 'provider': provider, 'outcome': outcome, 'label': label,
+            'status': status or '',
+        }
+        if status=='connection_error' or outcome=='connection_error':
+            conn=row.get('connection_error') if isinstance(row.get('connection_error'), dict) else {}
+            response=row.get('response') if isinstance(row.get('response'), dict) else {}
+            item['error']=str(conn.get('error') or response.get('error') or '')[:500]
+            item['status_code']=conn.get('status_code') or response.get('status_code')
+            item['category']=conn.get('category') or response.get('error_category') or 'connection_error'
+        rows.append(item)
+    return rows
+
+
+def evaluate_external_review_status(parsed, providers, policy):
+    selected=list(dict.fromkeys(providers or []))
+    required=list(dict.fromkeys(policy.get('required_providers') or []))
+    needed=policy.get('min_success_count')
+    if needed is None:
+        needed=len(selected)
+    try:
+        needed=int(needed)
+    except (TypeError, ValueError):
+        needed=len(selected)
+    if selected:
+        needed=max(0, min(needed, len(selected)))
+    else:
+        needed=max(0, needed)
+    outcomes={row['id']: row['outcome'] for row in provider_review_outcomes(parsed, selected)}
+    success_count=sum(1 for provider in selected if outcomes.get(provider)=='success')
+    has_content=any(outcomes.get(provider)=='content_fail' for provider in selected)
+    required_connection=[]
+    for provider in required:
+        outcome=outcomes.get(provider)
+        if provider not in selected or outcome in {'connection_error','not_run','failed'}:
+            required_connection.append(provider)
+    required_connection=list(dict.fromkeys(required_connection))
+    if required_connection:
+        names='、'.join(required_connection)
+        return {
+            'status': 'connection_failed',
+            'stop_kind': 'connection_settings',
+            'stop_reason': (
+                f'必須の外部AI（{names}）の接続に失敗したため停止しました。'
+                '計画内容の欠陥ではなく接続設定の問題です。APIキー・認証・レート制限を確認してください。'
+            ),
+            'success_count': success_count,
+            'required_count': needed,
+        }
+    required_unmet=[p for p in required if outcomes.get(p)!='success']
+    if success_count>=needed and not required_unmet:
+        return {
+            'status': 'passed', 'stop_kind': '', 'stop_reason': '',
+            'success_count': success_count, 'required_count': needed,
+        }
+    by={x.get('provider'): x for x in parsed or []}
+    all_unverified_no_ok = bool(selected) and all(
+        (by.get(provider) or {}).get('status') in {'unverified', 'connection_error'}
+        and not ((by.get(provider) or {}).get('response') or {}).get('ok')
+        for provider in selected
+    )
+    only_connection_shortfall = (
+        not has_content
+        and any(outcomes.get(provider)=='connection_error' for provider in selected)
+        and not any(
+            (by.get(provider) or {}).get('status')=='unverified'
+            and ((by.get(provider) or {}).get('response') or {}).get('ok')
+            for provider in selected
+        )
+    )
+    if (all_unverified_no_ok or only_connection_shortfall) and not has_content:
+        return {
+            'status': 'awaiting_external', 'stop_kind': 'connection_settings',
+            'stop_reason': '外部AIの接続に失敗したため検証を完了できません。計画内容への指摘ではありません。',
+            'success_count': success_count, 'required_count': needed,
+        }
+    return {
+        'status': 'not_passed', 'stop_kind': 'plan', 'stop_reason': '',
+        'success_count': success_count, 'required_count': needed,
+    }
 
 
 def plan_snapshot(manager,pid,detail=None):
@@ -134,8 +283,11 @@ def require_review(manager,pid,detail=None):
     if not enabled(manager,pid):return
     _,signature=plan_snapshot(manager,pid,detail)
     row=ReviewStore(manager.memory.path).get(pid,'plan',signature)
-    if not row or row.get('status')!='passed':
-        raise ValueError('外部AIによる'+('詳細' if detail else '全体')+'計画の目標適合性検証が未完了または不合格です。「目標検証・RAG」で現行版を確認してください')
+    if row and row.get('status')=='passed':
+        return
+    if row and row.get('status')=='connection_failed':
+        raise ValueError(row.get('stop_reason') or '必須の外部AIの接続に失敗したため実行を開始できません。計画内容の問題ではなく接続設定の問題です。')
+    raise ValueError('外部AIによる'+('詳細' if detail else '全体')+'計画の目標適合性検証が未完了または不合格です。「目標検証・RAG」で現行版を確認してください')
 
 
 def detail_payloads(manager,pid):
@@ -248,8 +400,12 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
             if saved:
                 parsed.append(saved);continue
             r=next((x for x in responses if x.get('id')==provider),{})
+            from app.external_ai import connection_error_from_payload
+            conn=connection_error_from_payload(r)
             verdict={'provider':provider,'status':'unverified','issues':[]}
-            if r.get('ok'):
+            if conn:
+                verdict.update(status='connection_error',connection_error=conn,issues=[])
+            elif r.get('ok'):
                 try:
                     from app.structured_planning import decode_object
                     body=decode_object(r.get('review',''))
@@ -257,9 +413,22 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
                         verdict.update(status=body['verdict'],issues=body['issues'])
                 except (ValueError,TypeError):pass
             verdict['response']=r;parsed.append(verdict)
-        passed=all(x['status']=='pass' and not x['issues'] for x in parsed)
-        if plan_snapshot(manager,pid,selected_detail(manager,pid,tid))[1]!=signature:passed=False
-        result={'status':'passed' if passed else ('awaiting_external' if all(x['status']=='unverified' and not x.get('response',{}).get('ok') for x in parsed) else 'not_passed'),'reviews':parsed,'packet':packet,'finished':time.time(),'pending_providers':[x['provider'] for x in parsed if x['status']=='unverified'],'job_id':job['id'] if job else ''}
+        policy=review_pass_policy(manager,pid,len(providers))
+        judged=evaluate_external_review_status(parsed,providers,policy)
+        if plan_snapshot(manager,pid,selected_detail(manager,pid,tid))[1]!=signature:
+            judged={'status':'not_passed','stop_kind':'plan','stop_reason':'','success_count':0,'required_count':policy.get('min_success_count')}
+        connection_errors=[{
+            'provider':x['provider'],
+            'status_code':(x.get('connection_error') or {}).get('status_code') or (x.get('response') or {}).get('status_code'),
+            'category':(x.get('connection_error') or {}).get('category') or (x.get('response') or {}).get('error_category') or 'connection_error',
+            'error':((x.get('connection_error') or {}).get('error') or (x.get('response') or {}).get('error') or '')[:2000],
+        } for x in parsed if x.get('status')=='connection_error']
+        result={'status':judged['status'],'reviews':parsed,'packet':packet,'finished':time.time(),
+                'pending_providers':[x['provider'] for x in parsed if x['status'] in {'unverified','connection_error'}],
+                'job_id':job['id'] if job else '','provider_outcomes':provider_review_outcomes(parsed,providers),
+                'connection_errors':connection_errors,'pass_policy':policy,
+                'success_count':judged.get('success_count',0),'required_count':judged.get('required_count'),
+                'stop_kind':judged.get('stop_kind') or '','stop_reason':judged.get('stop_reason') or ''}
     except BaseException as exc:
         store.put(pid,'plan',signature,{'status':'unverified','error':type(exc).__name__,'packet':packet,'reviews':retained})
         if job:finish_job(store,pid,job['id'],'failed',blocking_error=type(exc).__name__)
@@ -268,9 +437,13 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
     queued=store.get(pid,'plan_queue',signature)
     if queued and queued.get('status')!='cancelled' and result['status']!='waiting_budget':
         queued['status']='finished';store.put(pid,'plan_queue',signature,queued)
-    if job:finish_job(store,pid,job['id'],'succeeded' if result['status']=='passed' else 'failed',last_completed_stage='external_review')
+    job_status='succeeded' if result['status']=='passed' else ('needs_attention' if result['status']=='connection_failed' else 'failed')
+    if job:finish_job(store,pid,job['id'],job_status,last_completed_stage='external_review',
+                      blocking_error=result.get('stop_reason') or '')
     save_orchestration(store,pid,last_completed_stage='external_review',plan_signature=signature,
-                       resume_from='plan_approval' if result['status']=='passed' else 'external_review')
+                       resume_from='plan_approval' if result['status']=='passed' else 'external_review',
+                       blocking_error=result.get('stop_reason') or '',
+                       stop_kind=result.get('stop_kind') or '')
     if result['status']=='passed':
         revision=store.get(pid,'revision',signature) or {}
         if revision.get('lifecycle')=='revalidation_pending' or revision.get('status')=='applied':
@@ -388,6 +561,22 @@ def review_budget(manager,pid):
             'reset_at':(int(time.time())//86400+1)*86400}
 
 
+def all_reviews_history(manager, pid):
+    """履歴表示専用: legacy review を含めた全レビュー・指摘の閲覧用履歴を取得する。"""
+    store = ReviewStore(manager.memory.path)
+    mission = manager.memory.get_mission(pid)
+    legacy = [dict(x, origin='legacy_mission', source_plan_version=None) for x in mission.get('plan_reviews', []) if isinstance(x, dict)]
+    legacy_store = [payload for _, payload in store.list(pid, 'legacy_feedback')]
+    plan_reviews = [{'signature': sig, **payload} for sig, payload in store.list(pid, 'plan')]
+    user_feedbacks = [{'signature': sig, **payload} for sig, payload in store.list(pid, 'feedback')]
+    return {
+        'mission_legacy_reviews': legacy,
+        'legacy_feedback_store': legacy_store,
+        'plan_reviews': plan_reviews,
+        'user_feedbacks': user_feedbacks,
+    }
+
+
 def execution_gate(manager,pid):
     try:
         require_review(manager,pid)
@@ -396,4 +585,14 @@ def execution_gate(manager,pid):
         text=str(exc)
         if '追加開発' in text or '業務事実' in text:
             return {'blocked':True,'reason':text}
+        if '接続設定' in text or '接続に失敗' in text:
+            return {'blocked':True,'reason':text,'stop_kind':'connection_settings'}
         return {'blocked':True,'reason':'計画の人間承認は記録できます。外部AIによる現行版の検証が未完了または未合格のため、実行開始はできません。「目標検証・人間確認・RAG」で指摘対応と再検証を行ってください。'}
+
+
+def require_human_final_confirmation_ready(gate_result: dict) -> None:
+    """Reject human final confirmation until every criterion is independently PASS."""
+    from app.completion_gate import criteria_ready_for_human_confirmation
+
+    if not criteria_ready_for_human_confirmation(gate_result):
+        raise ValueError("COMPLETION_GATE_FAILED: 全達成条件がPASSした後にだけ最終確認できます")

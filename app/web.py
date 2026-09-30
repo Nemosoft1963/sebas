@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -373,7 +373,7 @@ async def lifespan(_: FastAPI):
         await orchestrator.shutdown()
 
 
-app = FastAPI(title="セバス", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Local Cowork + Local Voice AI", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/")
@@ -695,7 +695,7 @@ def _send_approved_email(action: dict) -> str:
         raise RuntimeError("SMTP_HOST、SMTP_FROM、有効な送信先が必要です")
     subject, separator, body = action["content"].partition("\n")
     if not separator:
-        subject, body = "セバスからのご連絡", subject
+        subject, body = "Local Coworkからのご連絡", subject
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient
@@ -924,25 +924,8 @@ async def register_google_site(project_id: str, campaign_id: str,
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        async with httpx.AsyncClient(
-            base_url="https://sites.google.com", timeout=15, follow_redirects=False,
-            headers={"User-Agent": "LocalSupporter/1.0"}, trust_env=False,
-        ) as client:
-            current = public_url
-            for _ in range(4):
-                validated = validate_google_site_url(current)
-                parsed = urlparse(validated)
-                # Keep the network authority fixed; accept only a validated path/query.
-                relative = httpx.URL(path=parsed.path or "/", query=parsed.query.encode())
-                response = await client.get(relative)
-                if response.status_code not in {301, 302, 303, 307, 308}:
-                    break
-                location = response.headers.get("location", "")
-                if not location:
-                    break
-                current = urljoin(validated, location)
-            else:
-                raise httpx.TooManyRedirects("Google Sites redirect limit exceeded")
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(public_url, headers={"User-Agent": "LocalSupporter/1.0"})
     except httpx.HTTPError as exc:
         memory.update_campaign_site(
             project_id, campaign_id, "failed", site_publication_error="公開URLへ接続できません",
@@ -2955,7 +2938,7 @@ async def post_next_action_execute(project_id: str, payload: NextActionExecutePa
 @app.get('/api/projects/{project_id}/goal-review')
 async def goal_review_state(project_id: str):
     require_project(project_id)
-    from app.goal_review import ReviewStore,plan_snapshot,execution_snapshot,detail_payloads,public_structure,enabled
+    from app.goal_review import ReviewStore,plan_snapshot,execution_snapshot,detail_payloads,public_structure,enabled,all_reviews_history,provider_review_outcomes,review_pass_policy
     store=ReviewStore(memory.path);snapshot,signature=plan_snapshot(orchestrator,project_id)
     proof,result_signature,issues=execution_snapshot(orchestrator,project_id)
     from app.plan_feedback import issues_for
@@ -2973,10 +2956,26 @@ async def goal_review_state(project_id: str):
     orch=orchestration_view(orchestrator,project_id)
     jobs=active_jobs(store,project_id)
     readiness=build_readiness(orchestrator,project_id)
-    return {'budget':review_budget(orchestrator,project_id),'revision_history':revision_history,'required':enabled(orchestrator,project_id),'public_draft':__import__('app.goal_review_queue',fromlist=['public_draft']).public_draft(snapshot),'plan_signature':signature,'plan_review':store.get(project_id,'plan',signature),
+    plan_review=store.get(project_id,'plan',signature)
+    if plan_review:
+        plan_review=dict(plan_review)
+        providers=list(dict.fromkeys(memory.get_mission(project_id).get('external_providers') or [x.get('provider') for x in plan_review.get('reviews') or [] if x.get('provider')]))
+        plan_review.setdefault('provider_outcomes',provider_review_outcomes(plan_review.get('reviews') or [], providers))
+        plan_review.setdefault('pass_policy',review_pass_policy(orchestrator,project_id,len(providers)))
+        if 'connection_errors' not in plan_review:
+            plan_review['connection_errors']=[{
+                'provider':x.get('provider'),'status_code':(x.get('connection_error') or {}).get('status_code'),
+                'category':(x.get('connection_error') or {}).get('category') or 'connection_error',
+                'error':((x.get('connection_error') or {}).get('error') or (x.get('response') or {}).get('error') or '')[:2000],
+            } for x in plan_review.get('reviews') or [] if x.get('status')=='connection_error']
+    return {'budget':review_budget(orchestrator,project_id),'revision_history':revision_history,'required':enabled(orchestrator,project_id),'public_draft':__import__('app.goal_review_queue',fromlist=['public_draft']).public_draft(snapshot),'plan_signature':signature,'plan_review':plan_review,
             'feedback':issues_for(orchestrator,project_id,signature),'revision':store.get(project_id,'revision',signature),'public_structure':public_structure(snapshot),'details':details,'result_signature':result_signature,'result_issues':issues,
             'artifacts':proof['artifacts'],'result_review':store.get(project_id,'result',result_signature),'history':history,
+            'history_all':all_reviews_history(orchestrator,project_id),
             'send_allowed':send_allowed(orchestrator,project_id),'active_job':readiness.get('active_job'),
+            'replan_failure':readiness.get('replan_failure'),
+            'pipeline_stage':readiness.get('pipeline_stage'),
+            'pipeline_next_action':readiness.get('pipeline_next_action'),
             'resume_from':readiness.get('resume_from') or orch.get('resume_from') or '',
             'last_completed_stage':readiness.get('last_completed_stage') or orch.get('last_completed_stage') or '',
             'blocking_error':readiness.get('blocking_error') or orch.get('blocking_error') or ''}
@@ -3073,14 +3072,14 @@ async def ocr_review_js():
     return FileResponse(ROOT/'app'/'static'/'ocr_review.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
 
 
-@app.get('/static/ocr_review.css')
-async def ocr_review_css():
-    return FileResponse(ROOT/'app'/'static'/'ocr_review.css', media_type='text/css', headers={'Cache-Control':'no-store'})
-
-
 @app.get('/static/experience_import.js')
 async def experience_import_js():
     return FileResponse(ROOT/'app'/'static'/'experience_import.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+@app.get('/static/ocr_review.css')
+async def ocr_review_css():
+    return FileResponse(ROOT/'app'/'static'/'ocr_review.css', media_type='text/css', headers={'Cache-Control':'no-store'})
 
 
 class PlanFeedbackPayload(BaseModel):
@@ -3090,13 +3089,28 @@ class PlanFeedbackPayload(BaseModel):
     text: str = Field(default='',max_length=16000)
     candidate_id: str = ''
     idempotency_key: str = Field(default='',max_length=80)
+    criterion: str = Field(default='',max_length=80)
+
+
+class LegacyFeedbackImportPayload(BaseModel):
+    signature: str
+    legacy_id: str
+    task_id: str | None = None
 
 
 @app.post('/api/projects/{project_id}/goal-review/feedback/import')
 async def import_plan_feedback(project_id: str,payload: PlanFeedbackPayload):
     require_project(project_id)
     from app.plan_feedback import import_feedback
-    try:return import_feedback(orchestrator,project_id,payload.signature,payload.provider,payload.text,payload.task_id)
+    try:return import_feedback(orchestrator,project_id,payload.signature,payload.provider,payload.text,payload.task_id,payload.criterion)
+    except (ValueError,KeyError) as exc:raise HTTPException(409,str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/feedback/import-legacy')
+async def import_legacy_plan_feedback(project_id: str, payload: LegacyFeedbackImportPayload):
+    require_project(project_id)
+    from app.plan_feedback import import_legacy_review
+    try:return import_legacy_review(orchestrator,project_id,payload.signature,payload.legacy_id,payload.task_id)
     except (ValueError,KeyError) as exc:raise HTTPException(409,str(exc)) from exc
 
 
@@ -3468,7 +3482,6 @@ class ImportSuccessCasesPayload(BaseModel):
     items: list[dict] = Field(min_length=1, max_length=200)
     proof: str = Field(default="成功事例収集エージェントでの人手レビュー済み")
     actor: str = Field(min_length=1)
-    confirm_rag: bool = False
 
 
 @app.post('/api/projects/{project_id}/experience/import-success-cases')
@@ -3476,15 +3489,48 @@ async def import_success_cases_api(project_id: str, payload: ImportSuccessCasesP
     require_project(project_id)
     if not payload.actor.strip():
         raise HTTPException(422, "actor is required")
-    if payload.confirm_rag is not True:
-        raise HTTPException(409, detail={"code": "RAG_NOT_CONFIRMED", "message": "confirm_rag=true is required"})
     from app.experience_memory import import_success_cases, MemoryPolicyError
     try:
-        return import_success_cases(DB_PATH, project_id, payload.items, payload.proof, payload.actor, confirm_rag=payload.confirm_rag)
+        return import_success_cases(DB_PATH, project_id, payload.items, payload.proof, payload.actor)
     except MemoryPolicyError as exc:
         raise HTTPException(409, detail={"code": "EXPERIENCE_OFF", "message": str(exc)}) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+class RecoveryApplyPayload(BaseModel):
+    reviewer: str = Field(min_length=1, max_length=100)
+    note: str = Field(default='', max_length=4000)
+    expected_version: int | None = None
+
+
+@app.get('/api/projects/{project_id}/plan/recovery/preview')
+@app.post('/api/projects/{project_id}/plan/recovery/preview')
+async def get_plan_recovery_preview(project_id: str):
+    require_project(project_id)
+    from app.plan_recovery import preview_recovery
+    try:
+        return preview_recovery(orchestrator, project_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/plan/recovery/apply')
+async def post_plan_recovery_apply(project_id: str, payload: RecoveryApplyPayload):
+    require_project(project_id)
+    actor = payload.reviewer.strip()
+    if not actor:
+        raise HTTPException(422, 'reviewer is required')
+    from app.plan_recovery import apply_recovery
+    try:
+        return apply_recovery(
+            orchestrator, project_id,
+            reviewer=actor,
+            note=payload.note,
+            expected_current_version=payload.expected_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')

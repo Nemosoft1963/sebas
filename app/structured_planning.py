@@ -5,10 +5,15 @@ import json
 import re
 import csv
 import io
+import unicodedata
 from copy import deepcopy
 
 SCHEMA = "local-cowork-plan/v1"
 MAX_CRITERIA = 18  # Reserve one preparation task and one final verification task.
+EVAL_TASK_RE = re.compile(
+    r"計画草案の評価と改善提案|計画(?:案|草案)?の評価(?:と改善提案)?|改善提案のみ",
+)
+FINAL_TASK_RE = re.compile(r"最終検証|final[_\s-]*verification", re.I)
 
 
 def extract_criteria(goal: str, success: str) -> list[str]:
@@ -61,6 +66,39 @@ def requires_google_site_publication(criterion: str) -> bool:
     ))
 
 
+EXTERNAL_ACTION_RE = re.compile(
+    r"(?:実際の営業活動|顧客(?:へ|に).{0,20}(?:送信|連絡|提案)|商談.{0,10}実施|"
+    r"PoC.{0,10}実施|契約締結|仮説検証.{0,20}実行|"
+    r"Google\s*Forms|Google\s*Sites|SNS.{0,40}(?:投稿|公開)|リード取得)",
+    re.I | re.S,
+)
+VERDICT_HEADING_RE = re.compile(
+    r"(?m)^#{2,6}\s+((?:SC|C)\d{2}(?:\s*[,、]\s*(?:SC|C)\d{2})*)\s*[—\-ー–−]\s*(PASS|FAIL|BLOCKED|UNTESTABLE)\b",
+    re.I,
+)
+VERDICT_LINE_RE = re.compile(
+    r"(?m)^\s*[-*]\s*((?:SC|C)\d{2})\s*[:：]\s*(PASS|FAIL|BLOCKED|UNTESTABLE)\b",
+    re.I,
+)
+
+
+def criterion_requires_external_action(criterion: str) -> bool:
+    text = str(criterion or "")
+    return bool(EXTERNAL_ACTION_RE.search(text) or requires_google_site_publication(text))
+
+
+def parse_criterion_verdicts(content: str) -> dict[str, str]:
+    """Read explicit per-criterion verdicts from a final-verification document."""
+    verdicts: dict[str, str] = {}
+    for match in VERDICT_HEADING_RE.finditer(content or ""):
+        status = match.group(2).upper()
+        for cid in re.findall(r"(?:SC|C)\d{2}", match.group(1)):
+            verdicts[cid] = status
+    for match in VERDICT_LINE_RE.finditer(content or ""):
+        verdicts[match.group(1)] = match.group(2).upper()
+    return verdicts
+
+
 def requires_public_web_research(criterion: str) -> bool:
     return bool(re.search(
         r"(?:(?:web|ウェブ|インターネット|オンライン).{0,40}(?:検索|調査|収集|取得|確認)|"
@@ -91,6 +129,133 @@ def public_web_query(criterion: str) -> str:
     )
     compact = re.sub(r"\s+", " ", compact).strip()
     return compact[:180]
+
+
+def normalize_title(title: str) -> str:
+    """Comparison form that absorbs whitespace and common notation differences."""
+    text = unicodedata.normalize("NFKC", str(title or ""))
+    text = text.casefold()
+    text = re.sub(r"[\s　]+", "", text)
+    text = re.sub(r"[「」『』【】\[\]()（）〔〕〈〉<>・,，、。.\-‐–—_/\\:：;；]+", "", text)
+    return text
+
+
+def is_evaluation_task(task: dict) -> bool:
+    blob = " ".join(str(task.get(key) or "") for key in ("task_key", "title"))
+    if FINAL_TASK_RE.search(str(task.get("title") or "")):
+        return False
+    return bool(EVAL_TASK_RE.search(blob))
+
+
+def is_final_verification_task(task: dict) -> bool:
+    if str(task.get("task_key") or "") == "final_verification":
+        return True
+    contract = contract_of(task)
+    if contract and contract.get("final_verification"):
+        return True
+    return bool(FINAL_TASK_RE.search(str(task.get("title") or "")))
+
+
+def _uniquify_task_titles(tasks: list[dict]) -> None:
+    seen: set[str] = set()
+    for task in tasks:
+        original = str(task.get("title") or "").strip() or str(task.get("task_key") or "task")
+        title = original
+        norm = normalize_title(title)
+        extra = 2
+        while norm and norm in seen:
+            title = f"{original} ({task.get('task_key')})" if extra == 2 else f"{original} ({extra})"
+            extra += 1
+            norm = normalize_title(title)
+        task["title"] = title
+        if norm:
+            seen.add(norm)
+
+
+def inspect_plan_structure(
+    plan: dict,
+    expected_ids: set[str] | None = None,
+    review_count: int = 0,
+) -> dict:
+    """Post-generation structural checks that keep review text from exploding the plan."""
+    errors: list[str] = []
+    tasks = plan.get("tasks") or []
+    if not isinstance(tasks, list):
+        return {"passed": False, "issues": ["tasks_missing"], "criterion_ids": []}
+    seen_keys: set[str] = set()
+    seen_titles: set[str] = set()
+    eval_keys: list[str] = []
+    final_keys: list[str] = []
+    exec_by_criterion: dict[str, list[str]] = {}
+    artifacts_by_criterion: dict[str, list[str]] = {}
+    verify_keys: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            errors.append("invalid task")
+            continue
+        key = str(task.get("task_key") or "")
+        if not key:
+            errors.append("missing task_key")
+            continue
+        if key in seen_keys:
+            errors.append(f"{key}: duplicate task_key")
+        seen_keys.add(key)
+        norm = normalize_title(task.get("title") or "")
+        if norm:
+            if norm in seen_titles:
+                errors.append(f"{key}: duplicate normalized title")
+            seen_titles.add(norm)
+        evaluation = is_evaluation_task(task)
+        final = is_final_verification_task(task)
+        if evaluation:
+            eval_keys.append(key)
+        if final:
+            final_keys.append(key)
+            verify_keys.append(key)
+        contract = contract_of(task)
+        owned = list((contract or {}).get("criterion_ids") or [])
+        if final or evaluation:
+            continue
+        for cid in owned:
+            exec_by_criterion.setdefault(cid, []).append(key)
+            for output in (contract or {}).get("outputs") or []:
+                path = output.get("path") if isinstance(output, dict) else None
+                if path:
+                    artifacts_by_criterion.setdefault(cid, []).append(str(path))
+    if len(eval_keys) > 1:
+        errors.append("evaluation_task_limit")
+    if review_count >= 2 and len(eval_keys) > 1:
+        errors.append("evaluation_tasks_scale_with_reviews")
+    if len(final_keys) > 1:
+        errors.append("final_verification_duplicate")
+    for cid, owners in exec_by_criterion.items():
+        unique_owners = list(dict.fromkeys(owners))
+        if len(unique_owners) > 1:
+            errors.append(f"{cid}: multiple primary execution tasks")
+    if expected_ids:
+        for cid in sorted(expected_ids):
+            owners = list(dict.fromkeys(exec_by_criterion.get(cid) or []))
+            if not owners:
+                errors.append(f"{cid}: missing execution task")
+            elif not artifacts_by_criterion.get(cid):
+                errors.append(f"{cid}: missing artifact")
+            elif not verify_keys:
+                errors.append(f"{cid}: missing verification")
+    return {
+        "passed": not errors,
+        "issues": errors,
+        "criterion_ids": sorted(exec_by_criterion),
+        "evaluation_tasks": eval_keys,
+        "final_verification_tasks": final_keys,
+        "coverage": {
+            cid: {
+                "exec_task_keys": list(dict.fromkeys(exec_by_criterion.get(cid) or [])),
+                "artifact_paths": list(dict.fromkeys(artifacts_by_criterion.get(cid) or [])),
+                "verify_task_keys": list(final_keys),
+            }
+            for cid in sorted(set(exec_by_criterion) | set(expected_ids or []))
+        },
+    }
 
 
 def contract_of(task: dict) -> dict | None:
@@ -151,6 +316,19 @@ def compile_task(index: int, criterion: str, proposal: dict, source_ids: list[st
     if requires_google_site_publication(criterion):
         contract['action_requirements'] = [{
             'kind': 'google_site_publication',
+            'minimum_executed': 1,
+            'evidence_required': True,
+        }]
+    elif criterion_requires_external_action(criterion):
+        kind = 'approved_external_action'
+        if re.search(r'Google\s*Forms', criterion, re.I):
+            kind = 'google_form_publication'
+        elif re.search(r'SNS', criterion, re.I):
+            kind = 'social_post'
+        elif re.search(r'リード取得', criterion, re.I):
+            kind = 'lead_capture'
+        contract['action_requirements'] = [{
+            'kind': kind,
             'minimum_executed': 1,
             'evidence_required': True,
         }]
@@ -250,10 +428,7 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
         "outputs": [{"path": "result/final_verification.md", "required_headings": ["達成条件別判定", "成果物検証", "未達条件と承認待ち"], "minimum_characters": 600}],
         "external_actions": "approval_required", "final_verification": True,
     }
-    if any(re.search(
-        r"(?:実際の営業活動|顧客(?:へ|に).{0,20}(?:送信|連絡|提案)|商談.{0,10}実施|"
-        r"PoC.{0,10}実施|契約締結|仮説検証.{0,20}実行)", criterion, re.I,
-    ) for criterion in criteria):
+    if any(criterion_requires_external_action(criterion) for criterion in criteria):
         contract["action_requirements"] = [{
             "kind": "approved_external_action",
             "minimum_executed": 1,
@@ -265,10 +440,11 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
         "description": "全先行成果物と実操作の証拠を確認し、各達成条件のPASS/FAIL、根拠パス、未達・承認待ちをresult/final_verification.mdへ保存する。資料作成と実処理を区別し、未実施の処理を合格にしない。",
         "acceptance_criteria": json.dumps(contract, ensure_ascii=False),
     })
+    _uniquify_task_titles(tasks)
     return {"summary": "原本と入力条件の確認から始める達成条件別の構造化計画。成果物作成と実処理の達成を区別し、最終判定で未達・承認待ちを明示する。", "tasks": tasks}
 
 
-def validate_plan(plan: dict, expected_ids: set[str], existing: set[str] | None = None) -> dict:
+def validate_plan(plan: dict, expected_ids: set[str], existing: set[str] | None = None, review_count: int = 0) -> dict:
     errors = []
     producers = {}
     ancestors = {}
@@ -311,6 +487,8 @@ def validate_plan(plan: dict, expected_ids: set[str], existing: set[str] | None 
         errors.append("final verification missing")
     elif set(ancestors) - {tasks[-1]["task_key"]} != ancestors[tasks[-1]["task_key"]]:
         errors.append("final verification must depend on every task")
+    structure = inspect_plan_structure(plan, expected_ids, review_count=review_count)
+    errors.extend(structure["issues"])
     return {"passed": not errors, "issues": errors, "criterion_ids": sorted(covered), "artifact_count": len(producers), "assessment": "structural_only"}
 
 
@@ -348,3 +526,229 @@ def verify_outputs(task: dict, resolve) -> list[str]:
         except (OSError, ValueError) as exc:
             failures.append(f"{output['path']}: 読み取り失敗 {exc}")
     return failures
+
+
+def validate_rebuild_generic_candidate(
+    plan: dict,
+    goal_contract: dict | None = None,
+    mission: dict | None = None,
+) -> dict:
+    """
+    rebuild_generic の保存前厳格バリデーション（6項目検査）:
+    1. 目標要求（達成条件）の保持率100%（既存の達成条件が候補計画から漏れていない）
+    2. 計画被覆（coverage）がPASS（app/plan_coverage.pyの既存の被覆判定を利用）
+    3. task keyおよび出力パスの重複なし
+    4. 依存関係に循環なし（閉路なし、前方参照なし）
+    5. 成果物契約が検証可能な形になっている（schema, path, headings/chars or columns/rows）
+    6. 外部アクション（公開・送信等）を含むタスクに承認点（approval_required 等）がある
+    1つでも不合格なら例外を発生させる。
+    """
+    if not isinstance(plan, dict) or not isinstance(plan.get("tasks"), list):
+        raise ValueError("INVALID_PLAN_STRUCTURE: tasks リストが必要です")
+    tasks = plan["tasks"]
+    if not tasks:
+        raise ValueError("INVALID_PLAN_STRUCTURE: タスクが空です")
+
+    # 1. 目標要求保持率 100%
+    if goal_contract and goal_contract.get("criteria"):
+        expected_cids = {c["criterion_id"] for c in goal_contract.get("criteria", []) if c.get("criterion_id")}
+    elif mission:
+        extracted = extract_criteria(mission.get("goal", ""), mission.get("success_criteria", ""))
+        expected_cids = {f"SC{i:02d}" for i in range(1, len(extracted) + 1)}
+    else:
+        expected_cids = set()
+
+    covered_cids = set()
+    for task in tasks:
+        contract = contract_of(task)
+        if contract and contract.get("criterion_ids"):
+            covered_cids.update(contract["criterion_ids"])
+
+    if expected_cids:
+        missing = expected_cids - covered_cids
+        if missing:
+            raise ValueError(f"RETENTION_INCOMPLETE: 目標要求の保持率が100%ではありません (欠落: {sorted(missing)})")
+
+    # 2. 計画被覆 (coverage) PASS
+    if goal_contract:
+        from app.plan_coverage import build as build_coverage
+        dummy_mission = {
+            "tasks": tasks,
+            "plan_version": (mission.get("plan_version", 0) if mission else 0),
+        }
+        cov = build_coverage(dummy_mission, goal_contract)
+        if not cov.get("passed"):
+            issues_str = "; ".join(cov.get("issues", [])) or "被覆判定不合格"
+            raise ValueError(f"COVERAGE_INCOMPLETE: 計画被覆が不合格です ({issues_str})")
+
+    # 3. task key および 出力パスの重複なし
+    seen_keys = set()
+    seen_paths = set()
+    for task in tasks:
+        key = str(task.get("task_key") or "").strip()
+        if not key:
+            raise ValueError("EMPTY_TASK_KEY: task_key が空のタスクがあります")
+        if key in seen_keys:
+            raise ValueError(f"DUPLICATE_KEY: task_key '{key}' が重複しています")
+        seen_keys.add(key)
+
+        contract = contract_of(task)
+        if not contract:
+            raise ValueError(f"MISSING_CONTRACT: タスク '{key}' に契約がありません")
+        outputs = contract.get("outputs") or []
+        for out in outputs:
+            path = str(out.get("path") or "").strip()
+            if not path:
+                raise ValueError(f"EMPTY_OUTPUT_PATH: タスク '{key}' に空の出力パスがあります")
+            if path in seen_paths:
+                raise ValueError(f"DUPLICATE_OUTPUT_PATH: 出力パス '{path}' が重複しています")
+            seen_paths.add(path)
+
+    # 4. 依存関係に循環なし（閉路なし、前方参照・未定義参照なし）
+    task_keys_set = set(seen_keys)
+    adj = {task["task_key"]: list(task.get("depends_on") or []) for task in tasks}
+    for k, deps in adj.items():
+        for dep in deps:
+            if dep not in task_keys_set:
+                raise ValueError(f"UNKNOWN_DEPENDENCY: タスク '{k}' が未定義のタスク '{dep}' に依存しています")
+            if dep == k:
+                raise ValueError(f"CIRCULAR_DEPENDENCY: タスク '{k}' が自身に依存しています")
+
+    visited = {}  # 0: unvisited, 1: visiting, 2: visited
+    def dfs(node):
+        visited[node] = 1
+        for neighbor in adj.get(node, []):
+            if visited.get(neighbor) == 1:
+                return True
+            if visited.get(neighbor) != 2:
+                if dfs(neighbor):
+                    return True
+        visited[node] = 2
+        return False
+
+    for k in task_keys_set:
+        if visited.get(k) != 2:
+            if dfs(k):
+                raise ValueError("CIRCULAR_DEPENDENCY: タスク依存関係に循環があります")
+
+    # 5. 成果物契約が検証可能な形になっている
+    for task in tasks:
+        key = task["task_key"]
+        contract = contract_of(task)
+        if not contract or contract.get("schema") != SCHEMA:
+            raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' のスキーマが不正です")
+        outputs = contract.get("outputs")
+        if not isinstance(outputs, list) or len(outputs) == 0:
+            raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' に出力契約がありません")
+        for output in outputs:
+            path = str(output.get("path") or "")
+            pattern = r"result/(?:plan_[1-9][0-9]*/)?[a-z0-9_]+\.(?:md|csv)"
+            if not re.fullmatch(pattern, path):
+                raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' の出力パス '{path}' が規約外です")
+            if path.endswith(".md"):
+                headings = output.get("required_headings")
+                min_chars = output.get("minimum_characters", 0)
+                if not isinstance(headings, list) or len(headings) < 2 or any(not isinstance(h, str) or not h.strip() for h in headings):
+                    raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' のMarkdown必須見出しが不足しています")
+                if not isinstance(min_chars, int) or min_chars < 200:
+                    raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' の最小文字数が不正です (>=200必須)")
+            elif path.endswith(".csv"):
+                cols = output.get("required_columns")
+                min_rows = output.get("minimum_rows", 0)
+                if not isinstance(cols, list) or len(cols) < 1 or any(not isinstance(c, str) or not c.strip() for c in cols):
+                    raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' のCSV必須列が不足しています")
+                if not isinstance(min_rows, int) or min_rows < 1:
+                    raise ValueError(f"INVALID_ARTIFACT_CONTRACT: タスク '{key}' の最小行数が不正です (>=1必須)")
+
+    # 6. 外部アクションを含むタスクに承認点がある
+    for task in tasks:
+        key = task["task_key"]
+        contract = contract_of(task)
+        criterion_text = str(contract.get("criterion") or task.get("description") or task.get("title") or "")
+        has_external_action = (
+            requires_google_site_publication(criterion_text)
+            or bool(contract.get("action_requirements"))
+            or criterion_requires_external_action(criterion_text)
+        )
+        if has_external_action:
+            has_approval = (
+                contract.get("external_actions") == "approval_required"
+                or any(bool(r.get("evidence_required")) for r in (contract.get("action_requirements") or []) if isinstance(r, dict))
+            )
+            if not has_approval:
+                raise ValueError(f"MISSING_APPROVAL_GATE: 外部アクションを含むタスク '{key}' に人間の承認点がありません")
+
+    return {"passed": True, "task_count": len(tasks), "artifact_count": len(seen_paths)}
+
+
+def build_rebuild_generic_plan(
+    mission: dict,
+    snapshot: dict,
+    actions: list[dict],
+    issues: list[dict],
+    goal_contract: dict | None = None,
+) -> dict:
+    """
+    GoalContract、既存成果物、未達criterion、採用済み指摘を入力にして、
+    既存のplanner構造で汎用再構成計画候補を作る。
+    """
+    if goal_contract and goal_contract.get("criteria"):
+        criteria = [c["statement"] for c in goal_contract["criteria"] if c.get("statement")]
+    else:
+        criteria = extract_criteria(mission.get("goal", ""), mission.get("success_criteria", ""))
+    if not criteria:
+        criteria = [mission.get("goal") or "プロジェクト目標の達成"]
+
+    source_ids = [x["id"] for x in snapshot.get("sources", []) if isinstance(x, dict) and x.get("id")]
+    existing_tasks = {t.get("task_key"): t for t in snapshot.get("tasks", []) if t.get("task_key")}
+
+    # 採用された指摘の要約・反映差分を整理
+    generic_actions = [a for a in actions if a.get("disposition") in {"rebuild_generic", "amend"}]
+    action_changes_by_target = {}
+    for a in generic_actions:
+        target = a.get("target") or ""
+        change = a.get("change") or ""
+        if target and change:
+            action_changes_by_target.setdefault(target, []).append(change.strip())
+
+    tasks = []
+    for index, criterion in enumerate(criteria, 1):
+        key = f"SC{index:02d}"
+        old_task = existing_tasks.get(key)
+        target_changes = action_changes_by_target.get(key, []) + action_changes_by_target.get("execution_pipeline", [])
+
+        if old_task:
+            old_contract = contract_of(old_task) or {}
+            title = old_task.get("title") or f"達成条件 SC{index:02d} の実行"
+            scope = f"達成条件 {key}: {criterion} を満たす成果物を作成・検証する。"
+            if target_changes:
+                scope += " " + " ".join(target_changes)
+            headings = []
+            for out in old_contract.get("outputs", []):
+                if out.get("required_headings"):
+                    headings = [h for h in out["required_headings"] if h not in {"根拠と未確認事項", "実施状態と次の行動"}]
+                    break
+            if not headings or len(headings) < 2:
+                headings = ["現状と前提確認", "具体的設計・作成手順"]
+            proposal = {
+                "title": title,
+                "scope": scope[:1500],
+                "headings": headings[:6],
+                "depends_on": [d for d in old_task.get("depends_on", []) if d != key and d.startswith("SC")],
+            }
+        else:
+            scope = f"達成条件 {key}: {criterion} を満たす成果物を作成・検証する。"
+            if target_changes:
+                scope += " " + " ".join(target_changes)
+            headings = ["現状と前提確認", "具体的設計・作成手順"]
+            proposal = {
+                "title": f"達成条件 SC{index:02d} の実行設計",
+                "scope": scope[:1500],
+                "headings": headings,
+                "depends_on": [f"SC{i:02d}" for i in range(1, index)] if index > 1 else [],
+            }
+        task = compile_task(index, criterion, proposal, source_ids)
+        tasks.append(task)
+
+    compiled = compile_plan(criteria, tasks, goal=mission.get("goal", ""))
+    return compiled

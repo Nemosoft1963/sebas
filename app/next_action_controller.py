@@ -84,26 +84,38 @@ def _compute_from(manager, project_id: str, readiness: dict) -> dict:
         allowed, reason = True, ""
         label = "既回答を条件一致の確認事項へ適用する"
         endpoint = None
-    executable = action_class == "local_safe" and auto and allowed and action_id not in {"idle", "wait"}
-    blocked = not executable
-    if action_class in {"human_fact", "human_approval", "external", "development"}:
-        executable, blocked = False, True
+
     if action_id in UNIMPLEMENTED_ACTION_IDS:
-        executable, blocked = False, True
+        allowed = False
         reason = next(
             (item["reason"] for item in UNIMPLEMENTED_BLOCKED_ACTIONS if item["id"] == action_id),
             reason or "automatic execution is not permitted",
         )
+
+    # allowed_actions を判定元とし、手動実行可能と自動実行可能を分離 (P0-5)
+    if action_class == "local_safe":
+        executable = bool(allowed) and action_id not in {"idle", "wait"} and action_id not in UNIMPLEMENTED_ACTION_IDS
+    else:
+        executable = False
+    blocked = not executable
+
+    # 「人が操作すれば実行できる(manual_executable)」と「システムが自動実行できる(auto_executable)」を分離
+    auto_executable = bool(auto) and action_class == "local_safe" and executable
+    manual_executable = bool(allowed) and action_id not in {"idle", "wait"} and action_id not in UNIMPLEMENTED_ACTION_IDS
+
     if not reason and blocked:
         reason = str(readiness.get("stop_reason") or "automatic execution is not permitted")
+
     state_view = read_goal_state(manager, project_id)
     return {
         "action_id": action_id,
         "label": label,
         "endpoint": endpoint,
         "action_class": action_class,
-        "auto_executable": auto,
+        "auto_executable": auto_executable,
+        "manual_executable": manual_executable,
         "executable": executable,
+        "allowed": allowed,
         "reason": reason,
         "blocked": blocked,
         "criterion": _criterion(readiness),
@@ -139,8 +151,8 @@ def _one(manager, project_id: str, key: str) -> dict:
     action_id = action["action_id"]
     if action_id in UNIMPLEMENTED_ACTION_IDS:
         raise NextActionRefused("ACTION_REFUSED", action["reason"])
-    if not action["executable"]:
-        raise NextActionRefused("ACTION_REFUSED", action["reason"])
+    if not action["auto_executable"]:
+        raise NextActionRefused("ACTION_REFUSED", action["reason"] or "automatic execution is not permitted")
     executor = EXECUTORS.get(action_id)
     if executor is None:
         raise NextActionRefused("EXECUTOR_NOT_REGISTERED", action_id)
@@ -222,7 +234,7 @@ def run_chain(manager, project_id: str, idempotency_key: str, *, max_steps: int 
         if action_id in {"idle", "wait"}:
             stopped = "idle"
             break
-        if action_id in UNIMPLEMENTED_ACTION_IDS or not action["executable"]:
+        if action_id in UNIMPLEMENTED_ACTION_IDS or not action["auto_executable"]:
             stopped = "external" if action_class == "external" else "human_required"
             needs_approval = True
             break

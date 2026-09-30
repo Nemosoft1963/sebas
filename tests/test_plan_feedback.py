@@ -135,18 +135,22 @@ async def test_detail_revision_preserves_operations_and_invalidates_review(tmp_p
 
 @pytest.mark.asyncio
 async def test_normal_generation_carries_legacy_reviews_and_processes_them(tmp_path):
+    from app.plan_feedback import import_legacy_review
     manager,pid,task=setup(tmp_path,True)
     manager.llm=Mock(spec=Ollama)
     manager.memory.set_plan_reviews(pid,[{'id':'claude','ok':True,'review':'旧計画への指摘です。原本と結果の照合を具体的な手順として必ず計画へ追加してください。'},{'id':'chatgpt','ok':False,'error':'empty'}])
     old=plan_snapshot(manager,pid)[1]
-    imported=issues_for(manager,pid,old)
-    assert len(imported)==1 and imported[0]['source_plan_version'] is None
+    # P0-1: legacy review は自動的には issues_for に入らない
+    assert issues_for(manager,pid,old) == []
+    # 人間が明示的に「現行版へ取り込む」操作を行った場合だけ user_import として入る
+    imported_result = import_legacy_review(manager, pid, old, 'claude')
+    imported = imported_result['issues']
+    assert len(imported) == 1 and imported[0]['origin'] == 'user_import'
     async def generate(_):
         from app.plan_feedback import PLANNING_FEEDBACK
-        assert PLANNING_FEEDBACK.get()[0]['origin']=='legacy_api'
+        assert PLANNING_FEEDBACK.get()[0]['origin']=='user_import'
         mission=manager.memory.get_mission(pid)
         manager.memory.replace_plan(pid,'new draft',mission['tasks'],expected_version=mission['plan_version'])
-        manager.memory.set_plan_reviews(pid,[])
     manager._generate_plan_impl=generate
     async def local(*args):
         sig=plan_snapshot(manager,pid)[1]

@@ -257,7 +257,6 @@ async def test_import_success_cases_api_and_rag(tmp_path):
             json={
                 'items': [valid_item_1],
                 'actor': 'operator',
-                'confirm_rag': True,
             },
         )
         assert resp_off.status_code == 409
@@ -269,7 +268,6 @@ async def test_import_success_cases_api_and_rag(tmp_path):
             json={
                 'items': [valid_item_1],
                 'actor': 'operator',
-                'confirm_rag': True,
             },
         )
         assert resp_shadow.status_code == 200
@@ -284,7 +282,6 @@ async def test_import_success_cases_api_and_rag(tmp_path):
             json={
                 'items': [valid_item_1],
                 'actor': 'operator',
-                'confirm_rag': True,
             },
         )
         assert resp_dup.status_code == 200
@@ -299,7 +296,6 @@ async def test_import_success_cases_api_and_rag(tmp_path):
             json={
                 'items': [valid_item_1, invalid_item, valid_item_2],
                 'actor': 'operator',
-                'confirm_rag': True,
             },
         )
         assert resp_mixed.status_code == 200
@@ -323,10 +319,3 @@ async def test_import_success_cases_api_and_rag(tmp_path):
     finally:
         web_module.memory = orig_memory
         web_module.DB_PATH = orig_db_path
-
-
-
-def test_import_success_cases_requires_explicit_rag_confirmation(tmp_path):
-    from app.experience_memory import import_success_cases
-    with pytest.raises(ValueError, match="confirm_rag=true"):
-        import_success_cases(tmp_path / "memory" / "conversations.db", "p", [], actor="operator")

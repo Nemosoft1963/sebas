@@ -38,3 +38,9 @@
 - 代表的な実PDFによるOCR受入は継続中
 - 実案件データによる車両別月次損益の一連受入は継続中
 - ChromaDBの修正版未公開セキュリティアラートを追跡中。ChromaDBサーバーAPIは公開しない
+
+## 2026-09-30
+
+- Added safe completion recovery for generic projects, including version-bound review feedback, generic rebuilding, evidence checks, unified UI action state, provider failure isolation, and read-only recovery previews.
+- Prevented legacy review tasks from being reused as execution tasks during recovery.
+- Fixed the hardened Docker build order for RAG-enabled builds while keeping runtime package installers removed.

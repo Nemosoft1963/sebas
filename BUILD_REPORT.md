@@ -21,3 +21,12 @@
 - 公開版CI: pytest / CodeQL / Trivy success
 - 本番ルートはGit管理外のため、公開版とのファイル一致は未証明
 - 全体記録: `docs/SEBAS_CURRENT_STATUS_2026-09-29.md`
+
+## 2026-09-30 Completion recovery
+
+- Added version-bound review handling, generic plan rebuilding, evidence-based generic completion checks, unified readiness/next-action behavior, provider partial-failure handling, and a read-only Ver.23 recovery preview.
+- Corrected recovery so legacy plan-review prose cannot become execution tasks.
+- Kept runtime package installers removed while fixing the RAG-enabled Docker build order.
+- Validation: 910 tests passed; focused recovery suite: 54 passed; production healthcheck: PASS.
+- Production sales project remains on Ver.22. Ver.23 preview is not saved and still requires human review.
+- Details: `docs/CHANGELOG_2026-09-30_completion_recovery.md`.

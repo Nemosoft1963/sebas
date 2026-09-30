@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +55,158 @@ PROVIDERS: dict[str, Provider] = {
     "grok": Provider("grok", "Grok", "XAI_API_KEY", "XAI_MODEL", "grok-4.6"),
     "meta": Provider("meta", "Meta Llama", "LLAMA_API_KEY", "META_MODEL", ""),
 }
+
+# Transport / auth failures are connection problems, not plan-content criticism.
+CONNECTION_HTTP_CODES = frozenset({401, 408, 429, 500, 502, 503, 504})
+RETRYABLE_HTTP_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_HTTP_STATUS_RE = re.compile(r"\bHTTP\s+(\d{3})\b", re.I)
+_TIMEOUT_MARKERS = (
+    "timeout", "timed out", "rate limit", "too many requests",
+    "connection reset", "connecterror", "connection refused", "temporarily unavailable",
+)
+
+
+def provider_connection_retries() -> int:
+    try:
+        return max(0, min(int(os.getenv("EXTERNAL_AI_CONNECTION_RETRIES", "1")), 5))
+    except (TypeError, ValueError):
+        return 1
+
+
+async def connection_retry_wait(attempt: int) -> None:
+    """Backoff between per-provider connection retries. Default 0 so tests stay fast."""
+    try:
+        delay = float(os.getenv("EXTERNAL_AI_RETRY_WAIT", "0"))
+    except (TypeError, ValueError):
+        delay = 0.0
+    if delay > 0:
+        await asyncio.sleep(min(delay * (attempt + 1), 5.0))
+
+
+def classify_provider_failure(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, ProviderHTTPError):
+        code = int(exc.status_code)
+        if code == 401:
+            category = "authentication_error"
+        elif code in CONNECTION_HTTP_CODES:
+            category = "connection_error"
+        else:
+            category = "http_error"
+        return {
+            "kind": "connection" if code in CONNECTION_HTTP_CODES else "other",
+            "status_code": code,
+            "category": category,
+            "retryable": code in RETRYABLE_HTTP_CODES,
+            "error": str(exc)[:2000],
+        }
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, asyncio.TimeoutError, TimeoutError)):
+        return {
+            "kind": "connection", "status_code": None, "category": "connection_error",
+            "retryable": True, "error": str(exc)[:2000],
+        }
+    text = str(exc)
+    lowered = text.lower()
+    if "not configured" in lowered:
+        return {
+            "kind": "connection", "status_code": None, "category": "configuration_missing",
+            "retryable": False, "error": text[:2000],
+        }
+    match = _HTTP_STATUS_RE.search(text)
+    if match:
+        code = int(match.group(1))
+        if code in CONNECTION_HTTP_CODES:
+            return {
+                "kind": "connection", "status_code": code,
+                "category": "authentication_error" if code == 401 else "connection_error",
+                "retryable": code in RETRYABLE_HTTP_CODES, "error": text[:2000],
+            }
+    if any(marker in lowered for marker in _TIMEOUT_MARKERS):
+        return {
+            "kind": "connection", "status_code": None, "category": "connection_error",
+            "retryable": True, "error": text[:2000],
+        }
+    return {
+        "kind": "other", "status_code": None, "category": "unknown",
+        "retryable": False, "error": text[:2000],
+    }
+
+
+def connection_error_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Detect a transport/auth failure from a provider result dict (including fake runners)."""
+    payload = payload or {}
+    if payload.get("ok"):
+        return None
+    err = str(payload.get("error") or "")
+    code = payload.get("status_code")
+    if payload.get("outcome") == "connection_error" or payload.get("error_kind") == "connection":
+        if code is None:
+            match = _HTTP_STATUS_RE.search(err)
+            code = int(match.group(1)) if match else None
+        return {
+            "status_code": code,
+            "category": payload.get("error_category") or ("authentication_error" if code == 401 else "connection_error"),
+            "error": err[:2000],
+        }
+    if code is None:
+        match = _HTTP_STATUS_RE.search(err)
+        if match:
+            code = int(match.group(1))
+    if code in CONNECTION_HTTP_CODES:
+        return {
+            "status_code": code,
+            "category": "authentication_error" if code == 401 else "connection_error",
+            "error": err[:2000],
+        }
+    lowered = err.lower()
+    if any(marker in lowered for marker in _TIMEOUT_MARKERS):
+        return {"status_code": code, "category": "connection_error", "error": err[:2000]}
+    return None
+
+
+async def invoke_provider_isolated(
+    provider_id: str,
+    prompt: str,
+    system: str,
+    max_tokens: int = 1800,
+    reasoning_effort: str | None = None,
+    result_key: str = "review",
+    retries: int | None = None,
+) -> dict[str, Any]:
+    """Call one provider. Connection retries stay on this provider and never re-run others."""
+    if provider_id not in PROVIDERS:
+        raise ValueError(f"Unknown provider: {provider_id}")
+    provider = PROVIDERS[provider_id]
+    attempts = provider_connection_retries() if retries is None else max(0, int(retries))
+    last_info: dict[str, Any] | None = None
+    for attempt in range(attempts + 1):
+        try:
+            response = await call_provider_with_metadata(
+                provider_id, prompt, system, max_tokens, reasoning_effort,
+            )
+            return {
+                "id": provider_id, "label": provider.label, "model": response.model,
+                "ok": True, "outcome": "success", result_key: response.text[:16000],
+            }
+        except Exception as exc:
+            last_info = classify_provider_failure(exc)
+            if last_info["retryable"] and attempt < attempts:
+                await connection_retry_wait(attempt)
+                continue
+            outcome = "connection_error" if last_info["kind"] == "connection" else "failed"
+            return {
+                "id": provider_id, "label": provider.label, "model": provider.model,
+                "ok": False, "outcome": outcome, "error": last_info["error"][:2000],
+                "error_kind": last_info["kind"], "status_code": last_info["status_code"],
+                "error_category": last_info["category"],
+            }
+    assert last_info is not None
+    outcome = "connection_error" if last_info["kind"] == "connection" else "failed"
+    return {
+        "id": provider_id, "label": provider.label, "model": provider.model,
+        "ok": False, "outcome": outcome, "error": last_info["error"][:2000],
+        "error_kind": last_info["kind"], "status_code": last_info["status_code"],
+        "error_category": last_info["category"],
+    }
 
 
 def provider_statuses() -> list[dict[str, Any]]:
@@ -237,12 +390,10 @@ async def run_research(topic: str, provider_ids: list[str], synthesizer: str, st
     )
 
     async def one(provider_id: str) -> dict[str, Any]:
-        provider = PROVIDERS[provider_id]
-        try:
-            response = await call_provider_with_metadata(provider_id, research_prompt, research_system)
-            return {"id": provider_id, "label": provider.label, "model": response.model, "ok": True, "answer": response.text}
-        except Exception as exc:
-            return {"id": provider_id, "label": provider.label, "model": provider.model, "ok": False, "error": str(exc)}
+        row = await invoke_provider_isolated(
+            provider_id, research_prompt, research_system, result_key="answer",
+        )
+        return row
 
     results = await asyncio.gather(*(one(provider_id) for provider_id in unique_ids))
     successful = [result for result in results if result["ok"]]
@@ -300,24 +451,16 @@ async def run_plan_reviews(plan_text: str, provider_ids: list[str]) -> list[dict
         + plan_text[:50000]
     )
 
-    async def one(provider_id: str) -> dict[str, Any]:
-        provider = PROVIDERS[provider_id]
-        try:
-            response = await call_provider_with_metadata(
-                provider_id, prompt, system, max_tokens=1800,
-                reasoning_effort="high" if provider_id == "chatgpt" else None,
-            )
-            return {
-                "id": provider_id, "label": provider.label, "model": response.model,
-                "ok": True, "review": response.text[:16000],
-            }
-        except Exception as exc:
-            return {
-                "id": provider_id, "label": provider.label, "model": provider.model,
-                "ok": False, "error": str(exc)[:2000],
-            }
+    return await asyncio.gather(*(
+        invoke_provider_isolated(
+            provider_id, prompt, system, max_tokens=1800,
+            reasoning_effort="high" if provider_id == "chatgpt" else None,
+            result_key="review",
+        )
+        for provider_id in unique_ids
+    ))
 
-    return await asyncio.gather(*(one(provider_id) for provider_id in unique_ids))
+
 async def run_capability_reviews(gap_text: str, provider_ids: list[str]) -> list[dict[str, Any]]:
     """Ask selected external AIs how to close capability gaps; local LLM remains the decision maker."""
     unique_ids = list(dict.fromkeys(provider_ids))
@@ -334,21 +477,11 @@ async def run_capability_reviews(gap_text: str, provider_ids: list[str]) -> list
         + gap_text[:50000]
     )
 
-    async def one(provider_id: str) -> dict[str, Any]:
-        provider = PROVIDERS[provider_id]
-        try:
-            response = await call_provider_with_metadata(
-                provider_id, prompt, system, max_tokens=1800,
-                reasoning_effort="high" if provider_id == "chatgpt" else None,
-            )
-            return {
-                "id": provider_id, "label": provider.label, "model": response.model,
-                "ok": True, "review": response.text[:16000],
-            }
-        except Exception as exc:
-            return {
-                "id": provider_id, "label": provider.label, "model": provider.model,
-                "ok": False, "error": str(exc)[:2000],
-            }
-
-    return await asyncio.gather(*(one(provider_id) for provider_id in unique_ids))
+    return await asyncio.gather(*(
+        invoke_provider_isolated(
+            provider_id, prompt, system, max_tokens=1800,
+            reasoning_effort="high" if provider_id == "chatgpt" else None,
+            result_key="review",
+        )
+        for provider_id in unique_ids
+    ))

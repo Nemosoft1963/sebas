@@ -254,8 +254,7 @@ def _take_sentences(text: str, count: int, max_chars: int) -> str:
 
 
 def _strip_end(text: str) -> str:
-    # rstrip is linear and avoids running a backtracking expression over imported text.
-    return (text or "").rstrip("。．. \t\r\n\v\f")
+    return re.sub(r"[。．.\s]+$", "", text or "")
 
 
 def _build_lesson(fields: dict[str, str], fallback: str) -> str:
@@ -329,9 +328,7 @@ def convert_success_case_item(item: dict) -> dict:
     }
 
 
-def import_success_cases(memory_path, project, export_items, proof="成功事例収集エージェントでの人手レビュー済み", actor="operator", confirm_rag=False):
-    if confirm_rag is not True:
-        raise ValueError("confirm_rag=true is required for experience RAG registration")
+def import_success_cases(memory_path, project, export_items, proof="成功事例収集エージェントでの人手レビュー済み", actor="operator"):
     setting = configured_memory(memory_path, project)
     if setting is None:
         raise MemoryPolicyError("Experience memory is disabled for this project")

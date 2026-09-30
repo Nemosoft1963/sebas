@@ -1,5 +1,5 @@
 (()=>{'use strict';
-const ACTION_BUTTONS={prepare:'vehicleAutoPrepare',import_feedback:'goalFeedbackImport',propose_feedback:'goalFeedbackPropose',apply:'goalFeedbackApply',external_review:'goalPlanSend',approve_plan:'missionApprove',start:'missionStart',cancel_queue:'goalQueueCancel'};
+const ACTION_BUTTONS={prepare:'vehicleAutoPrepare',import_feedback:'goalFeedbackImport',propose_feedback:'goalFeedbackPropose',apply:'goalFeedbackApply',external_review:'goalPlanSend',approve_plan:'missionApprove',start:'missionStart',cancel_queue:'goalQueueCancel',approve_result:'goalResultApprove'};
 const HEADINGS=['不明点','止まる条件','確認済み事実','候補と影響','再実行範囲'];
 function add(parent,tag,text){const node=document.createElement(tag);node.textContent=text==null?'':String(text);parent.appendChild(node);return node;}
 function describe(value){if(value==null)return '不明';if(typeof value==='string')return value;try{return JSON.stringify(value);}catch(_){return String(value);}}

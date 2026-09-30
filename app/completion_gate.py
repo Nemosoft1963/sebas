@@ -13,6 +13,29 @@ REASON_HUMAN = "HUMAN_ACCEPTANCE_MISSING"
 REASON_HASH_DRIFT = "HUMAN_ACCEPTANCE_HASH_DRIFT"
 
 
+def _generic_artifact_hash(manager, project_id: str, mission: dict) -> str:
+    from app.structured_planning import contract_of
+    from app.vehicle_workflow import digest, resolve
+
+    artifacts = []
+    for task in mission.get("tasks") or []:
+        for output in (contract_of(task) or {}).get("outputs") or []:
+            path = str(output.get("path") or "")
+            if not path:
+                continue
+            try:
+                target = resolve(manager, project_id, path)
+            except Exception:
+                continue
+            try:
+                if target.is_file() and target.stat().st_size > 0:
+                    artifacts.append((path, digest(target.read_bytes())))
+            except OSError:
+                continue
+    artifacts.sort()
+    return digest(artifacts) if artifacts else ""
+
+
 def _current_hashes(manager, project_id: str, contract: dict, mission: dict) -> dict:
     from app.goal_review import plan_snapshot
     from app.vehicle_workflow import applicable, digest, load_input, read_json, resolve, sources
@@ -23,9 +46,30 @@ def _current_hashes(manager, project_id: str, contract: dict, mission: dict) -> 
     except Exception:
         plan_signature = ""
     if not applicable(mission):
+        try:
+            source_hash = digest(sources(manager, project_id))
+        except Exception:
+            source_hash = ""
+        try:
+            input_hash = digest({
+                "goal": mission.get("goal") or "",
+                "success": mission.get("success_criteria") or "",
+                "constraints": mission.get("constraints_text") or "",
+                "instructions": [
+                    x.get("message") for x in mission.get("instruction_messages") or []
+                    if x.get("kind") == "mission_instruction_user"
+                ],
+                "plan_version": mission.get("plan_version") or 0,
+            })
+        except Exception:
+            input_hash = ""
+        try:
+            artifact_hash = _generic_artifact_hash(manager, project_id, mission)
+        except Exception:
+            artifact_hash = ""
         return {
             "contract_hash": contract.get("content_hash") or "", "plan_signature": plan_signature,
-            "input_hash": "", "source_hash": "", "artifact_hash": "",
+            "input_hash": input_hash, "source_hash": source_hash, "artifact_hash": artifact_hash,
         }
     try:
         envelope = load_input(manager, project_id)
@@ -99,6 +143,14 @@ def _record_from_check(item: dict) -> dict:
     return row
 
 
+def criteria_ready_for_human_confirmation(result: dict) -> bool:
+    """Human final confirmation is accepted only after every criterion is PASS."""
+    rows = list(result.get("criteria") or [])
+    if not rows:
+        return False
+    return all(row.get("status") == "PASS" for row in rows)
+
+
 def evaluate(manager, project_id: str, *, persist: bool = False) -> dict:
     from app.vehicle_workflow import applicable, load_input
 
@@ -146,33 +198,51 @@ def evaluate(manager, project_id: str, *, persist: bool = False) -> dict:
             if row["status"] != "PASS":
                 failed.append(row["criterion_id"])
     else:
-        # Generic: artifacts may be verified, but phase-1 does not grant achieved.
-        for item in criteria:
-            rows.append(_record(item["criterion_id"], "UNTESTABLE", "GENERIC_NOT_ACHIEVED", message="汎用計画は第1段階ではverified止め"))
-            failed.append(item["criterion_id"])
+        from app.generic_goal_checks import evaluate_generic_criteria
+        hashes_preview = _current_hashes(manager, project_id, contract, mission)
+        previous = GoalCompletionStore(manager.memory.path).latest_unrevoked_acceptance(project_id)
+        binding = dict(hashes_preview)
+        binding["previous_acceptance"] = previous or {}
+        for item in evaluate_generic_criteria(manager, project_id, criteria, contract, hashes=binding):
+            row = _record_from_check(item)
+            rows.append(row)
+            if row["status"] != "PASS":
+                failed.append(row["criterion_id"])
 
     hashes = _current_hashes(manager, project_id, contract, mission)
     store = GoalCompletionStore(manager.memory.path)
     acceptance, human_acceptance = _acceptance_view(store, project_id, hashes)
     human_ok = bool(acceptance)
-    if contract.get("completion_policy", {}).get("require_human_acceptance", True) and not human_ok:
+    require_human = bool(contract.get("completion_policy", {}).get("require_human_acceptance", True))
+    is_vehicle = applicable(mission)
+    if is_vehicle and require_human and not human_ok:
         if not failed:
             for row in rows:
                 row["status"] = "FAIL"
                 row["reason_code"] = REASON_HUMAN
                 failed.append(row["criterion_id"])
-
-    achieved = not failed and all(row["status"] == "PASS" for row in rows) and bool(rows)
+    all_pass = bool(rows) and not failed and all(row["status"] == "PASS" for row in rows)
+    # Generic: keep per-criterion PASS/FAIL/BLOCKED/UNTESTABLE. Human confirmation
+    # is a separate gate and must not rewrite those statuses into success or 0.
+    achieved = all_pass if is_vehicle else (all_pass and (human_ok or not require_human))
     artifact = "none"
     if achieved:
         artifact = "final"
-    elif applicable(mission):
+    elif is_vehicle:
         envelope = load_input(manager, project_id)
         if envelope:
             artifact = "provisional"
+    elif hashes.get("artifact_hash"):
+        artifact = "provisional"
+    if achieved:
+        reason_code = ""
+    elif (not is_vehicle) and all_pass and require_human and not human_ok:
+        reason_code = REASON_HUMAN
+    else:
+        reason_code = failed and next((r["reason_code"] for r in rows if r["criterion_id"] == failed[0]), "") or ""
     result = {
         "achieved": bool(achieved),
-        "reason_code": "" if achieved else (failed and next((r["reason_code"] for r in rows if r["criterion_id"] == failed[0]), "") or ""),
+        "reason_code": reason_code,
         "criteria": rows,
         "failed_criteria": list(dict.fromkeys(failed)),
         "artifact_class": artifact,
@@ -198,12 +268,19 @@ def accept(manager, project_id: str, *, accepted_by: str, note: str = "") -> dic
     if not actor:
         raise ValueError("accepted_by is required")
     preview_result = evaluate(manager, project_id, persist=False)
-    blocked_only_human = bool(preview_result.get("criteria")) and all(
-        row.get("reason_code") == REASON_HUMAN or row.get("status") == "PASS"
-        for row in preview_result["criteria"]
-    )
-    if not blocked_only_human:
-        raise ValueError("COMPLETION_GATE_FAILED: 未達条件が残っているため確定できません")
+    from app.vehicle_workflow import applicable
+
+    mission = manager.memory.get_mission(project_id)
+    if applicable(mission):
+        blocked_only_human = bool(preview_result.get("criteria")) and all(
+            row.get("reason_code") == REASON_HUMAN or row.get("status") == "PASS"
+            for row in preview_result["criteria"]
+        )
+        if not blocked_only_human:
+            raise ValueError("COMPLETION_GATE_FAILED: 未達条件が残っているため確定できません")
+    else:
+        from app.goal_review import require_human_final_confirmation_ready
+        require_human_final_confirmation_ready(preview_result)
     if not preview_result.get("artifact_hash"):
         raise ValueError("COMPLETION_GATE_FAILED: 成果物がないため確定できません")
     store = GoalCompletionStore(manager.memory.path)
