@@ -912,6 +912,24 @@ def validate_rebuild_generic_candidate(
             if not has_approval:
                 raise ValueError(f"MISSING_APPROVAL_GATE: 外部アクションを含むタスク '{key}' に人間の承認点がありません")
 
+    # Coverage by ID alone can pass while an SC task describes a different goal.
+    if goal_contract and goal_contract.get("criteria"):
+        statements = {
+            item["criterion_id"]: item.get("statement")
+            for item in goal_contract["criteria"] if item.get("criterion_id")
+        }
+        for task in tasks:
+            contract = contract_of(task) or {}
+            if contract.get("final_verification"):
+                continue
+            for criterion_id in contract.get("criterion_ids") or []:
+                if criterion_id in statements and contract.get("criterion") != statements[criterion_id]:
+                    raise ValueError(
+                        f"CRITERION_MISMATCH: {task['task_key']} does not implement {criterion_id}"
+                    )
+            if re.fullmatch(r"達成条件 SC[0-9]+ の実行設計", str(task.get("title") or "")):
+                raise ValueError(f"ABSTRACT_TASK: {task['task_key']} has no concrete operation")
+
     return {"passed": True, "task_count": len(tasks), "artifact_count": len(seen_paths)}
 
 
@@ -929,12 +947,19 @@ def build_rebuild_generic_plan(
     mission_criteria = extract_criteria(mission.get('goal', ''), mission.get('success_criteria', ''))
     contract_criteria = ([c['statement'] for c in goal_contract['criteria'] if c.get('statement')]
                          if goal_contract and goal_contract.get('criteria') else [])
-    criteria = mission_criteria if len(mission_criteria) >= len(contract_criteria) else contract_criteria
+    # The active GoalContract defines the criterion ID/order used by coverage.
+    # Re-extracting mission prose can yield the same count in a different order.
+    criteria = contract_criteria or mission_criteria
     if not criteria:
         criteria = [mission.get("goal") or "プロジェクト目標の達成"]
 
     source_ids = [x["id"] for x in snapshot.get("sources", []) if isinstance(x, dict) and x.get("id")]
-    existing_tasks = {t.get("task_key"): t for t in snapshot.get("tasks", []) if t.get("task_key")}
+    existing_by_criterion = {
+        (contract_of(task) or {}).get("criterion"): task
+        for task in snapshot.get("tasks", [])
+        if (contract_of(task) or {}).get("criterion")
+        and not (contract_of(task) or {}).get("final_verification")
+    }
 
     # 採用された指摘の要約・反映差分を整理
     generic_actions = [a for a in actions if a.get("disposition") in {"rebuild_generic", "amend"}]
@@ -948,12 +973,17 @@ def build_rebuild_generic_plan(
     tasks = []
     for index, criterion in enumerate(criteria, 1):
         key = f"SC{index:02d}"
-        old_task = existing_tasks.get(key)
-        target_changes = action_changes_by_target.get(key, []) + action_changes_by_target.get("execution_pipeline", [])
+        old_task = existing_by_criterion.get(criterion)
+        # Feedback targets refer to the old plan; never attach an amendment to
+        # a different criterion merely because its new SC index matches.
+        target_key = old_task.get("task_key") if old_task else key
+        target_changes = (action_changes_by_target.get(target_key, [])
+                          + action_changes_by_target.get("execution_pipeline", []))
 
-        if old_task and (contract_of(old_task) or {}).get('criterion') == criterion:
+        if old_task:
             old_contract = contract_of(old_task) or {}
-            title = old_task.get("title") or f"達成条件 SC{index:02d} の実行"
+            title = re.sub(r"^SC[0-9]+_", "", str(old_task.get("title") or "").strip())
+            title = title or str(criterion).strip().rstrip("。")[:110]
             scope = f"達成条件 {key}: {criterion} を満たす成果物を作成・検証する。"
             if target_changes:
                 scope += " " + " ".join(target_changes)
@@ -968,7 +998,8 @@ def build_rebuild_generic_plan(
                 "title": title,
                 "scope": scope[:1500],
                 "headings": headings[:6],
-                "depends_on": [d for d in old_task.get("depends_on", []) if d != key and d.startswith("SC")],
+                # Old SC IDs may belong to a different criterion order.
+                "depends_on": [],
             }
         else:
             scope = f"達成条件 {key}: {criterion} を満たす成果物を作成・検証する。"
@@ -976,7 +1007,7 @@ def build_rebuild_generic_plan(
                 scope += " " + " ".join(target_changes)
             headings = ["現状と前提確認", "具体的設計・作成手順"]
             proposal = {
-                "title": f"達成条件 SC{index:02d} の実行設計",
+                "title": str(criterion).strip().rstrip("。")[:110] or f"達成条件 {key} の実行",
                 "scope": scope[:1500],
                 "headings": headings,
                 "depends_on": [],

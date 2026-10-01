@@ -215,7 +215,10 @@ def test_six_validation_checks_each_rejects_when_broken(tmp_path):
     """
     # 正常な汎用計画をベースとして作成
     criteria = ['成果物の作成と検証', '営業活動の設計']
-    tasks = [make_structured_task(1), make_structured_task(2)]
+    tasks = [compile_task(i, criterion, {
+        'title': f'工程{i}', 'scope': '成果物を作成し根拠を検証する。',
+        'headings': ['内容', '根拠'],
+    }, []) for i, criterion in enumerate(criteria, 1)]
     plan = compile_plan(criteria, tasks, goal='汎用プロジェクト')
 
     dummy_mission = {
@@ -462,3 +465,47 @@ def test_invalid_nonstructural_amend_remains_blocked_instead_of_losing_other_iss
     assert actions[0]['disposition'] == 'unresolved'
     assert actions[0]['lifecycle'] == 'rejected'
     assert '自動反映しません' in actions[0]['reason']
+
+
+def test_rebuild_uses_goal_contract_order_and_reuses_matching_task_title():
+    first = "市場と顧客課題を定義する"
+    second = "商品と契約プランを設計する"
+    old = compile_plan([second, first], [
+        compile_task(1, second, {"title": "商品設計", "scope": "商品を設計する",
+                                 "headings": ["内容", "根拠"]}, []),
+        compile_task(2, first, {"title": "市場調査", "scope": "市場を調べる",
+                                 "headings": ["内容", "根拠"]}, []),
+    ], goal="販売促進")
+    goal_contract = {"criteria": [
+        {"criterion_id": "SC01", "statement": first,
+         "exec_task_keys": ["SC01"], "verify_task_keys": ["final_verification"]},
+        {"criterion_id": "SC02", "statement": second,
+         "exec_task_keys": ["SC02"], "verify_task_keys": ["final_verification"]},
+    ]}
+    mission = {"goal": "販売促進", "success_criteria": f"1. {second}\n2. {first}",
+               "plan_version": 1}
+    old_target = next(task["task_key"] for task in old["tasks"]
+                      if (contract_of(task) or {}).get("criterion") == first)
+    actions = [{"disposition": "rebuild_generic", "target": old_target,
+                "change": "市場仮説を人間が確認してから商品設計へ進む"}]
+    rebuilt = build_rebuild_generic_plan(mission, {"tasks": old["tasks"], "sources": []},
+                                         actions, [], goal_contract)
+    by_key = {task["task_key"]: task for task in rebuilt["tasks"]}
+    assert contract_of(by_key["SC01"])["criterion"] == first
+    assert contract_of(by_key["SC02"])["criterion"] == second
+    assert by_key["SC01"]["title"] == "市場調査"
+    assert by_key["SC02"]["title"] == "商品設計"
+    assert "市場仮説を人間が確認" in by_key["SC01"]["description"]
+    assert "市場仮説を人間が確認" not in by_key["SC02"]["description"]
+    assert validate_rebuild_generic_candidate(rebuilt, goal_contract, mission)["passed"]
+
+def test_rebuild_rejects_criterion_id_with_wrong_statement():
+    criteria = ["市場と顧客課題を定義する"]
+    plan = compile_plan(criteria, [compile_task(1, criteria[0], {
+        "title": "市場調査", "scope": "市場を調べる", "headings": ["内容", "根拠"],
+    }, [])], goal="販売促進")
+    goal_contract = {"criteria": [{"criterion_id": "SC01",
+        "statement": "商品と契約プランを設計する",
+        "exec_task_keys": ["SC01"], "verify_task_keys": ["final_verification"]}]}
+    with pytest.raises(ValueError, match="CRITERION_MISMATCH"):
+        validate_rebuild_generic_candidate(plan, goal_contract, {"plan_version": 1})
