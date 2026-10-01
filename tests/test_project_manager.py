@@ -305,10 +305,13 @@ def test_social_publication_url_counts_as_external_execution_evidence(tmp_path):
 
     evidence = manager._external_execution_evidence(project["id"])
 
-    assert evidence == [{
-        "kind": "social_post", "id": evidence[0]["id"], "channel": "x",
-        "reference": "https://x.com/example/status/1",
-    }]
+    post = next(item for item in evidence if item["kind"] == "social_post")
+    assert post["channel"] == "x"
+    assert post["reference"] == "https://x.com/example/status/1"
+    assert {"social_copy_approval", "manual_social_post", "post_url_registration"} <= {
+        item["kind"] for item in evidence
+    }
+    assert not {"form_response_sync", "lead_evaluation"} & {item["kind"] for item in evidence}
 
 
 @pytest.mark.asyncio

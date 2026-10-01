@@ -375,7 +375,13 @@ def validate_candidate(body, issues, snapshot, detail):
                 ' 工程構造・依存関係・完了契約の指摘は説明追記では解消できないため、汎用計画を再構成します。')[:2000]
         if action['disposition']=='amend':
             if action['target'] not in step_targets or len(action['change'].strip())<20:
-                raise ValueError('修正対象と具体的な修正内容が必要です')
+                # Keep the other reviewed issues, but never apply an unspecified edit.
+                action = dict(action)
+                action['disposition'] = 'unresolved'
+                action['reason'] = (
+                    action['reason'].rstrip() +
+                    ' 修正対象または具体的な差分が不足しているため、計画へ自動反映しません。'
+                )[:2000]
         row = {k: action[k] for k in ACTION_REQUIRED}
         # Normalize a local-model label error only for generic whole-plan rebuilding.
         if row['disposition']=='rebuild_vehicle' and not detail and not is_vehicle:

@@ -451,3 +451,14 @@ def test_public_structure_includes_static_safe_purpose_summaries(tmp_path):
     assert all(task['public_purpose_summary'] for task in packet['tasks'])
     serialized = json.dumps(packet, ensure_ascii=False)
     assert manager.memory.get_mission(pid)['goal'] not in serialized
+def test_invalid_nonstructural_amend_remains_blocked_instead_of_losing_other_issues(tmp_path):
+    manager, pid, _ = setup(tmp_path, True)
+    snapshot, _ = plan_snapshot(manager, pid)
+    issue = {'id': 'business-1', 'text': '価格を実資料に基づいて確定してください'}
+    body = {'actions': [{'issue_id': issue['id'], 'disposition': 'amend',
+        'target': 'missing-task', 'change': '価格を確認',
+        'reason': '価格の根拠がないため修正が必要です。'}]}
+    actions = validate_candidate(body, [issue], snapshot, None)
+    assert actions[0]['disposition'] == 'unresolved'
+    assert actions[0]['lifecycle'] == 'rejected'
+    assert '自動反映しません' in actions[0]['reason']

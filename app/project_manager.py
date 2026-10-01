@@ -1514,29 +1514,39 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         return self.memory.get_mission(project_id)
 
     def _external_execution_evidence(self, project_id: str) -> list[dict]:
-        evidence = [
-            {"kind": "external_action", "id": action.get("id"),
-             "reference": str(action.get("evidence", "")).strip()}
-            for action in self.memory.list_actions(project_id)
-            if action.get("status") == "executed" and str(action.get("evidence", "")).strip()
-        ]
-        for campaign in self.memory.list_campaigns(project_id):
-            public_url = str(campaign.get('google_site_url', '')).strip()
-            if campaign.get('site_publication_status') == 'published' and public_url:
-                evidence.append({
-                    'kind': 'google_site_publication',
-                    'id': campaign.get('id'),
-                    'reference': public_url,
-                })
-            for share in self.memory.list_social_shares(project_id, campaign["id"]):
-                public_url = str(share.get("evidence_url", "")).strip()
-                if share.get("status") == "evidence_registered" and public_url:
-                    evidence.append({
-                        "kind": "social_post", "id": share.get("id"),
-                        "channel": share.get("channel"), "reference": public_url,
-                    })
-        return evidence
+        from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS, campaign_evidence
 
+        evidence = []
+        for action in self.memory.list_actions(project_id):
+            reference = str(action.get("evidence") or "").strip()
+            if action.get("status") != "executed" or not action.get("approved_at") or not reference:
+                continue
+            evidence.append({"kind": "external_action", "id": action.get("id"),
+                             "reference": reference})
+            action_kind = str(action.get("kind") or "").strip()
+            if action_kind and action_kind != "external_action" and action_kind not in CAMPAIGN_OPERATION_KINDS:
+                evidence.append({"kind": action_kind, "id": action.get("id"),
+                                 "reference": reference})
+
+        project = self.memory.get_project(project_id) or {}
+        leads = self.memory.list_leads(project_id)
+        for campaign in self.memory.list_campaigns(project_id):
+            shares = self.memory.list_social_shares(project_id, campaign["id"])
+            kit_exists = False
+            if self.workspace is not None and shares:
+                try:
+                    _, _, kit = self.workspace.resolve_file(
+                        project.get("workspace_path", ""), project_id,
+                        f"premarketing/{campaign['id']}/social/social_post_kit.md",
+                        must_exist=True,
+                    )
+                    kit_exists = kit.is_file()
+                except (OSError, ValueError):
+                    pass
+            evidence.extend(campaign_evidence(
+                campaign, shares, leads, kit_exists=kit_exists,
+            ))
+        return evidence
     @staticmethod
     def _task_requires_external_evidence(task: dict) -> bool:
         contract = contract_of(task) or {}
@@ -1572,18 +1582,39 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
             for share in self.memory.list_social_shares(project_id, campaign["id"])
         ]
         task_contract = contract_of(task) if task else {}
-        site_required = any(
-            item.get('kind') == 'google_site_publication'
-            for item in (task_contract or {}).get('action_requirements', [])
-            if isinstance(item, dict)
+        evidence = self._external_execution_evidence(project_id)
+        missing = []
+        for requirement in (task_contract or {}).get('action_requirements', []):
+            if not isinstance(requirement, dict):
+                continue
+            count = int(requirement.get('minimum_executed') or 0)
+            if count <= 0:
+                continue
+            kind = str(requirement.get('kind') or '')
+            matching = evidence if kind == 'approved_external_action' else [
+                item for item in evidence if item.get('kind') == kind
+            ]
+            if len(matching) < count:
+                missing.append(kind)
+        guidance = {
+            'google_site_publication': '公開済みLPがなければ、承認済み原案を確認してGoogle Sitesを手動公開し、公開URLを検証・登録する',
+            'social_posting_kit_generation': '公開済みLPを確認し、SNS投稿キットを生成する',
+            'social_copy_approval': 'SNS文案と計測URLを確認し、媒体ごとに承認する',
+            'manual_social_post': '承認済みSNS文案の投稿画面を開き、人間が投稿して公開URLを取得する',
+            'post_url_registration': '実際に公開したSNS投稿URLを証拠登録する',
+            'form_response_sync': 'Googleフォームの回答を同期し、成功日時を確認する',
+            'lead_evaluation': '同意付きの実リードを取得し、評価結果を確認する',
+            'approved_customer_engagement': '顧客接触アクションを個別に承認・実施し、証拠を登録する',
+        }
+        first_missing = missing[0] if missing else ''
+        required_next_step = guidance.get(first_missing) or (
+            '外部実行キューの対象・内容を確認して承認・実行・証拠登録する'
         )
-        required_next_step = (
-            'プレマーケティング画面で最新版LPを確認・承認し、専用ブラウザでGoogle Sitesを'
-            '手動公開してから、公開URLを「公開結果を検証・登録」へ入力する'
-            if site_required else
-            '外部実行キューの対象・内容を確認して承認・実行・証拠登録するか、'
-            '承認済みSNS文案を手動投稿して公開投稿URLを登録する'
-        )
+        if first_missing == 'form_response_sync' and any(
+            campaign.get('publication_status') == 'reauth_required'
+            for campaign in campaigns
+        ):
+            required_next_step = 'Google OAuthを人間が再認証し、フォーム回答同期を再試行する'
         detail = json.dumps({
             "waiting_task": task.get("task_key") if task else "final_goal_assessment",
             "external_actions": {
@@ -1607,6 +1638,7 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                     for campaign in campaigns
                 ),
             },
+            'missing_requirements': missing,
             'required_next_step': required_next_step,
         }, ensure_ascii=False)
         self.memory.set_mission_status(
