@@ -94,7 +94,7 @@ async def test_complete_disables_thinking_as_final_empty_response_fallback():
 
 
 @pytest.mark.asyncio
-async def test_complete_json_passes_schema_and_uses_low_thinking_for_gpt_oss_compatibility():
+async def test_complete_json_passes_schema_and_disables_thinking_for_structured_output():
     class StructuredOllama(Ollama):
         def __init__(self):
             super().__init__("http://local", "fake")
@@ -127,5 +127,5 @@ async def test_complete_json_passes_schema_and_uses_low_thinking_for_gpt_oss_com
 
     assert result == '{"title":"ok"}'
     assert llm.request["format"] == schema
-    assert llm.request["think"] == "low"
+    assert llm.request["think"] is False
     assert llm.request["temperature"] == 0.0

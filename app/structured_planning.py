@@ -480,12 +480,25 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
         'execution_status': 40,
     }
     indexed_tasks = list(enumerate(tasks))
-    indexed_tasks.sort(key=lambda pair: (
-        0 if (contract_of(pair[1]) or {}).get('public_web_research', {}).get('required')
-        else priority.get((contract_of(pair[1]) or {}).get('public_purpose_code'), 29),
-        pair[0],
-    ))
-    tasks = [preparation, *(task for _, task in indexed_tasks)]
+    remaining = list(indexed_tasks)
+    ordered_tasks = []
+    while remaining:
+        remaining_keys = {task['task_key'] for _, task in remaining}
+        ready = [
+            pair for pair in remaining
+            if (contract_of(pair[1]) or {}).get('public_web_research', {}).get('required')
+            or not any(dep in remaining_keys for dep in pair[1].get('depends_on', []))
+        ]
+        if not ready:
+            ready = [remaining[0]]
+        selected = min(ready, key=lambda pair: (
+            0 if (contract_of(pair[1]) or {}).get('public_web_research', {}).get('required')
+            else priority.get((contract_of(pair[1]) or {}).get('public_purpose_code'), 29),
+            pair[0],
+        ))
+        remaining.remove(selected)
+        ordered_tasks.append(selected[1])
+    tasks = [preparation, *ordered_tasks]
     web_tasks = [
         current for current in tasks[1:]
         if (contract_of(current) or {}).get("public_web_research", {}).get("required")
