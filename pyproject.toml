@@ -5,7 +5,7 @@ build-backend="setuptools.build_meta"
 name="local-voice-ai"
 version="0.1.0"
 requires-python=">=3.11,<3.14"
-dependencies=["fastapi>=0.116,<1","uvicorn[standard]>=0.35,<1","httpx>=0.27,<1","numpy>=1.26,<3","PyYAML>=6,<7","sounddevice>=0.5,<1","pypdf>=5,<7","pypdfium2>=4,<6","pillow>=10,<13","python-multipart>=0.0.20,<1"]
+dependencies=["fastapi>=0.116,<1","uvicorn[standard]>=0.35,<1","httpx>=0.27,<1","numpy>=1.26,<3","PyYAML>=6,<7","sounddevice>=0.5.6,<1","pypdf>=5,<7","pypdfium2>=4,<6","pillow>=10,<13","python-multipart>=0.0.20,<1"]
 [project.optional-dependencies]
 reproduction=["openpyxl==3.1.5"]
 rag=[]
