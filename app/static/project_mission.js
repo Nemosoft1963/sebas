@@ -4,37 +4,18 @@ document.addEventListener("DOMContentLoaded",function(){
   var mission=null,missionProject="",missionDirty=false,missionBusy=false,providerCatalog=[],externalActions=[],premarketing={campaigns:[],leads:[]},premarketingLoading=false;
   function el(id){return document.getElementById(id)}
   function escapeHtml(value){var d=document.createElement("div");d.textContent=value==null?"":String(value);return d.innerHTML}
-  function statusLabel(value){return({draft:"目標編集中",planning:"計画確認待ち",ready:"実行待ち",running:"実行中",paused:"一時停止",completed:"全工程完了・目標達成は未確定",failed:"未達成・エラー停止",cancelled:"中止"})[value]||value}
+  var presenters=window.MmiPresenters;
+  function technicalInfo(value,label){return '<details class="technical-info"><summary>'+(label||'技術情報を表示')+'</summary><pre>'+escapeHtml(presenters.rawJson(value))+'</pre></details>'}
+  function cardsHtml(model){return '<div class="presenter-cards">'+model.cards.map(function(card){return '<section class="presenter-card"><h4>'+escapeHtml(card.title)+'</h4><p>'+escapeHtml(card.value)+'</p></section>'}).join('')+'</div>'+technicalInfo(model.raw)}
+  function userError(error){var shown=presenters.httpErrorPresenter(null,error&&error.message);return shown.message+' '+technicalInfo(shown.raw)}
+  function statusLabel(value){return({draft:"目標編集中",planning:"計画確認待ち",ready:"実行待ち",running:"実行中",paused:"一時停止",completed:"全工程完了・目標達成は未確定",failed:"未達成・エラー停止",cancelled:"中止"})[value]||presenters.statusPresenter(value)}
   function completedGoalLabel(){var snap=typeof window.workflowReadinessSnapshot==="function"?window.workflowReadinessSnapshot():null;if(snap&&snap.final_completed===true)return "目標達成(確定)";return "全工程完了・目標達成は未確定"}
   function missionStateText(){var state=mission&&mission.status||"draft";if(state==="ready"&&mission.execution_gate&&mission.execution_gate.blocked)return "承認済み・外部検証待ち";if(state==="completed")return completedGoalLabel();return statusLabel(state)}
   window.refreshGoalCompletionLabels=function(){if(mission&&el("missionState"))el("missionState").textContent=missionStateText()};
-  function renderGateGuidance(state){
-    var guide=el("missionGateGuidance");
-    if(!guide){
-      guide=document.createElement("section");guide.id="missionGateGuidance";guide.className="mission-gate-guidance";guide.setAttribute("role","status");
-      el("missionPlanSummary").before(guide);
-    }
-    var gate=mission.execution_gate||{},blocked=!!gate.blocked;
-    if(!blocked){guide.hidden=true;guide.replaceChildren();return}
-    guide.hidden=false;guide.replaceChildren();
-    var title=document.createElement("strong");title.textContent="次にすること：計画を外部AIで検証する";guide.append(title);
-    var reason=document.createElement("p");reason.textContent=gate.reason||"計画の検証が完了していないため、実行開始を待っています。";guide.append(reason);
-    var steps=document.createElement("ol");
-    ["下の「目標検証・人間確認・RAG」を開く","公開用の目標・計画説明を確認し、安全確認にチェックする","「選択済み外部AIで検証する」を押す。合格後、この画面へ戻って実行開始する"].forEach(function(text){var item=document.createElement("li");item.textContent=text;steps.append(item)});
-    guide.append(steps);
-    var open=document.createElement("button");open.type="button";open.textContent="目標検証を開く";open.onclick=function(){var tab=document.querySelector('#workflow [data-view="plan"]');if(tab)tab.click();
-      var panel=el("goalReviewPanel");
-      if(!panel){el("missionMessage").textContent="目標検証画面を読み込み中です。数秒後にもう一度押してください。";return}
-      var details=panel.querySelector("details");if(details)details.open=true;
-      panel.scrollIntoView({behavior:"smooth",block:"start"});
-      var summary=el("goalPublicSummary");if(summary)setTimeout(function(){summary.focus()},350);
-    };guide.append(open);
-    var note=document.createElement("small");note.textContent="外部AIから指摘が返った場合は、同じ画面の「指摘を計画に反映」を上から順に実行してください。";guide.append(note);
-  }
   function taskStatus(value){return({pending:"待機",running:"実行中",completed:"完了",failed:"失敗",needs_review:"資料・計算の確認待ち",blocked:"依存失敗で停止",skipped:"スキップ"})[value]||value}
   async function jsonRequest(url,options){
     var response=await fetch(url,options),body=await response.json().catch(function(){return{}});
-    if(!response.ok)throw Error(typeof body.detail==="string"?body.detail:JSON.stringify(body.detail||"処理に失敗しました"));
+    if(!response.ok){var detail=typeof body.detail==="string"?body.detail:presenters.rawJson(body.detail||body);var shown=presenters.httpErrorPresenter(response.status,detail),error=Error(shown.message);error.technical=shown.raw;throw error;}
     return body;
   }
   function renderExternalActions(){
@@ -193,7 +174,7 @@ document.addEventListener("DOMContentLoaded",function(){
     if(info.stale)html+='<p class="error">入力または親契約が変更されています。再開時に詳細計画を更新します。</p>';
     (p.steps||[]).forEach(function(step){
       var spec=p.payload.steps.find(function(x){return x.id===step.step_id})||{};
-      html+='<details><summary>'+escapeHtml(step.step_id+' '+(spec.title||'')+' — '+taskStatus(step.state))+'</summary><p>'+escapeHtml(spec.objective||'')+'</p><p>完了条件: '+escapeHtml(spec.validation||'')+'</p>'+(step.error?'<p class="error">'+escapeHtml(step.error)+'</p>':'')+'<pre>'+escapeHtml(JSON.stringify(step.output,null,2))+'</pre></details>';
+      html+='<details><summary>'+escapeHtml(step.step_id+' '+(spec.title||'')+' — '+taskStatus(step.state))+'</summary><p>'+escapeHtml(spec.objective||presenters.UNKNOWN)+'</p><p>完了条件: '+escapeHtml(spec.validation||presenters.UNKNOWN)+'</p>'+cardsHtml(presenters.taskResultPresenter({result:step.output,error:step.error}))+'</details>';
     });
     var end=p.steps.find(function(x){return x.step_id==='D06'});
     if(task.status==='needs_review'&&end&&end.state==='needs_review'&&!info.stale){
@@ -226,11 +207,10 @@ document.addEventListener("DOMContentLoaded",function(){
     var active=(mission.tasks||[]).filter(function(x){return x.status==="running"}).length,waiting=(mission.tasks||[]).filter(function(x){return x.status==="pending"}).length;
     el("missionProgressText").textContent=progress.completed+" / "+progress.total+" 完了（"+progress.percent+"%）・実行中 "+active+" / "+(mission.max_parallel_tasks||2)+"・待機 "+waiting;
     el("missionPlanSummary").textContent=mission.plan_summary||"目標を保存し、「AIで計画生成」を押してください。";
-    renderGateGuidance(state);
     renderInstructionChat();
     var tasks=mission.tasks||[];
     var reviews=mission.plan_reviews||[];
-    if(el("missionPlanReviews")){var reviewHtml=reviews.length?"<h3>複数AIによる計画評価</h3>"+reviews.map(function(review){return "<article class=\"mission-event\"><strong>"+escapeHtml(review.label||review.id)+" — "+(review.ok?"評価完了":"評価失敗")+"</strong><pre>"+escapeHtml(review.ok?review.review:review.error)+"</pre></article>"}).join(""):"<span class=\"mission-empty\">外部AI評価は未実施です</span>";if(state==="failed"&&mission.final_report)reviewHtml+="<article class=\"mission-event\"><strong>未解決事項レポート</strong><details open><summary>検討経緯と残った課題</summary><pre>"+escapeHtml(mission.final_report)+"</pre></details></article>";el("missionPlanReviews").innerHTML=reviewHtml}
+    if(el("missionPlanReviews")){var reviewHtml=reviews.length?"<h3>複数AIによる計画評価</h3>"+reviews.map(function(review){var model=presenters.reviewPresenter({status:review.ok?'passed':'not_passed',reviews:[{provider:review.label||review.id,status:review.ok?'passed':'not_passed',issues:review.ok?review.review:review.error}]});return "<article class=\"mission-event\"><strong>"+escapeHtml(review.label||review.id||presenters.UNKNOWN)+" — "+(review.ok?"評価完了":"評価失敗")+"</strong>"+cardsHtml(model)+"</article>"}).join(""):"<span class=\"mission-empty\">外部AI評価は未実施です</span>";if(state==="failed"&&mission.final_report)reviewHtml+="<article class=\"mission-event\"><strong>未解決事項レポート</strong><p>未解決事項があります。技術情報を確認してください。</p>"+technicalInfo(mission.final_report)+"</article>";el("missionPlanReviews").innerHTML=reviewHtml}
     el("missionTasks").innerHTML=tasks.length?tasks.map(function(task){
       var details=task.result||task.error,deps=task.depends_on||[];
       var quality=(mission.quality_attempts||[]).find(function(x){return x.task_id===task.id});
@@ -242,23 +222,23 @@ document.addEventListener("DOMContentLoaded",function(){
         detailHtml(task)+routeHtml+qualityHtml+(deps.length?"<p>依存: "+escapeHtml(deps.join(", "))+"</p>":"")+
         (task.agent_label?"<p>担当: "+escapeHtml(task.agent_label)+"</p>":"")+
         (task.description?"<p>"+escapeHtml(task.description)+"</p>":"")+
-        (task.acceptance_criteria?"<p>完了判定: "+escapeHtml(task.acceptance_criteria)+"</p>":"")+
-        (details?"<details"+(task.status==="failed"?" open":"")+"><summary>"+(task.error?"エラー":"中途成果・実行結果")+"</summary><pre>"+escapeHtml(details)+"</pre></details>":"")+"</article>";
-    }).join(""):"<span class=\"mission-empty\">計画はまだありません</span>";
+        cardsHtml(presenters.planContractPresenter(task.acceptance_criteria,task))+
+        (details?"<section class=\"task-result\"><h4>"+(task.error?"エラー":"中途成果・実行結果")+"</h4>"+cardsHtml(presenters.taskResultPresenter(task))+"</section>":"")+"</article>";
+    }).join(""):"<span class=\"mission-empty\">計画はまだありません。目標を入力して計画を生成してください。</span>";
     bindDetailControls();
     var events=mission.events||[];
     el("missionEvents").innerHTML=events.length?events.slice(0,40).map(function(event){
       var when=new Date(event.created_at).toLocaleString("ja-JP");
       return "<article class=\"mission-event\"><time>"+escapeHtml(when)+"</time><strong>"+escapeHtml(event.message)+"</strong>"+
         (event.detail?"<details><summary>中途報告の詳細</summary><pre>"+escapeHtml(event.detail)+"</pre></details>":"")+"</article>";
-    }).join(""):"<span class=\"mission-empty\">中途報告はまだありません</span>";
+    }).join(""):"<span class=\"mission-empty\">履歴はまだありません。計画を実行すると判断・操作の記録が表示されます。</span>";
     var running=state==="running";
     el("missionSave").disabled=running||missionBusy;
     el("missionGenerate").disabled=running||missionBusy||!el("missionGoal").value.trim();
     el("missionApprove").disabled=state!=="planning"||missionBusy;
     el("missionStart").disabled=["ready","paused"].indexOf(state)<0||missionBusy||!!mission.execution_gate?.blocked;
     el("missionStart").title=mission.execution_gate?.reason||"";
-    var gateNotice=el("missionGateNotice");if(!gateNotice){gateNotice=document.createElement("p");gateNotice.id="missionGateNotice";el("missionState").parentElement.append(gateNotice);}gateNotice.textContent=mission.execution_gate?.blocked?mission.execution_gate.reason:"";
+    var gateNotice=el("missionGateNotice");if(!gateNotice){gateNotice=document.createElement("p");gateNotice.id="missionGateNotice";gateNotice.className="action-block-reason";gateNotice.setAttribute("aria-live","polite");el("missionStart").insertAdjacentElement("afterend",gateNotice);}gateNotice.hidden=!mission.execution_gate?.blocked;gateNotice.textContent=mission.execution_gate?.blocked?"利用できない理由: "+mission.execution_gate.reason+"。解除方法: 外部検証または必要な確認を完了してください。":"";
     el("missionStart").textContent=state==="paused"?"実行再開":"実行開始";
     el("missionPause").disabled=!running||missionBusy;
     el("missionRetry").disabled=state!=="failed"||missionBusy;
@@ -470,66 +450,94 @@ document.addEventListener("DOMContentLoaded",function(){
   el("missionCancel").addEventListener("click",function(){if(confirm("この計画の実行を中止しますか？ 完了済み成果は残ります。"))action("cancel","実行を中止しています...").catch(function(){})});
   el("missionDownload").addEventListener("click",function(){downloadSavedResult("/api/projects/"+encodeURIComponent(currentProject)+"/mission/report/download")});
   el("missionArtifactsDownload").addEventListener("click",function(){downloadSavedResult("/api/projects/"+encodeURIComponent(currentProject)+"/mission/artifacts/download")});
-  var originalRenderProject=renderProject;
-  renderProject=function(){originalRenderProject();var selected=projects.find(function(p){return p.id===currentProject});if(el("projectWorkspace"))el("projectWorkspace").value=selected&&selected.workspace_path||"";missionProject="";loadMission(true);loadWorkspace()};
-  setupWorkflowTabs();
-  loadProviders();
-  loadMission(true);
-  setInterval(function(){loadMission(false)},1000);
-  setupWorkspaceUI();
-  var selectedProject=projects.find(function(p){return p.id===currentProject});if(el("projectWorkspace"))el("projectWorkspace").value=selectedProject&&selectedProject.workspace_path||"";
-  loadWorkspace();
-  setupContextFolderUpload();
+  var originalRenderProject=renderProject,lastRenderedProject='';
+  renderProject=function(){originalRenderProject();var selected=projects.find(function(p){return p.id===currentProject});if(el("projectTargetName"))el("projectTargetName").textContent=selected&&selected.name||"未選択";if(el("projectWorkspace"))el("projectWorkspace").value=selected&&selected.workspace_path||"";var switched=lastRenderedProject!==currentProject;lastRenderedProject=currentProject;if(switched)clearUnsentDrafts();missionProject="";applyProjectTabMemory();loadMission(true);loadWorkspace()};
+  var WORKFLOW_TAB_KEYS=['overview','goal_plan','execute','artifacts','history'];
+  var WORKFLOW_TAB_ALIASES={requirements:'goal_plan',plan:'goal_plan',flow:'goal_plan',monitor:'execute',examples:'history'};
+  function workflowTabStorageKey(pid){return 'localWorkflowTab:'+String(pid||'')}
+  function canonicalWorkflowTab(key){if(WORKFLOW_TAB_ALIASES[key])key=WORKFLOW_TAB_ALIASES[key];if(WORKFLOW_TAB_KEYS.indexOf(key)<0)key='overview';return key}
+  function workflowPanel(key){key=canonicalWorkflowTab(key);return el('workflow-'+key)}
+  function readWorkflowTab(pid){try{var saved=localStorage.getItem(workflowTabStorageKey(pid));if(saved)return canonicalWorkflowTab(saved)}catch(e){}return 'overview'}
+  function writeWorkflowTab(pid,key){if(!pid)return;try{localStorage.setItem(workflowTabStorageKey(pid),canonicalWorkflowTab(key))}catch(e){}}
+  function clearUnsentDrafts(){
+    ['missionGoal','missionCriteria','missionConstraints','missionInstructionInput','externalActionTarget','externalActionContent','premarketingTitle','premarketingAudience','premarketingOffer','premarketingCta','researchTopic','input'].forEach(function(id){var node=el(id);if(node)node.value='';});
+    if(el('missionExternal'))el('missionExternal').checked=false;
+    if(el('missionMaxParallel'))el('missionMaxParallel').value='2';
+    detailDrafts={};workflowSignature='';selectedWorkflowTask='';
+    var list=el('premarketingList');if(list){list.dataset.renderSignature='';list.dataset.renderProject='';}
+  }
+  function updateWorkflowEmptyState(){
+    var guide=el('workflowEmptyGuide'),has=!!currentProject;
+    if(guide)guide.hidden=has;
+    document.querySelectorAll('#workflow [role=tab]').forEach(function(button){button.disabled=!has});
+    if(!has){document.querySelectorAll('#workflow [role=tabpanel]').forEach(function(panel){panel.hidden=true});var status=document.querySelector('#workflow .workflow-status');if(status)status.textContent='プロジェクトが未選択です。作業対象から選択または新規作成してください。';}
+  }
+  function applyProjectTabMemory(){
+    updateWorkflowEmptyState();
+    if(currentProject)selectWorkflowTab(readWorkflowTab(currentProject));
+  }
   function setupWorkflowTabs(){
     var main=document.querySelector('body>main'),host=document.createElement('section');
     host.id='workflow';host.className='card workflow';
-    host.innerHTML='<div class="workflow-project"><strong>プロジェクト</strong></div><nav role="tablist" aria-label="プロジェクト作業"><button type="button" role="tab" data-view="requirements">1. プロジェクト・要求</button><button type="button" role="tab" data-view="plan">2. 計画内容</button><button type="button" role="tab" data-view="flow">3. 計画フロー</button><button type="button" role="tab" data-view="monitor">4. 実行モニタリング</button><button type="button" role="tab" data-view="examples">5. 実行例・再利用</button></nav><div class="workflow-status" role="status"></div>';
-    main.querySelector('.top').insertAdjacentElement('afterend',host);
-    host.querySelector('.workflow-project').appendChild(el('projectSelect'));
+    host.innerHTML='<nav class="workflow-tabs" role="tablist" aria-label="プロジェクト作業"><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="overview">概要</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="goal_plan">目標と計画</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="execute">実行と確認</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="artifacts">成果物</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="history">履歴</button></nav><div class="workflow-status" role="status" aria-live="polite" aria-atomic="true"></div><div id="workflowEmptyGuide" class="workflow-empty-guide" hidden><h2>プロジェクトを選択してください</h2><p>作業を始めるには、上の「作業対象」からプロジェクトを選ぶか、「新規作成」してください。未選択のままでは、前のプロジェクトの入力内容は使いません。</p></div>';
+    var targetBar=el('projectTargetBar'),settingsPanel=el('projectSettingsPanel'),settingsToggle=el('projectSettingsToggle');
+    targetBar.insertAdjacentElement('afterend',host);
+    var projectCard=document.querySelector('.card.project');
+    if(projectCard)settingsPanel.appendChild(projectCard);
+    settingsToggle.onclick=function(){var opening=settingsPanel.hidden;settingsPanel.hidden=!opening;settingsToggle.setAttribute('aria-expanded',String(opening));settingsToggle.textContent=opening?'設定を閉じる':'設定'};
     host.querySelector('.workflow-status').append(el('missionState'),el('missionMessage'));
-    ['requirements','plan','flow','monitor','examples'].forEach(function(key){var panel=document.createElement('section');panel.id='workflow-'+key;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby','workflow-tab-'+key);host.appendChild(panel)});
-    function move(selector,key){var node=document.querySelector(selector);if(node)el('workflow-'+key).appendChild(node)}
-    function buttons(key,ids){var row=document.createElement('div');row.className='mission-actions';el('workflow-'+key).appendChild(row);ids.forEach(function(id){if(el(id))row.appendChild(el(id))})}
-    move('.card.project','requirements');move('.mission-note','requirements');move('.mission-fields','requirements');
+    WORKFLOW_TAB_KEYS.forEach(function(key){var panel=document.createElement('section');panel.id='workflow-'+key;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby','workflow-tab-'+key);panel.tabIndex=0;host.appendChild(panel)});
+    var examplesHost=document.createElement('div');examplesHost.id='workflow-examples';workflowPanel('history').appendChild(examplesHost);
+    function move(selector,key){var node=document.querySelector(selector);if(node)workflowPanel(key).appendChild(node)}
+    function buttons(key,ids){var row=document.createElement('div');row.className='mission-actions';workflowPanel(key).appendChild(row);ids.forEach(function(id){if(el(id))row.appendChild(el(id))})}
+    move('.mission-note','goal_plan');move('.mission-fields','goal_plan');
     var instruction=document.createElement('section');instruction.className='mission-instructions';instruction.innerHTML='<h3>追加指示</h3><p>現在の進捗を保持したまま、今後の処理条件へ指示を追加します。公開Web調査を依頼するときは「Webを検索」と明記してください。検索語や外部AIへ社内原本・個人情報・認証情報は送らず、公式一次資料を保存してローカルLLMが分析します。</p><div id="missionInstructionChat" class="instruction-chat" aria-live="polite"><span class="mission-empty">追加指示はまだありません</span></div><form id="missionInstructionForm" class="instruction-composer"><textarea id="missionInstructionInput" maxlength="4000" rows="3" placeholder="例：Webを検索して現行の公募要領を公式一次資料から収集し、URL・取得日時・版を保存する"></textarea><button id="missionInstructionSend" type="submit">追加指示を送信</button></form>';
-    el('workflow-requirements').appendChild(instruction);el('missionInstructionForm').onsubmit=function(event){event.preventDefault();submitMissionInstruction()};
-    move('.mission-external','requirements');
-    buttons('requirements',['missionSave','missionGenerate']);
-    buttons('plan',['missionApprove']);
+    workflowPanel('goal_plan').appendChild(instruction);el('missionInstructionForm').onsubmit=function(event){event.preventDefault();submitMissionInstruction()};
+    move('.mission-external','goal_plan');
+    buttons('goal_plan',['missionSave','missionGenerate']);
+    buttons('goal_plan',['missionApprove']);
     var approvalBar=el('missionApprove').parentElement;approvalBar.classList.add('mission-approval-bar');el('missionApprove').textContent='この計画を承認して実行準備へ';
     var approvalHint=document.createElement('span');approvalHint.textContent='計画内容を確認後、このボタンで承認してください。';approvalBar.appendChild(approvalHint);
-    move('#missionPlanSummary','plan');move('#missionPlanReviews','plan');
-    var planList=document.createElement('div');planList.id='workflowPlanTasks';el('workflow-plan').appendChild(planList);
-    ['flow','monitor'].forEach(function(key){var intro=document.createElement('p');intro.textContent=key==='flow'?'矢印は先行工程から後続工程への依存関係です。同じ段の工程は依存関係上、並行実行が可能です。':'工程を選択すると結果とエラーを表示します。状態は自動更新されます。';el('workflow-'+key).appendChild(intro);var graph=document.createElement('div');graph.id='workflowGraph-'+key;graph.className='workflow-graph';el('workflow-'+key).appendChild(graph)});
-    buttons('monitor',['missionStart','missionPause','missionRetry','missionVerify','missionCancel','missionDownload','missionArtifactsDownload']);
-    move('.mission-progress-wrap','monitor');
-    var detail=document.createElement('div');detail.id='workflowTaskDetail';detail.className='mission-event';el('workflow-monitor').appendChild(detail);
-    move('.mission-columns','monitor');
-    if(actionBox)el('workflow-monitor').appendChild(actionBox);
-    if(pre)el('workflow-monitor').appendChild(pre);
-    move('.card.monitor','monitor');
-    var tools=document.createElement('details');tools.className='workflow-tools';tools.innerHTML='<summary>AI会話・外部AI調査</summary>';el('workflow-requirements').appendChild(tools);
+    move('#missionPlanSummary','goal_plan');move('#missionPlanReviews','goal_plan');
+    var planList=document.createElement('div');planList.id='workflowPlanTasks';workflowPanel('goal_plan').appendChild(planList);
+    var graphHosts={flow:'goal_plan',monitor:'execute'};
+    ['flow','monitor'].forEach(function(key){var intro=document.createElement('p');intro.textContent=key==='flow'?'工程依存図（補助表示）。矢印は先行工程から後続工程への依存関係です。同じ段の工程は依存関係上、並行実行が可能です。':'工程を選択すると結果とエラーを表示します。状態は自動更新されます。';workflowPanel(graphHosts[key]).appendChild(intro);var graph=document.createElement('div');graph.id='workflowGraph-'+key;graph.className='workflow-graph';workflowPanel(graphHosts[key]).appendChild(graph)});
+    buttons('execute',['missionStart','missionPause','missionRetry','missionVerify','missionCancel','missionDownload','missionArtifactsDownload']);
+    var resumeHint=document.createElement('p');resumeHint.id='workflowResumeHint';resumeHint.textContent='障害や一時停止のあとは「実行再開」で保存工程から続けられます。失敗した工程は「失敗タスクを再試行」を使います。';workflowPanel('execute').appendChild(resumeHint);
+    move('.mission-progress-wrap','execute');
+    var detail=document.createElement('div');detail.id='workflowTaskDetail';detail.className='mission-event';workflowPanel('execute').appendChild(detail);
+    move('.mission-columns','execute');
+    var eventsCol=el('missionEvents')&&el('missionEvents').closest('.mission-column');
+    var historyHead=document.createElement('h2');historyHead.textContent='判断・操作の記録';workflowPanel('history').appendChild(historyHead);
+    if(eventsCol)workflowPanel('history').appendChild(eventsCol);
+    if(actionBox)workflowPanel('execute').appendChild(actionBox);
+    if(pre)workflowPanel('execute').appendChild(pre);
+    move('.card.monitor','execute');
+    var artIntro=document.createElement('p');artIntro.className='mission-note';artIntro.textContent='生成済み成果物を下書き・暫定・検証済み・人間承認済みで区別します。RAG登録は人間承認済みの結果からのみ進められます。';workflowPanel('artifacts').appendChild(artIntro);
+    var experiencePanel=el('experienceImportPanel');if(experiencePanel)workflowPanel('artifacts').appendChild(experiencePanel);
+    var tools=document.createElement('details');tools.className='workflow-tools';tools.innerHTML='<summary>AI会話・外部AI調査</summary>';workflowPanel('goal_plan').appendChild(tools);
     var chat=document.querySelector('main>.grid'),research=document.querySelector('.card.research');if(chat)tools.appendChild(chat);if(research)tools.appendChild(research);
     document.querySelector('.mission-shell').hidden=true;
     host.querySelectorAll('[role=tab]').forEach(function(button,index){
       button.id='workflow-tab-'+button.dataset.view;button.setAttribute('aria-controls','workflow-'+button.dataset.view);
       button.onclick=function(){selectWorkflowTab(button.dataset.view)};
-      button.onkeydown=function(event){var tabs=Array.from(host.querySelectorAll('[role=tab]')),next=event.key==='ArrowRight'?(index+1)%5:event.key==='ArrowLeft'?(index+4)%5:event.key==='Home'?0:event.key==='End'?4:-1;if(next>=0){event.preventDefault();tabs[next].click();tabs[next].focus()}};
+      button.onkeydown=function(event){var tabs=Array.from(host.querySelectorAll('[role=tab]')),next=event.key==='ArrowRight'?(index+1)%5:event.key==='ArrowLeft'?(index+4)%5:event.key==='Home'?0:event.key==='End'?4:-1;if(event.key==='Enter'||event.key===' '){event.preventDefault();selectWorkflowTab(button.dataset.view);return;}if(next>=0){event.preventDefault();tabs[next].click();tabs[next].focus()}};
     });
-    var saved='requirements';try{saved=localStorage.getItem('localWorkflowTab')||saved}catch(e){}
-    selectWorkflowTab(saved);
+    applyProjectTabMemory();
   }
   function selectWorkflowTab(key){
-    if(['requirements','plan','flow','monitor','examples'].indexOf(key)<0)key='requirements';
-    document.querySelectorAll('#workflow [role=tab]').forEach(function(button){var active=button.dataset.view===key;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;el('workflow-'+button.dataset.view).hidden=!active});
-    try{localStorage.setItem('localWorkflowTab',key)}catch(e){}
+    key=canonicalWorkflowTab(key);
+    document.querySelectorAll('#workflow [role=tab]').forEach(function(button){var active=button.dataset.view===key;button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;var panel=workflowPanel(button.dataset.view);if(panel)panel.hidden=!active});
+    var examples=el('workflow-examples');if(examples)examples.hidden=key!=='history';
+    writeWorkflowTab(currentProject,key);
   }
+  window.selectWorkflowTab=selectWorkflowTab;
   var workflowSignature='',selectedWorkflowTask='';
   function renderWorkflow(){
     if(!el('workflow'))return;
     var tasks=mission.tasks||[],signature=JSON.stringify([currentProject,mission.status,tasks]);
     if(signature===workflowSignature)return;workflowSignature=signature;
-    el('workflowPlanTasks').innerHTML=tasks.length?tasks.map(function(t){return '<article class="mission-task"><h3>'+escapeHtml(t.position+'. '+t.title)+'</h3><p>'+escapeHtml(t.description||'')+'</p><p>担当: '+escapeHtml(t.agent_label||t.mode||'未設定')+'</p><p>完了判定: '+escapeHtml(t.acceptance_criteria||'未設定')+'</p><p>先行工程: '+escapeHtml((t.depends_on||[]).join(', ')||'なし')+'</p></article>'}).join(''):'<p>計画はまだありません。「プロジェクト・要求」で計画を生成してください。</p>';
+    el('workflowPlanTasks').innerHTML=tasks.length?tasks.map(function(t){return '<article class="mission-task"><h3>'+escapeHtml(t.position+'. '+t.title)+'</h3><p>'+escapeHtml(t.description||presenters.UNKNOWN)+'</p><p>担当: '+escapeHtml(t.agent_label||t.mode||presenters.UNKNOWN)+'</p>'+cardsHtml(presenters.planContractPresenter(t.acceptance_criteria,t))+'</article>'}).join(''):'<p>計画はまだありません。「プロジェクト・要求」で計画を生成してください。</p>';
     var nodes=new Map(),unresolved=new Set(),levels=new Map();
     tasks.forEach(function(t,i){nodes.set(String(t.task_key||t.id||i),t)});
     function level(key,visiting){if(levels.has(key))return levels.get(key);if(visiting.has(key)){unresolved.add(key);return 0}var next=new Set(visiting);next.add(key);var depth=0;(nodes.get(key).depends_on||[]).forEach(function(dep){dep=String(dep);if(nodes.has(dep))depth=Math.max(depth,level(dep,next)+1);else unresolved.add(key)});levels.set(key,depth);return depth}
@@ -549,7 +557,15 @@ document.addEventListener("DOMContentLoaded",function(){
   }
   function showWorkflowTask(){
     var task=(mission.tasks||[]).find(function(t,i){return String(t.task_key||t.id||i)===selectedWorkflowTask});
-    el('workflowTaskDetail').innerHTML=task?'<h3>'+escapeHtml(task.title)+' — '+escapeHtml(taskStatus(task.status))+'</h3><p>'+escapeHtml(task.description||'')+'</p><p>先行工程: '+escapeHtml((task.depends_on||[]).join(', ')||'なし')+'</p><p>完了判定: '+escapeHtml(task.acceptance_criteria||'未設定')+'</p><pre>'+escapeHtml(task.error||task.result||'実行結果はまだありません')+'</pre>':'工程を選択すると詳細を表示します。';
+    el('workflowTaskDetail').innerHTML=task?'<h3>'+escapeHtml(task.title)+' — '+escapeHtml(taskStatus(task.status))+'</h3><p>'+escapeHtml(task.description||presenters.UNKNOWN)+'</p>'+cardsHtml(presenters.planContractPresenter(task.acceptance_criteria,task))+cardsHtml(presenters.taskResultPresenter(task)):'工程を選択すると詳細を表示します。';
   }
+  setupWorkflowTabs();
+  loadProviders();
+  loadMission(true);
+  setInterval(function(){loadMission(false)},1000);
+  setupWorkspaceUI();
+  var selectedProject=projects.find(function(p){return p.id===currentProject});if(el("projectWorkspace"))el("projectWorkspace").value=selectedProject&&selectedProject.workspace_path||"";
+  loadWorkspace();
+  setupContextFolderUpload();
 });
 })();

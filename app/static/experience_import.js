@@ -1,7 +1,7 @@
 (()=>{'use strict';
 
 function init(){
- const host=document.getElementById('experienceImportPanel')||document.getElementById('experienceImportRoot')||document.querySelector('.mission-shell')||document.body;
+ const host=document.getElementById('workflow-artifacts')||document.getElementById('experienceImportPanel')||document.getElementById('experienceImportRoot')||document.querySelector('.mission-shell')||document.body;
  if(!host){setTimeout(init,300);return;}
 
  let panel=document.getElementById('experienceImportPanel');
@@ -9,6 +9,8 @@ function init(){
   panel=document.createElement('section');
   panel.className='card experience-import-panel';
   panel.id='experienceImportPanel';
+  host.append(panel);
+ }else if(host!==panel&&host.id==='workflow-artifacts'&&panel.parentElement!==host){
   host.append(panel);
  }
 

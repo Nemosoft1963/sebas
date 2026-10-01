@@ -1668,3 +1668,12 @@ Validation:
 - Sales project `2a39815e16e4422581aa29b777a92910` regenerated successfully as plan Version 33 with 20 tasks.
 - External review parsing now works: Claude=conditional, ChatGPT=unverifiable, Grok=fail. Gemini remains HTTP 503 and Meta remains HTTP 401 invalid_api_key. Policy remains 5/5; it was not weakened.
 - Remaining plan blockers: explicit OAuth reauthorization stop gate, existing-site evidence verification instead of republication, lead-count gate before prospect evaluation, and per-action approval/evidence within campaign execution. No plan approval or execution start was performed.
+
+## 2026-10-01 MMI production update
+
+- Reviewed the MMI ZIP and deployment guide. Adopted UI-only files and the presenter static route to preserve newer model-switching, review parsing, and planning fixes.
+- Project bar, five workflow tabs, overview guidance, and readable result presenters deployed to `local-voice-ai-web`; current container is healthy.
+- MMI tests: 31 passed; combined MMI/external-review UI tests after fixing initial expansion and button recovery: 41 passed. JavaScript syntax and presenter data-shape checks passed.
+- Broader local pytest: 817 passed, 2 skipped, 19 failed; 18 failures were caused by missing `openpyxl`/`pypdf` in the local `.venv`, and the one UI regression was fixed and rechecked in the 41-test suite. This is not a full-suite pass.
+- `scripts/healthcheck.ps1`: all PASS. HTTP health: ok; MMI presenter route: 200. Browser visual check unavailable due Windows sandbox startup error.
+- Full deployment and rollback details: `docs/CHANGELOG_2026-10-01_mmi_deployment.md`.

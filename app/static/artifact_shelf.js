@@ -3,10 +3,14 @@ function init(){
  const host=document.querySelector('#workflow');if(!host){setTimeout(init,300);return;}
  const panel=document.createElement('section');panel.id='artifactShelf';panel.className='artifact-shelf';
  panel.innerHTML='<div class="artifact-heading"><h2>成果物を取り出す</h2><button type="button" id="artifactRefresh">更新</button><button type="button" id="artifactZip">成果物をまとめて保存（ZIP）</button></div><p>保存済みファイルです。途中成果を含み、検証・承認の完了を示すものではありません。</p><div class="artifact-filters"><label>ファイル名で検索 <input id="artifactSearch" type="search" placeholder="例：損益、計画書"></label><label>形式 <select id="artifactType"><option value="">すべて</option><option value="xlsx">Excel</option><option value="pdf">PDF</option><option value="md">Markdown</option><option value="csv">CSV</option></select></label><label><input id="artifactAll" type="checkbox"> 作業フォルダ全体も表示</label></div><p id="artifactStatus" role="status" aria-live="polite"></p><div id="artifactList"></div><dialog id="artifactPreview"><button type="button" id="artifactClose">閉じる</button><h3 id="artifactPreviewTitle"></h3><pre id="artifactPreviewText"></pre></dialog>';
- host.querySelector('nav').before(panel);
+ const artifactsPanel=document.getElementById('workflow-artifacts');
+ if(artifactsPanel)artifactsPanel.appendChild(panel);
+ else host.querySelector('nav').before(panel);
  const inputBox=document.createElement('details');inputBox.id='vehicleInputBox';inputBox.hidden=true;
  inputBox.innerHTML='<summary>車両別・月別損益の自動生成</summary><p>登録原本から明細を自動抽出し、承認・検証済みの計画を実行するとExcelを生成します。未解決事項は暫定Excelに表示します。</p><button type="button" id="vehicleAutoPrepare">原本から自動抽出・確認事項を更新</button><p id="vehicleAutoProgress"></p><div id="vehicleAutoQuestions"></div><details><summary>詳細設定：確認済みJSON入力</summary><input id="vehicleInputFile" type="file" accept=".json,application/json" aria-label="計算入力JSON"><label><input id="vehicleInputConfirmed" type="checkbox">対象車両・期間・明細・税区分・原本合計を照合した</label><button id="vehicleInputSave" type="button">計算入力を登録</button></details><p id="vehicleInputMessage" role="status"></p>';
- panel.append(inputBox);let vehicleState=null,currentPaths=new Set(),missionState='',lastMissionStatus='';
+ const executePanel=document.getElementById('workflow-execute');
+ if(executePanel)executePanel.appendChild(inputBox);
+ else panel.append(inputBox);let vehicleState=null,currentPaths=new Set(),missionState='',lastMissionStatus='';
  const get=id=>document.getElementById(id);let files=[],project='',generation=0;
  function selected(){return document.getElementById('projectSelect').value;}
  function url(path){return '/api/projects/'+encodeURIComponent(project)+'/workspace/files/'+path.split('/').map(encodeURIComponent).join('/')+'/download';}
@@ -18,8 +22,18 @@ function init(){
   const shown=files.filter(x=>(get('artifactAll').checked||resultFile(x))&&x.path.toLocaleLowerCase().includes(query)&&(!type||x.path.toLowerCase().endsWith('.'+type)));
   get('artifactList').replaceChildren();get('artifactStatus').textContent=shown.length+'件 ／ 更新日時が新しい順';
   get('artifactZip').disabled=!files.some(resultFile);
-  if(!shown.length){get('artifactList').textContent='該当する成果物はまだありません。必要に応じて「作業フォルダ全体も表示」を選んでください。';return;}
-  for(const file of shown){const row=document.createElement('article');row.className='artifact-row';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=file.path.split('/').pop();const meta=document.createElement('small');meta.textContent=((currentPaths.has(file.path)||(vehicleState&&file.path.startsWith('result/vehicle/v'+vehicleState.version+'/')))?'現行計画 / '+missionState:'過去版・計画外（現行の達成証拠ではありません）')+' · '+file.path+' · '+(file.size_bytes/1024).toFixed(1)+' KB · '+new Date(file.modified_at).toLocaleString('ja-JP');info.append(title,meta);const actions=document.createElement('div');actions.className='artifact-actions';const link=document.createElement('a');link.href=url(file.path);link.textContent='保存';link.setAttribute('download','');link.setAttribute('aria-label',file.path+' を保存');actions.append(link);
+  if(!shown.length){get('artifactList').textContent='まだ成果物がありません。計画を実行すると生成されます。絞り込み中の場合は条件を解除するか「作業フォルダ全体も表示」を選んでください。';return;}
+  const snap=typeof window.workflowReadinessSnapshot==='function'?window.workflowReadinessSnapshot():null;
+  function artifactClassLabel(file){
+   const current=currentPaths.has(file.path)||(vehicleState&&file.path.startsWith('result/vehicle/v'+vehicleState.version+'/'));
+   if(!current)return '下書き';
+   if(snap&&snap.final_completed===true)return '人間承認済み';
+   if(snap&&(snap.artifact_class==='final'||snap.phase==='complete'))return '検証済み';
+   if(snap&&(snap.artifact_class==='provisional'||snap.provisional||snap.phase==='provisional'))return '暫定';
+   if(resultFile(file))return '下書き';
+   return '下書き';
+  }
+  for(const file of shown){const row=document.createElement('article');row.className='artifact-row';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=file.path.split('/').pop();const klass=artifactClassLabel(file);const badge=document.createElement('span');badge.className='artifact-class-badge artifact-class-'+klass;badge.textContent=klass;const meta=document.createElement('small');meta.textContent=((currentPaths.has(file.path)||(vehicleState&&file.path.startsWith('result/vehicle/v'+vehicleState.version+'/')))?'現行計画 / '+missionState:'過去版・計画外（現行の達成証拠ではありません）')+' · '+file.path+' · '+(file.size_bytes/1024).toFixed(1)+' KB · '+new Date(file.modified_at).toLocaleString('ja-JP');info.append(title,badge,meta);const actions=document.createElement('div');actions.className='artifact-actions';const link=document.createElement('a');link.href=url(file.path);link.textContent='保存';link.setAttribute('download','');link.setAttribute('aria-label',file.path+' を保存');actions.append(link);
    if(/\.(md|txt|csv|json|log)$/i.test(file.path)&&file.size_bytes<=1024*1024){const preview=document.createElement('button');preview.type='button';preview.textContent='内容を見る';preview.onclick=async()=>{const ticket=generation;get('artifactPreviewTitle').textContent=file.path;get('artifactPreviewText').textContent='読み込み中…';get('artifactPreview').showModal();try{const response=await fetch(url(file.path));if(!response.ok)throw Error('取得できませんでした');const text=await response.text();if(ticket===generation)get('artifactPreviewText').textContent=text;}catch(e){if(ticket===generation)get('artifactPreviewText').textContent=e.message;}};actions.append(preview);}row.append(info,actions);get('artifactList').append(row);}
  }
  async function load(){const ticket=++generation;project=selected();files=[];get('artifactList').replaceChildren();get('artifactZip').disabled=true;get('artifactStatus').textContent='成果物を確認中…';get('artifactPreview').close();try{const response=await fetch('/api/projects/'+encodeURIComponent(project)+'/workspace');if(!response.ok)throw Error('成果物一覧を取得できませんでした。更新を押して再試行してください。');const data=await response.json();

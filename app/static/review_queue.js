@@ -18,7 +18,7 @@ document.addEventListener('DOMContentLoaded',()=>{
    const button=document.createElement('button');button.type='button';button.textContent='この実行例で確認';button.onclick=()=>window.dispatchEvent(new CustomEvent('review-open-example',{detail:{project,example:item.example_id}}));
    article.append(title,name,reason,button);list.append(article);
   }
-  if(!selected.length){const p=document.createElement('p');p.textContent='表示中の実行例に、この区分の確認対象はありません。';list.append(p);}
+  if(!selected.length){const p=document.createElement('p');p.textContent='確認事項はまだありません。計画を実行し、確認が必要な結果が生成されるとここに表示されます。別の区分も確認してください。';list.append(p);}
   el('reviewQueuePrev').disabled=offset===0;el('reviewQueueNext').disabled=next===null;
  }
  async function refresh(){

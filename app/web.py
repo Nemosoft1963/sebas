@@ -393,6 +393,10 @@ async def project_mission_js():
     return FileResponse(ROOT / "app" / "static" / "project_mission.js", media_type="text/javascript", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
+@app.get("/static/presenters.js")
+async def presenters_js():
+    return FileResponse(ROOT / "app" / "static" / "presenters.js", media_type="text/javascript", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
 @app.get("/static/local_models.js")
 async def local_models_js():
     return FileResponse(ROOT / "app" / "static" / "local_models.js", media_type="text/javascript", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})

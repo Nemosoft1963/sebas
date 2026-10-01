@@ -1,5 +1,24 @@
 :root{--mission-blue:#72a7ff;--mission-warn:#ffc66d}
-.workflow{padding:20px;margin-top:18px}
+html,body{max-width:100%;overflow-x:hidden}
+img,svg,canvas,video{max-width:100%}
+.project-target{position:sticky;top:0;z-index:30;margin:0 0 12px;padding:12px 16px;background:#111a2bf2;box-shadow:0 8px 24px #0009;backdrop-filter:blur(8px)}
+.project-target-main{display:flex;align-items:center;gap:10px;min-width:0}
+.project-target-main>strong{white-space:nowrap;color:var(--muted);font-size:13px}
+.project-target select{min-width:180px;max-width:420px;flex:1;background:#0b1322;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;font:inherit}
+.project-target-name{min-width:0;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:700}
+.project-target button{height:38px;padding:0 14px;white-space:nowrap}
+.project-settings{margin-top:12px;border-top:1px solid var(--line);padding-top:4px}
+.project-settings[hidden]{display:none!important}
+.project-settings>.project{margin:0;border:0;box-shadow:none;padding:14px 0 0;background:transparent}
+.workflow{padding:20px;margin-top:0}
+.workflow-empty-guide{margin:12px 0;padding:16px;border:1px dashed var(--line);border-radius:12px;background:#0b1322}
+.workflow-empty-guide h2{margin:0 0 8px;font-size:16px}
+.workflow-empty-guide p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}
+.artifact-class-badge{display:inline-block;margin:4px 0;padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid var(--line)}
+.artifact-class-下書き{color:var(--muted)}
+.artifact-class-暫定{color:var(--mission-warn)}
+.artifact-class-検証済み{color:var(--mission-blue)}
+.artifact-class-人間承認済み{color:var(--accent,#52d6a7)}
 .workflow-readiness{margin:0 0 14px;padding:14px;border:1px solid var(--line);border-radius:12px;background:#0b1322}
 .workflow-readiness h2{margin:0 0 8px;font-size:16px}
 .workflow-readiness dl{display:grid;grid-template-columns:7em 1fr;gap:6px 12px;margin:0 0 10px;font-size:13px}
@@ -9,6 +28,19 @@
 .workflow-readiness .artifact-final{color:var(--accent,#52d6a7)}
 .workflow-readiness .fetch-error{color:var(--danger)}
 .workflow-readiness button{height:34px;padding:0 12px}
+.workflow-overview{display:grid;gap:10px;margin:0 0 14px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#09111f}
+.workflow-overview>h2{margin:0;font-size:15px}
+.workflow-overview-item h3{margin:0 0 4px;font-size:12px;color:var(--muted)}
+.workflow-overview-item p,.workflow-overview-item li{margin:0;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.workflow-overview-item button{margin-top:7px;min-height:38px;white-space:normal}
+.workflow-overview-stop{display:grid;gap:8px}
+.workflow-stop-card{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#0b1322}
+.workflow-stop-card h4{margin:0 0 4px;font-size:12px}
+.workflow-stop-card[data-stop-category="計画内容"]{border-color:#9a7547}
+.workflow-stop-card[data-stop-category="接続・認証"]{border-color:#ff9d7a}
+.workflow-stop-card[data-stop-category="人間確認"]{border-color:var(--mission-blue)}
+.workflow-overview-links{display:flex;flex-wrap:wrap;gap:8px}
+.action-block-reason{display:block;margin:4px 0 0;color:var(--danger,#ff7a90);font-size:12px;line-height:1.45}
 .workflow-project,.workflow-status{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px}
 .workflow-project select{min-width:200px;max-width:100%}
 .workflow [role=tablist]{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
@@ -35,19 +67,14 @@
 .instruction-chat{display:flex;flex-direction:column;gap:9px;max-height:330px;overflow:auto;padding:10px;border:1px solid var(--line);border-radius:10px;background:#09111f}
 .instruction-bubble{max-width:84%;padding:10px 12px;border-radius:12px;background:#19243a;border:1px solid #2d3d59}.instruction-bubble p{margin:4px 0;white-space:pre-wrap;line-height:1.55;font-size:13px}.instruction-bubble time{display:block;color:var(--muted);font-size:10px}.instruction-user{align-self:flex-end;background:#245f59;border-color:#32786f}.instruction-system{align-self:flex-start}
 .instruction-composer{display:flex;gap:9px;align-items:stretch;margin-top:10px}.instruction-composer textarea{width:100%;min-height:76px}.instruction-composer button{min-width:150px}
-@media(max-width:760px){.workflow{padding:12px}.workflow [role=tablist]{display:grid;grid-template-columns:1fr 1fr}.workflow [role=tab]{font-size:12px}.instruction-composer{flex-direction:column}.instruction-composer button{height:42px}.instruction-bubble{max-width:94%}}
+@media(max-width:760px){.project-target{top:0;margin-bottom:8px;padding:10px}.project-target-main{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px}.project-target select{min-width:0;width:100%}.project-target-name{grid-column:1/-1;max-width:100%}.project-target button{width:100%;padding:0 8px}.project-settings{min-width:0;overflow-wrap:anywhere}.project-settings .project-toolbar{align-items:stretch;flex-direction:column}.project-settings .project-toolbar button,.project-settings .project-toolbar input{max-width:100%;width:100%}.workflow{padding:12px}.workflow [role=tablist]{display:grid;grid-template-columns:1fr 1fr;overflow:visible}.workflow [role=tab]{min-width:0;font-size:12px;white-space:normal}.instruction-composer{flex-direction:column}.instruction-composer button{height:42px}.instruction-bubble{max-width:94%}}
+@media(max-width:400px){.project-target-main{grid-template-columns:1fr 1fr}.project-target-main>strong,.project-target select,.project-target-name{grid-column:1/-1}.project-target-main>*{min-width:0}.workflow{max-width:100%;overflow:hidden}.workflow [role=tablist]{display:flex;flex-wrap:nowrap;max-width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;-webkit-overflow-scrolling:touch}.workflow [role=tab]{width:auto;min-width:max-content;flex:0 0 auto}.workflow-overview,.presenter-cards{grid-template-columns:minmax(0,1fr)}.workflow-overview-links,.mission-actions{align-items:stretch}.workflow-overview-links button,.mission-actions button{max-width:100%;white-space:normal}.workflow-readiness dl{grid-template-columns:1fr}.workflow-readiness dd{overflow-wrap:anywhere}.mission-shell{padding:0 8px}.mission-card{padding:12px}}
 .mission-shell{max-width:1100px;margin:16px auto 0;padding:0 24px}
 .mission-card{padding:20px}
 .mission-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px}
 .mission-head h2{font-size:18px;margin:0}
 .mission-state{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted)}
 .mission-note{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:12px}
-.mission-gate-guidance{margin:14px 0;padding:14px 16px;border:2px solid #d89b28;border-radius:12px;background:#fff8e8;color:#382b16;line-height:1.6}
-.mission-gate-guidance strong{display:block;font-size:16px;margin-bottom:4px}
-.mission-gate-guidance p{margin:4px 0 8px}
-.mission-gate-guidance ol{margin:6px 0 10px;padding-left:24px}
-.mission-gate-guidance button{margin:2px 10px 4px 0}
-.mission-gate-guidance small{display:block;color:#695630;margin-top:6px}
 .mission-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .mission-fields label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
 .mission-fields label:first-child{grid-column:1/-1}
@@ -122,12 +149,13 @@
 .local-model-controls select{min-width:0;background:#0b1322;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:9px;font:inherit}
 .local-model-controls button{height:38px;padding:0 14px}
 .local-model-details{margin-top:9px;font-size:11px;color:var(--muted);word-break:break-word}
+.presenter-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:10px 0}.presenter-card{border:1px solid var(--line);border-radius:10px;background:#0b1322;padding:10px}.presenter-card h4{margin:0 0 6px;color:var(--muted);font-size:12px}.presenter-card p{margin:0;white-space:pre-wrap;word-break:break-word}.technical-info{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}.technical-info summary{cursor:pointer;color:var(--muted);font-size:12px}.technical-info pre{white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}.presenter-table{width:100%;border-collapse:collapse}.presenter-table th,.presenter-table td{border:1px solid var(--line);padding:7px;text-align:left;vertical-align:top}
 @media(max-width:760px){.mission-fields,.mission-columns{grid-template-columns:1fr}.mission-fields label:first-child{grid-column:auto}.mission-shell{padding:0 12px}.premonitor-stages{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:760px){.local-model-panel{margin:12px 12px 0}.local-model-head{display:block}.local-model-state{display:block;margin-top:8px;text-align:left}.local-model-controls{grid-template-columns:1fr 1fr}.local-model-controls label,.local-model-controls select{grid-column:1/-1}}
 
 
 /* Imported execution reports: use the existing dark theme with readable forms. */
-#workflow-examples .card { padding: 20px; margin: 16px 0; min-width: 0; }
+#workflow-history .card, #workflow-examples .card { padding: 20px; margin: 16px 0; min-width: 0; }
 #workflow-examples label { display: flex; flex-direction: column; gap: 7px; margin: 14px 0; color: #c7d8ea; }
 #workflow-examples input:not([type=file]), #workflow-examples textarea, #workflow-examples select {
   box-sizing: border-box; width: 100%; border: 1px solid #31445f; border-radius: 8px;
