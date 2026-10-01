@@ -72,9 +72,13 @@ def test_ss04_memory_files_read_only_and_absent_db_not_created(tmp_path):
     flag = memory.parent / "goal_completion.json"
     flag.write_text('{"enabled":false,"projects":{"p":true}}', encoding="utf-8")
     db_path = memory.parent / "goal_completion.sqlite3"
-    with sqlite3.connect(db_path) as db:
+    db = sqlite3.connect(db_path)
+    try:
         db.execute("CREATE TABLE human_acceptances(id INTEGER)")
         db.execute("CREATE TABLE goal_facts(id INTEGER)")
+        db.commit()
+    finally:
+        db.close()
     before = {path: path.read_bytes() for path in (memory, flag, db_path)}
     state = build_system_state(root, memory_path=memory, app=fake_app())
     assert state["feature_flags"] == {"default": False, "projects": {"p": True}}
