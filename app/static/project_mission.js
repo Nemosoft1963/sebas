@@ -8,6 +8,29 @@ document.addEventListener("DOMContentLoaded",function(){
   function completedGoalLabel(){var snap=typeof window.workflowReadinessSnapshot==="function"?window.workflowReadinessSnapshot():null;if(snap&&snap.final_completed===true)return "目標達成(確定)";return "全工程完了・目標達成は未確定"}
   function missionStateText(){var state=mission&&mission.status||"draft";if(state==="ready"&&mission.execution_gate&&mission.execution_gate.blocked)return "承認済み・外部検証待ち";if(state==="completed")return completedGoalLabel();return statusLabel(state)}
   window.refreshGoalCompletionLabels=function(){if(mission&&el("missionState"))el("missionState").textContent=missionStateText()};
+  function renderGateGuidance(state){
+    var guide=el("missionGateGuidance");
+    if(!guide){
+      guide=document.createElement("section");guide.id="missionGateGuidance";guide.className="mission-gate-guidance";guide.setAttribute("role","status");
+      el("missionPlanSummary").before(guide);
+    }
+    var gate=mission.execution_gate||{},blocked=!!gate.blocked;
+    if(!blocked){guide.hidden=true;guide.replaceChildren();return}
+    guide.hidden=false;guide.replaceChildren();
+    var title=document.createElement("strong");title.textContent="次にすること：計画を外部AIで検証する";guide.append(title);
+    var reason=document.createElement("p");reason.textContent=gate.reason||"計画の検証が完了していないため、実行開始を待っています。";guide.append(reason);
+    var steps=document.createElement("ol");
+    ["下の「目標検証・人間確認・RAG」を開く","公開用の目標・計画説明を確認し、安全確認にチェックする","「選択済み外部AIで検証する」を押す。合格後、この画面へ戻って実行開始する"].forEach(function(text){var item=document.createElement("li");item.textContent=text;steps.append(item)});
+    guide.append(steps);
+    var open=document.createElement("button");open.type="button";open.textContent="目標検証を開く";open.onclick=function(){var tab=document.querySelector('#workflow [data-view="plan"]');if(tab)tab.click();
+      var panel=el("goalReviewPanel");
+      if(!panel){el("missionMessage").textContent="目標検証画面を読み込み中です。数秒後にもう一度押してください。";return}
+      var details=panel.querySelector("details");if(details)details.open=true;
+      panel.scrollIntoView({behavior:"smooth",block:"start"});
+      var summary=el("goalPublicSummary");if(summary)setTimeout(function(){summary.focus()},350);
+    };guide.append(open);
+    var note=document.createElement("small");note.textContent="外部AIから指摘が返った場合は、同じ画面の「指摘を計画に反映」を上から順に実行してください。";guide.append(note);
+  }
   function taskStatus(value){return({pending:"待機",running:"実行中",completed:"完了",failed:"失敗",needs_review:"資料・計算の確認待ち",blocked:"依存失敗で停止",skipped:"スキップ"})[value]||value}
   async function jsonRequest(url,options){
     var response=await fetch(url,options),body=await response.json().catch(function(){return{}});
@@ -203,6 +226,7 @@ document.addEventListener("DOMContentLoaded",function(){
     var active=(mission.tasks||[]).filter(function(x){return x.status==="running"}).length,waiting=(mission.tasks||[]).filter(function(x){return x.status==="pending"}).length;
     el("missionProgressText").textContent=progress.completed+" / "+progress.total+" 完了（"+progress.percent+"%）・実行中 "+active+" / "+(mission.max_parallel_tasks||2)+"・待機 "+waiting;
     el("missionPlanSummary").textContent=mission.plan_summary||"目標を保存し、「AIで計画生成」を押してください。";
+    renderGateGuidance(state);
     renderInstructionChat();
     var tasks=mission.tasks||[];
     var reviews=mission.plan_reviews||[];

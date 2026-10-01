@@ -220,9 +220,12 @@ class Ollama:
         retry_predict = max(
             base_predict, int(os.getenv("OLLAMA_EMPTY_RETRY_NUM_PREDICT", "6144"))
         )
+        # Schema-constrained calls need final JSON, not a reasoning transcript.
+        # Some thinking models can consume the entire prediction budget in the
+        # hidden thinking field and return an empty JSON body.
         attempts = [
-            (messages, "low", base_ctx, base_predict),
-            (compact_messages_for_retry(messages), "low", retry_ctx, retry_predict),
+            (messages, False, base_ctx, base_predict),
+            (compact_messages_for_retry(messages), False, retry_ctx, retry_predict),
         ]
         diagnostics = []
         for attempt_messages, think, num_ctx, num_predict in attempts:

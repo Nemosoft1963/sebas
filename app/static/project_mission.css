@@ -42,6 +42,12 @@
 .mission-head h2{font-size:18px;margin:0}
 .mission-state{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted)}
 .mission-note{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:12px}
+.mission-gate-guidance{margin:14px 0;padding:14px 16px;border:2px solid #d89b28;border-radius:12px;background:#fff8e8;color:#382b16;line-height:1.6}
+.mission-gate-guidance strong{display:block;font-size:16px;margin-bottom:4px}
+.mission-gate-guidance p{margin:4px 0 8px}
+.mission-gate-guidance ol{margin:6px 0 10px;padding-left:24px}
+.mission-gate-guidance button{margin:2px 10px 4px 0}
+.mission-gate-guidance small{display:block;color:#695630;margin-top:6px}
 .mission-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .mission-fields label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
 .mission-fields label:first-child{grid-column:1/-1}

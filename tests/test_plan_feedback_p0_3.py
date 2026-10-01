@@ -24,6 +24,29 @@ def test_dispositions_contains_rebuild_generic():
     assert 'rebuild_generic' in DISPOSITIONS
 
 
+def test_generic_whole_plan_normalizes_misclassified_vehicle_rebuild(tmp_path):
+    manager, pid, task = setup(tmp_path, True)
+    sig = plan_snapshot(manager, pid)[1]
+    import_feedback(manager, pid, sig, 'advisor_ai', '工程、依存関係、成果物契約、承認点を全体として再構成してください。')
+    issues = issues_for(manager, pid, sig)
+    body = {'actions': [{'issue_id': issues[0]['id'], 'disposition': 'rebuild_vehicle',
+        'target': task['task_key'], 'change': '工程、依存関係、成果物契約、承認点を目標から再構成する。',
+        'reason': '全体構造の修正が必要だがローカルモデルが再構成種別を誤分類したため。'}]}
+    actions = validate_candidate(body, issues, plan_snapshot(manager, pid)[0], None)
+    assert actions[0]['disposition'] == 'rebuild_generic'
+
+
+def test_public_draft_exists_for_generic_plan_without_copying_private_text(tmp_path):
+    from app.goal_review_queue import public_draft
+    manager, pid, _ = setup(tmp_path, True)
+    mission = manager.memory.get_mission(pid)
+    manager.memory.add_mission_instruction(pid, 'PRIVATE-NAME-DO-NOT-COPY')
+    draft = public_draft(plan_snapshot(manager, pid)[0])
+    assert '汎用計画' in draft
+    assert 'PRIVATE-NAME-DO-NOT-COPY' not in draft
+    assert mission['goal'] not in draft
+
+
 @pytest.mark.asyncio
 async def test_rebuild_generic_proposal_generation(tmp_path):
     """2. 汎用案件（架空プロジェクト）で rebuild_generic 候補が生成できること。"""
@@ -155,7 +178,7 @@ async def test_vehicle_case_uses_rebuild_vehicle_and_rejects_rebuild_generic(tmp
 
 
 @pytest.mark.asyncio
-async def test_non_vehicle_case_rejects_rebuild_vehicle(tmp_path):
+async def test_non_vehicle_case_normalizes_rebuild_vehicle(tmp_path):
     """5. 車両以外の汎用案件で rebuild_vehicle を生成・適用しようとすると拒否される。"""
     manager, pid, task = setup(tmp_path, True)
     sig = plan_snapshot(manager, pid)[1]
@@ -175,8 +198,8 @@ async def test_non_vehicle_case_rejects_rebuild_vehicle(tmp_path):
             }
         ]
     }
-    with pytest.raises(ValueError, match='自動抽出工程のない車両全体計画だけを実装済みパイプラインへ再構成できます'):
-        validate_candidate(vehicle_body, issues, snapshot, detail=None)
+    actions = validate_candidate(vehicle_body, issues, snapshot, detail=None)
+    assert actions[0]['disposition'] == 'rebuild_generic'
 
 
 def test_six_validation_checks_each_rejects_when_broken(tmp_path):
@@ -359,3 +382,72 @@ async def test_truly_unimplemented_capabilities_remain_development_required(tmp_
     # blockers があるため apply は拒否される
     with pytest.raises(ValueError, match='未解決または追加開発が必要な指摘があります'):
         apply(manager, pid, sig, row['candidate_id'])
+
+
+def test_structural_generic_issue_cannot_be_left_as_prose_or_development(tmp_path):
+    manager, pid, task = setup(tmp_path, True)
+    snapshot = plan_snapshot(manager, pid)[0]
+    issues = [{'id': 'struct1', 'text': '全13工程がdocument_or_legacyで最終工程のcriteria_count=0です'}]
+    body = {'actions': [{'issue_id': 'struct1', 'disposition': 'development',
+        'target': 'final_verification', 'change': '最終工程を修正するため実装を見直す。',
+        'reason': '最終工程の構造と達成条件対応に不足があるため追加開発が必要です。'}]}
+    actions = validate_candidate(body, issues, snapshot, None)
+    assert actions[0]['disposition'] == 'rebuild_generic'
+    assert actions[0]['lifecycle'] == 'proposed'
+
+
+def test_public_structure_exposes_safe_execution_gates(tmp_path):
+    from app.goal_review import public_structure
+    manager, pid, _ = setup(tmp_path, True)
+    packet = public_structure(plan_snapshot(manager, pid)[0])
+    assert all('role' in task and 'input_count' in task for task in packet['tasks'])
+    assert all('approval_required' in task and 'evidence_required' in task for task in packet['tasks'])
+    serialized = json.dumps(packet, ensure_ascii=False)
+    assert manager.memory.get_mission(pid)['goal'] not in serialized
+
+
+def test_structural_amend_is_normalized_before_target_validation(tmp_path):
+    manager, pid, _ = setup(tmp_path, True)
+    snapshot, _ = plan_snapshot(manager, pid)
+    issue = {'id': 'structural-1', 'text': 'parents dependency is missing for all tasks'}
+    body = {'actions': [{
+        'issue_id': 'structural-1', 'disposition': 'amend', 'target': '',
+        'change': '', 'reason': 'The local model mislabeled a whole-plan structural repair.',
+    }]}
+    actions = validate_candidate(body, [issue], snapshot, None)
+    assert actions[0]['disposition'] == 'rebuild_generic'
+
+
+def test_public_structure_exposes_safe_semantic_contract_fields(tmp_path):
+    from app.goal_review import public_structure
+    manager, pid, _ = setup(tmp_path, True)
+    tasks = public_structure(plan_snapshot(manager, pid)[0])['tasks']
+    required = {
+        'criterion_ids', 'public_purpose_code', 'artifact_category',
+        'responsible_role', 'source_reference_count',
+        'completion_evidence', 'failure_policy',
+    }
+    assert all(required <= set(task) for task in tasks)
+
+
+def test_structural_unresolved_is_normalized_to_generic_rebuild(tmp_path):
+    manager, pid, _ = setup(tmp_path, True)
+    snapshot = plan_snapshot(manager, pid)[0]
+    issue = {'id': 'structural-unresolved', 'text': 'The public purpose code and semantic dependencies are unclear.'}
+    body = {'actions': [{
+        'issue_id': issue['id'], 'disposition': 'unresolved', 'target': '',
+        'change': '', 'reason': 'The local model could not map the structural review to one task.',
+    }]}
+    actions = validate_candidate(body, [issue], snapshot, None)
+    assert actions[0]['disposition'] == 'rebuild_generic'
+
+
+def test_public_structure_includes_static_safe_purpose_summaries(tmp_path):
+    from app.goal_review import public_structure
+    manager, pid, _ = setup(tmp_path, True)
+    packet = public_structure(plan_snapshot(manager, pid)[0])
+    assert packet['goal_category'] == 'controlled_business_execution'
+    assert packet['purpose_catalog']
+    assert all(task['public_purpose_summary'] for task in packet['tasks'])
+    serialized = json.dumps(packet, ensure_ascii=False)
+    assert manager.memory.get_mission(pid)['goal'] not in serialized

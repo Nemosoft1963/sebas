@@ -17,12 +17,17 @@ FINAL_TASK_RE = re.compile(r"最終検証|final[_\s-]*verification", re.I)
 
 
 def extract_criteria(goal: str, success: str) -> list[str]:
+    extra_match = re.search(r'\u3010\u8ffd\u52a0\u8981\u4ef6\u3011', goal)
+    extra_section = goal[extra_match.end():] if extra_match else ''
+    if extra_section:
+        extra_section = re.split(r'\u3010\u518d\u8a08\u753b\u6761\u4ef6\u3011|^#{1,4}\s', extra_section, maxsplit=1, flags=re.M)[0]
+    extra_lines = re.findall(r'(?m)^\s*\d+[.\uff09)]\s*(.+)$', extra_section)
     match = re.search(r"(?m)^#{1,4}\s*達成条件\s*$", goal)
     section = goal[match.end():] if match else ""
     if section:
         section = re.split(r"(?m)^#{1,4}\s", section, maxsplit=1)[0]
     lines = re.findall(r"(?m)^\s*\d+[.）)]\s*(.+)$", section or success)
-    criteria = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+    criteria = list(dict.fromkeys(line.strip() for line in [*extra_lines, *lines] if line.strip()))
     if section and success.strip() and success.strip() not in criteria:
         criteria.append(success.strip())
     if not criteria:
@@ -67,7 +72,7 @@ def requires_google_site_publication(criterion: str) -> bool:
 
 
 EXTERNAL_ACTION_RE = re.compile(
-    r"(?:実際の営業活動|顧客(?:へ|に).{0,20}(?:送信|連絡|提案)|商談.{0,10}実施|"
+    r"(?:顧客(?:へ|に).{0,20}(?:送信|連絡|提案)|商談.{0,10}実施|"
     r"PoC.{0,10}実施|契約締結|仮説検証.{0,20}実行|"
     r"Google\s*Forms|Google\s*Sites|SNS.{0,40}(?:投稿|公開)|リード取得)",
     re.I | re.S,
@@ -81,6 +86,12 @@ VERDICT_LINE_RE = re.compile(
     re.I,
 )
 
+
+def is_external_control_requirement(criterion: str) -> bool:
+    return bool(re.search(
+        r'実行工程.{0,20}追加|自動投稿せず|個別.{0,20}人間承認|証拠.{0,20}達成判定|失敗時.{0,20}分類',
+        str(criterion or ""), re.I | re.S,
+    ))
 
 def criterion_requires_external_action(criterion: str) -> bool:
     text = str(criterion or "")
@@ -299,7 +310,36 @@ def compile_task(index: int, criterion: str, proposal: dict, source_ids: list[st
         "source_refs": ["context:" + value for value in source_ids],
         "outputs": [{"path": path, "required_headings": headings, "minimum_characters": 600}],
         "external_actions": "approval_required",
+        "role": "execution", "responsible_role": "system", "estimated_days": 2,
+        "completion_evidence": "validated_artifact", "failure_policy": "stop_and_report",
+        "evidence_required": True,
+        "exit_checks": ["source_evidence_linked", "criterion_content_verified", "unknowns_and_failures_reported"],
+        "artifact_category": "decision_document",
     }
+    purpose_code = 'criterion_delivery'
+    for pattern, code in [
+        (r'Google.{0,20}SNS.{0,40}実行工程.{0,20}追加', 'multi_channel_workflow_design'),
+        (r'実行モニター|投稿実績|リード獲得数', 'execution_monitoring_evidence'),
+        (r'SNS.{0,20}自動投稿せず', 'manual_social_posting_guard'),
+        (r'個別.{0,20}人間承認', 'external_approval_boundaries'),
+        (r'実行証拠.{0,20}達成判定', 'evidence_based_completion'),
+        (r'公開後.{0,80}リード評価', 'campaign_execution_sequence'),
+        (r'失敗時.{0,30}原因.{0,20}分類', 'failure_recovery_policy'),
+        (r'市場|顧客像|顧客課題', 'market_and_customer_definition'),
+        (r'商品|契約プラン', 'service_package_design'),
+        (r'提供範囲|価格|除外事項', 'commercial_terms'),
+        (r'紹介資料|提案書|ヒアリング|見積', 'sales_assets'),
+        (r'販売計画|営業チャネル|KPI|収支', 'sales_plan'),
+        (r'営業文面|商談台本|フォロー', 'outreach_content'),
+        (r'見込み客|優先順位', 'prospect_prioritization'),
+        (r'案件管理', 'pipeline_tracking'),
+        (r'受注後|標準手順|導入', 'delivery_process'),
+        (r'実行報告|状態報告|実際の営業活動.{0,40}報告', 'execution_status'),
+    ]:
+        if re.search(pattern, criterion, re.I):
+            purpose_code = code
+            break
+    contract['public_purpose_code'] = purpose_code
     web_research = requires_public_web_research(criterion)
     if web_research:
         contract["public_web_research"] = {
@@ -313,13 +353,34 @@ def compile_task(index: int, criterion: str, proposal: dict, source_ids: list[st
             'required_columns': ['案件ID', '顧客要件', '商談結果', '状態', '次回行動', '失注理由'],
             'minimum_rows': 1,
         })
-    if requires_google_site_publication(criterion):
+    if purpose_code == 'campaign_execution_sequence':
+        ordered_actions = [
+            'google_site_publication', 'social_posting_kit_generation',
+            'social_copy_approval', 'manual_social_post',
+            'post_url_registration', 'form_response_sync', 'lead_evaluation',
+        ]
+        contract['execution_kind'] = 'campaign_execution_sequence'
+        contract['ordered_actions'] = ordered_actions
+        contract['action_requirements'] = [
+            {'kind': kind, 'sequence': position, 'minimum_executed': 1, 'evidence_required': True}
+            for position, kind in enumerate(ordered_actions, 1)
+        ]
+        contract.update({'role':'external_action','responsible_role':'human_approver',
+                         'estimated_days':2,'completion_evidence':'registered_external_evidence',
+                         'artifact_category':'external_action_record','human_confirmation_required':True,
+                         'semantic_review_required':True})
+    elif not is_external_control_requirement(criterion) and requires_google_site_publication(criterion):
+        contract['execution_kind'] = 'google_site_publication'
         contract['action_requirements'] = [{
             'kind': 'google_site_publication',
             'minimum_executed': 1,
             'evidence_required': True,
         }]
-    elif criterion_requires_external_action(criterion):
+        contract.update({'role':'external_action','responsible_role':'human_approver',
+                         'estimated_days':1,'completion_evidence':'registered_external_evidence',
+                         'artifact_category':'external_action_record','human_confirmation_required':True,
+                         'semantic_review_required':True})
+    elif not is_external_control_requirement(criterion) and criterion_requires_external_action(criterion):
         kind = 'approved_external_action'
         if re.search(r'Google\s*Forms', criterion, re.I):
             kind = 'google_form_publication'
@@ -327,11 +388,33 @@ def compile_task(index: int, criterion: str, proposal: dict, source_ids: list[st
             kind = 'social_post'
         elif re.search(r'リード取得', criterion, re.I):
             kind = 'lead_capture'
+        elif re.search(r'公開', criterion, re.I):
+            kind = 'approved_publication'
+        elif re.search(r'送信|連絡', criterion, re.I):
+            kind = 'approved_outbound_communication'
+        elif re.search(r'契約', criterion, re.I):
+            kind = 'approved_contract_confirmation'
+        elif re.search(r'営業|商談|面談|提案|実行', criterion, re.I):
+            kind = 'approved_customer_engagement'
+        contract['public_purpose_code'] = kind
+        contract['execution_kind'] = kind
         contract['action_requirements'] = [{
             'kind': kind,
             'minimum_executed': 1,
             'evidence_required': True,
         }]
+        contract.update({'role':'external_action','responsible_role':'human_approver',
+                         'estimated_days':1,'completion_evidence':'registered_external_evidence',
+                         'artifact_category':'external_action_record','human_confirmation_required':True,
+                         'semantic_review_required':True})
+    if purpose_code in {'commercial_terms', 'sales_assets', 'outreach_content'}:
+        contract.update({
+            'approval_required': True,
+            'human_confirmation_required': True,
+            'semantic_review_required': True,
+            'reviewer_role': 'human_approver',
+            'completion_evidence': 'validated_artifact_and_human_confirmation',
+        })
     return {
         "task_key": key, "depends_on": dependencies, "title": title.strip(),
         "mode": "research" if web_research else "local",
@@ -378,13 +461,66 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
     prep_contract = contract_of(preparation)
     prep_contract['criterion_ids'] = []
     prep_contract['document_mode'] = 'planning'
+    prep_contract.update({
+        'role':'preparation','responsible_role':'system','estimated_days':1,
+        'completion_evidence':'validated_artifact','failure_policy':'stop_and_report',
+        'evidence_required':True,'artifact_category':'preparation_record','public_purpose_code':'input_readiness',
+        'exit_checks':['registered_sources_classified','missing_inputs_listed','validation_method_defined'],
+    })
     preparation['acceptance_criteria'] = json.dumps(prep_contract, ensure_ascii=False)
+    priority = {
+        'multi_channel_workflow_design': 10, 'execution_monitoring_evidence': 11,
+        'manual_social_posting_guard': 12, 'external_approval_boundaries': 13,
+        'evidence_based_completion': 14, 'failure_recovery_policy': 15,
+        'market_and_customer_definition': 20, 'service_package_design': 21,
+        'commercial_terms': 22, 'sales_assets': 23, 'sales_plan': 24,
+        'prospect_prioritization': 25, 'outreach_content': 26,
+        'pipeline_tracking': 27, 'delivery_process': 28,
+        'campaign_execution_sequence': 30, 'approved_customer_engagement': 31,
+        'execution_status': 40,
+    }
+    indexed_tasks = list(enumerate(tasks))
+    indexed_tasks.sort(key=lambda pair: (
+        0 if (contract_of(pair[1]) or {}).get('public_web_research', {}).get('required')
+        else priority.get((contract_of(pair[1]) or {}).get('public_purpose_code'), 29),
+        pair[0],
+    ))
+    tasks = [preparation, *(task for _, task in indexed_tasks)]
     web_tasks = [
-        current for current in tasks
+        current for current in tasks[1:]
         if (contract_of(current) or {}).get("public_web_research", {}).get("required")
     ]
-    regular_tasks = [current for current in tasks if current not in web_tasks]
-    tasks = [preparation, *web_tasks, *regular_tasks]
+    keys_by_purpose = {}
+    for current in tasks[1:]:
+        purpose = (contract_of(current) or {}).get('public_purpose_code')
+        keys_by_purpose.setdefault(purpose, []).append(current['task_key'])
+    semantic_parents = {
+        'sales_assets': ['market_and_customer_definition', 'service_package_design', 'commercial_terms'],
+        'sales_plan': ['market_and_customer_definition', 'service_package_design', 'commercial_terms', 'sales_assets'],
+        'prospect_prioritization': ['market_and_customer_definition', 'sales_plan'],
+        'outreach_content': ['prospect_prioritization', 'sales_assets'],
+        'pipeline_tracking': ['prospect_prioritization', 'outreach_content'],
+        'delivery_process': ['service_package_design', 'commercial_terms'],
+        'campaign_execution_sequence': [
+            'failure_recovery_policy', 'external_approval_boundaries',
+            'manual_social_posting_guard', 'evidence_based_completion',
+            'market_and_customer_definition', 'service_package_design',
+            'commercial_terms', 'sales_assets', 'outreach_content',
+        ],
+        'approved_customer_engagement': [
+            'external_approval_boundaries', 'prospect_prioritization',
+            'outreach_content', 'pipeline_tracking', 'campaign_execution_sequence',
+        ],
+        'execution_status': [
+            'campaign_execution_sequence', 'approved_customer_engagement',
+            'pipeline_tracking',
+        ],
+    }
+    for current in tasks[1:]:
+        purpose = (contract_of(current) or {}).get('public_purpose_code')
+        required = [key for p in semantic_parents.get(purpose, []) for key in keys_by_purpose.get(p, [])]
+        if required:
+            current['depends_on'] = list(dict.fromkeys(required))
     outputs_by_key = {
         current["task_key"]: [
             output["path"] for output in (contract_of(current) or {}).get("outputs", [])
@@ -410,9 +546,13 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
             for path in outputs_by_key.get(dependency, [])
         ]
         current["acceptance_criteria"] = json.dumps(current_contract, ensure_ascii=False)
+    limited_external_purposes = {'campaign_execution_sequence', 'approved_customer_engagement'}
     for position, current in enumerate(tasks):
         current_contract = contract_of(current)
-        if not requires_google_site_publication(str(current_contract.get('criterion') or '')):
+        if (
+            not current_contract.get('action_requirements')
+            or current_contract.get('public_purpose_code') in limited_external_purposes
+        ):
             continue
         parents = tasks[:position]
         current['depends_on'] = [parent['task_key'] for parent in parents]
@@ -423,17 +563,23 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
         ]
         current['acceptance_criteria'] = json.dumps(current_contract, ensure_ascii=False)
     paths = [output['path'] for task in tasks for output in contract_of(task)['outputs']]
+    source_refs = list(dict.fromkeys(
+        ref for task in tasks for ref in (contract_of(task) or {}).get('source_refs', [])
+    ))
     contract = {
-        "schema": SCHEMA, "criterion_ids": [], "inputs": paths, "source_refs": [],
+        "schema": SCHEMA,
+        "criterion_ids": [f"SC{i:02d}" for i in range(1, len(criteria) + 1)],
+        "inputs": paths, "source_refs": source_refs, "execution_kind": "final_verification",
         "outputs": [{"path": "result/final_verification.md", "required_headings": ["達成条件別判定", "成果物検証", "未達条件と承認待ち"], "minimum_characters": 600}],
         "external_actions": "approval_required", "final_verification": True,
+        "role": "final_verification", "responsible_role": "human_approver",
+        "estimated_days": 1, "completion_evidence": "human_semantic_confirmation",
+        "failure_policy": "stop_and_report", "human_confirmation_required": True,
+        "semantic_review_required": True,
+        "evidence_required": True, "artifact_category": "verification_report",
+        "public_purpose_code": "final_goal_verification",
+        "exit_checks": ["all_criteria_decided", "evidence_paths_verified", "unmet_and_pending_reported"],
     }
-    if any(criterion_requires_external_action(criterion) for criterion in criteria):
-        contract["action_requirements"] = [{
-            "kind": "approved_external_action",
-            "minimum_executed": 1,
-            "evidence_required": True,
-        }]
     tasks.append({
         "task_key": "final_verification", "depends_on": [task["task_key"] for task in tasks],
         "title": "最終検証・達成条件別の判定", "mode": "local",
@@ -561,7 +707,9 @@ def validate_rebuild_generic_candidate(
     covered_cids = set()
     for task in tasks:
         contract = contract_of(task)
-        if contract and contract.get("criterion_ids"):
+        # A final verifier can assess all criteria, but it cannot replace the
+        # execution task that actually produces evidence for each criterion.
+        if contract and not contract.get("final_verification") and contract.get("criterion_ids"):
             covered_cids.update(contract["criterion_ids"])
 
     if expected_cids:
@@ -692,10 +840,10 @@ def build_rebuild_generic_plan(
     GoalContract、既存成果物、未達criterion、採用済み指摘を入力にして、
     既存のplanner構造で汎用再構成計画候補を作る。
     """
-    if goal_contract and goal_contract.get("criteria"):
-        criteria = [c["statement"] for c in goal_contract["criteria"] if c.get("statement")]
-    else:
-        criteria = extract_criteria(mission.get("goal", ""), mission.get("success_criteria", ""))
+    mission_criteria = extract_criteria(mission.get('goal', ''), mission.get('success_criteria', ''))
+    contract_criteria = ([c['statement'] for c in goal_contract['criteria'] if c.get('statement')]
+                         if goal_contract and goal_contract.get('criteria') else [])
+    criteria = mission_criteria if len(mission_criteria) >= len(contract_criteria) else contract_criteria
     if not criteria:
         criteria = [mission.get("goal") or "プロジェクト目標の達成"]
 
@@ -717,7 +865,7 @@ def build_rebuild_generic_plan(
         old_task = existing_tasks.get(key)
         target_changes = action_changes_by_target.get(key, []) + action_changes_by_target.get("execution_pipeline", [])
 
-        if old_task:
+        if old_task and (contract_of(old_task) or {}).get('criterion') == criterion:
             old_contract = contract_of(old_task) or {}
             title = old_task.get("title") or f"達成条件 SC{index:02d} の実行"
             scope = f"達成条件 {key}: {criterion} を満たす成果物を作成・検証する。"
@@ -745,7 +893,7 @@ def build_rebuild_generic_plan(
                 "title": f"達成条件 SC{index:02d} の実行設計",
                 "scope": scope[:1500],
                 "headings": headings,
-                "depends_on": [f"SC{i:02d}" for i in range(1, index)] if index > 1 else [],
+                "depends_on": [],
             }
         task = compile_task(index, criterion, proposal, source_ids)
         tasks.append(task)

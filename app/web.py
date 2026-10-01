@@ -2091,17 +2091,15 @@ async def select_local_model(payload: LocalModelSelectionPayload):
             }
 
         if engine_enabled:
+            model_warmup_state = {"status": "warming", "model": requested, "error": ""}
             try:
-                await load_model(False, previous)
-            except httpx.HTTPError:
-                pass
-            try:
+                # Load the candidate first. If it fails, the selected model and
+                # persistent setting remain untouched.
                 await load_model(True, requested)
             except httpx.HTTPError as exc:
-                try:
-                    await load_model(True, previous)
-                except httpx.HTTPError:
-                    pass
+                model_warmup_state = {
+                    "status": "error", "model": requested, "error": str(exc)[:500],
+                }
                 raise HTTPException(
                     503, f"選択したローカルLLMを読み込めませんでした: {exc}"
                 ) from exc
@@ -2119,6 +2117,11 @@ async def select_local_model(payload: LocalModelSelectionPayload):
 
         OLLAMA_MODEL = requested
         llm.set_model(requested)
+        if engine_enabled and previous != requested:
+            try:
+                await load_model(False, previous)
+            except httpx.HTTPError:
+                pass
         model_warmup_state = {
             "status": "ready" if engine_enabled else "stopped",
             "model": requested,
@@ -2234,15 +2237,22 @@ async def research(request: ResearchRequest):
 
 async def load_model(loaded: bool, model: str | None = None):
     target_model = model or OLLAMA_MODEL
-    async with httpx.AsyncClient(timeout=180) as client:
+    # Warm-up must not start an unconstrained answer. One non-thinking token is
+    # sufficient to make Ollama load and validate the selected model.
+    async with httpx.AsyncClient(timeout=float(os.getenv("OLLAMA_MODEL_LOAD_TIMEOUT", "300"))) as client:
         response = await client.post(
             f"{OLLAMA_URL}/api/generate",
             json={
                 "model": target_model,
                 "prompt": " " if loaded else "",
                 "stream": False,
+                "think": False,
                 "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m") if loaded else 0,
-                "options": {"num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "8192"))},
+                "options": {
+                    "num_ctx": min(int(os.getenv("OLLAMA_NUM_CTX", "8192")), 8192),
+                    "num_predict": 1,
+                    "temperature": 0,
+                },
             },
         )
         response.raise_for_status()

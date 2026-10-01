@@ -311,14 +311,61 @@ def selected_detail(manager,pid,tid):
 
 def public_structure(snapshot):
     # Whitelist structural facts only. No source text, filenames, original goals or names.
+    purpose_catalog={
+        'input_readiness':'Verify registered sources, missing inputs, constraints, and validation methods.',
+        'multi_channel_workflow_design':'Design the execution workflow for forms, landing pages, social support, and lead capture.',
+        'execution_monitoring_evidence':'Use monitor progress, errors, publication records, and lead counts as evidence.',
+        'manual_social_posting_guard':'Prevent automatic social posting and require a human-controlled posting screen.',
+        'external_approval_boundaries':'Require separate human approval for publication, copy approval, posting, and prospect contact.',
+        'evidence_based_completion':'Judge completion using URLs, responses, approvals, and other execution evidence.',
+        'campaign_execution_sequence':'Execute publication, posting-kit preparation, approval, manual posting, response sync, and lead evaluation in order.',
+        'failure_recovery_policy':'Classify failures, stop for authentication or approval, and safely retry temporary failures.',
+        'market_and_customer_definition':'Define markets, priority sectors, ideal customers, and customer problems.',
+        'service_package_design':'Design multiple consulting service packages.',
+        'commercial_terms':'Define scope, duration, prerequisites, price proposals, and exclusions.',
+        'sales_assets':'Create introduction, proposal, interview, proof-of-concept, and quotation materials.',
+        'sales_plan':'Create a sales plan with channels, activity, KPIs, and financial outlook.',
+        'prospect_prioritization':'Evaluate prospects and define priorities and proposal hypotheses.',
+        'outreach_content':'Create approved outreach copy, meeting scripts, and follow-up copy.',
+        'pipeline_tracking':'Create structured tracking for meetings, requirements, next actions, and losses.',
+        'delivery_process':'Define the post-order process through requirements, proof-of-concept, acceptance, education, and support.',
+        'execution_status':'Report executed, approval-pending, not-started, failed, and next-action states.',
+        'approved_customer_engagement':'Execute only approved customer engagement and register external evidence.',
+        'final_goal_verification':'Verify every criterion against artifacts and execution evidence; any unmet criterion prevents PASS.',
+        'criterion_delivery':'Create and verify the artifact required by its criterion.',
+    }
     tasks=[]
     for i,t in enumerate(snapshot['tasks'],1):
         c=contract_of(t) or {}
-        tasks.append({'step':i,'type':c.get('execution_kind','document_or_legacy'),
+        kind=c.get('execution_kind','document_or_legacy')
+        role=('preparation' if c.get('role')=='preparation' else
+              'final_verification' if c.get('final_verification') else
+              'external_action' if c.get('action_requirements') else 'execution')
+        tasks.append({'step':i,'type':kind,'role':role,
                       'parents':[next((j for j,x in enumerate(snapshot['tasks'],1) if x['task_key']==p),0) for p in t.get('depends_on',[])],
                       'outputs':[Path(x.get('path','')).suffix for x in c.get('outputs',[])],
+                      'criterion_ids':[x for x in c.get('criterion_ids',[]) if isinstance(x,str) and __import__('re').fullmatch(r'SC[0-9]{2}',x)],
+                      'public_purpose_code':c.get('public_purpose_code','unspecified'),
+                      'public_purpose_summary':purpose_catalog.get(c.get('public_purpose_code'),'Purpose summary unavailable.'),
+                      'artifact_category':c.get('artifact_category','unspecified'),
+                      'responsible_role':c.get('responsible_role','unspecified'),
+                      'source_reference_count':len(c.get('source_refs',[])),
+                      'completion_evidence':c.get('completion_evidence','unspecified'),
+                      'failure_policy':c.get('failure_policy','unspecified'),
+                      'input_count':len(c.get('inputs',[])) + (len(c.get('source_refs',[])) if c.get('role')=='preparation' else 0),
+                      'required_heading_count':sum(len(x.get('required_headings',[])) for x in c.get('outputs',[]) if isinstance(x,dict)),
+                      'action_kinds':[x.get('kind') for x in c.get('action_requirements',[]) if isinstance(x,dict) and x.get('kind')],
+                      'approval_required':bool(c.get('approval_required') or c.get('action_requirements')) and not c.get('final_verification'),
+                      'evidence_required':bool(c.get('evidence_required')) or any(bool(x.get('evidence_required')) for x in c.get('action_requirements',[]) if isinstance(x,dict)),
+                      'human_confirmation_required':bool(c.get('human_confirmation_required')),
+                      'semantic_review_required':bool(c.get('semantic_review_required')),
+                      'exit_check_count':len(c.get('exit_checks',[])),
+                      'estimated_days':c.get('estimated_days'),
                       'period_months':[m for m in c.get('months',[]) if isinstance(m,str) and __import__('re').fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',m)],'criteria_count':len(c.get('criterion_ids',[]))})
-    packet={'tasks':tasks,'limitations':['文書生成と実処理は別。機械検査は人間の意味確認を代替しない。']}
+    used={x['public_purpose_code'] for x in tasks}
+    packet={'goal_category':'controlled_business_execution','tasks':tasks,
+            'purpose_catalog':{key:value for key,value in purpose_catalog.items() if key in used},
+            'limitations':['文書生成と実処理は別。機械検査は人間の意味確認を代替しない。']}
     if any(x['type']=='vehicle_calculate' for x in tasks):
         packet['limitations'].append('対応するExcel・CSV・請求PDFを原本参照付き明細へ自動抽出する。未対応形式・曖昧な配賦・税区分混在は暫定Excelに表示し、確定合格にしない。')
     if snapshot.get('detail'):

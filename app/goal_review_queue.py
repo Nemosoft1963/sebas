@@ -7,13 +7,29 @@ from app.goal_review import ReviewStore,plan_snapshot,selected_detail,review_pla
 
 def public_draft(snapshot):
     from app.structured_planning import contract_of
-    kinds={(contract_of(t) or {}).get('execution_kind') for t in snapshot.get('tasks',[])}
-    if 'vehicle_calculate' not in kinds:return ''
-    return ('車両ごとの月別損益Excelを登録原本から自動生成する計画です。売上から総支給給与、事業主社会保険、燃料、税込リース、対象その他費用を差し引きます。'
-            '原本読取、明細正規化、車両・従業員・月の対応付け、重複防止、計算、Excel再計算と原本照合を行います。'
-            '承認された不足0円方針があれば仮定ゼロを区別し、読取失敗や未配賦を確定合格にしません。'
-            'TRIZ回復は原本に存在しない金額を作らず、許可された処理方法を比較します。未対応形式は開発課題とします。'
-            '目標の網羅、工程の依存関係、検算の独立性、未実装能力、利用者への不要な転記負担を検証してください。')
+    tasks=snapshot.get('tasks',[])
+    kinds={(contract_of(t) or {}).get('execution_kind') for t in tasks}
+    if 'vehicle_calculate' in kinds:
+        return ('車両ごとの月別損益Excelを登録原本から自動生成する計画です。売上から総支給給与、事業主社会保険、燃料、税込リース、対象その他費用を差し引きます。'
+                '原本読取、明細正規化、車両・従業員・月の対応付け、重複防止、計算、Excel再計算と原本照合を行います。'
+                '承認された不足0円方針があれば仮定ゼロを区別し、読取失敗や未配賦を確定合格にしません。'
+                'TRIZ回復は原本に存在しない金額を作らず、許可された処理方法を比較します。未対応形式は開発課題とします。'
+                '目標の網羅、工程の依存関係、検算の独立性、未実装能力、利用者への不要な転記負担を検証してください。')
+    # Structural facts only: goal text, filenames and titles can contain private data.
+    contracts=[contract_of(t) or {} for t in tasks]
+    outputs=sum(len(c.get('outputs') or []) for c in contracts)
+    dependencies=sum(len(t.get('depends_on') or []) for t in tasks)
+    approvals=sum(1 for c in contracts if (c.get('approval_required') or c.get('action_requirements')) and not c.get('final_verification'))
+    semantic_reviews=sum(1 for c in contracts if c.get('human_confirmation_required'))
+    links=sum(len(c.get('criterion_ids') or []) for c in contracts)
+    detail_steps=len((snapshot.get('detail') or {}).get('steps') or [])
+    detail=f' 詳細計画は{detail_steps}工程です。' if detail_steps else ''
+    return (f'登録済みの目標と達成条件を実行する汎用計画です。全体は{len(tasks)}工程、成果物契約は{outputs}件、'
+            f'工程間依存は{dependencies}件、達成条件との対応は{links}件、外部操作の承認点は{approvals}工程、'
+            f'人間による意味確認は{semantic_reviews}工程です。'
+            f'{detail} 文書作成と実処理を区別し、公開・送信・顧客連絡・契約確定などの外部操作は人間承認後だけ実行します。'
+            '各工程について、目標の網羅、入力と出力、依存関係、実行能力、検証可能な完了条件、承認境界、途中で目標から外れる危険を検証してください。'
+            'この文章は構造情報だけから生成しており、秘密情報、個人情報、原本本文、ファイル名は含みません。必要なら送信前に公開可能な目的説明を追記してください。')
 
 
 async def tick(manager):

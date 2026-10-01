@@ -11,6 +11,7 @@ from app.structured_planning import (
 from app.project_manager import ProjectOrchestrator
 from app.memory.short_term import ShortTermMemory
 from app.workspace_files import WorkspaceSandbox
+from app.goal_review import public_structure
 
 
 def task(index, depends=None):
@@ -27,7 +28,7 @@ def test_extract_criteria_stops_at_next_section_and_keeps_additional_success():
 def test_sanitize_proposal_removes_backend_owned_scope_tokens():
     proposal = sanitize_proposal({
         'title': '会社情報の反映',
-        'scope': 'https://example.com/ と result/sc02.md を pandas で読み report.pdf に反映',
+        'scope': 'https://kouwatrsp.com/ と result/sc02.md を pandas で読み report.pdf に反映',
         'headings': ['運営会社', 'システム概要'],
     })
     current = compile_task(1, '運営会社を明示する', proposal, [])
@@ -226,10 +227,14 @@ def test_execution_plan_requires_approved_external_action_evidence():
         'title': '提案実行', 'scope': '提案内容と実行条件を整理',
         'headings': ['対象', '実行条件'],
     }, [])
-    final = compile_plan(['仮説検証のため顧客への提案を実行する'], [current])['tasks'][-1]
-    requirement = contract_of(final)['action_requirements'][0]
+    plan = compile_plan(['仮説検証のため顧客への提案を実行する'], [current])
+    external = contract_of(next(t for t in plan['tasks'] if t['task_key'] == 'SC01'))
+    final = contract_of(plan['tasks'][-1])
+    requirement = external['action_requirements'][0]
     assert requirement['minimum_executed'] == 1
     assert requirement['evidence_required'] is True
+    assert external['human_confirmation_required'] is True
+    assert final.get('action_requirements') is None
 
 
 def test_input_artifacts_are_not_treated_as_new_outputs():
@@ -419,3 +424,223 @@ async def test_generation_excludes_approval_start_and_duplicate_generation(tmp_p
         release.set()
         await worker
     assert not manager.planning_projects
+
+
+def test_external_action_tasks_and_final_verification_have_explicit_kinds():
+    site = compile_task(1, 'Google Sitesでランディングページを公開し公開URLを登録する', {
+        'title': '公開', 'scope': '承認済み内容を公開してURLを検証する',
+        'headings': ['公開内容', '検証結果'], 'depends_on': [],
+    }, [])
+    social = compile_task(2, 'SNSへ投稿して投稿URLを登録する', {
+        'title': '投稿', 'scope': '承認後に投稿し結果URLを検証する',
+        'headings': ['投稿内容', '検証結果'], 'depends_on': ['SC01'],
+    }, [])
+    plan = compile_plan(
+        ['Google Sitesでランディングページを公開し公開URLを登録する',
+         'SNSへ投稿して投稿URLを登録する'], [site, social],
+    )
+    assert contract_of(next(t for t in plan['tasks'] if t['task_key']=='SC01'))['execution_kind']=='google_site_publication'
+    assert contract_of(next(t for t in plan['tasks'] if t['task_key']=='SC02'))['execution_kind']=='social_post'
+    final = contract_of(plan['tasks'][-1])
+    assert final['execution_kind']=='final_verification'
+    assert final['criterion_ids']==['SC01','SC02']
+
+
+def test_external_action_dependencies_and_human_final_gate():
+    document = compile_task(1, 'Create proposal document', {
+        'title': 'Proposal', 'scope': 'Create proposal document',
+        'headings': ['Content', 'Evidence'], 'depends_on': [],
+    }, [])
+    action = compile_task(2, 'SNS\u3078\u6295\u7a3f\u3057\u3066\u6295\u7a3fURL\u3092\u767b\u9332\u3059\u308b', {
+        'title': 'Post', 'scope': 'Post after approval',
+        'headings': ['Result', 'Evidence'], 'depends_on': [],
+    }, [])
+    plan = compile_plan(['Create proposal document', 'SNS\u3078\u6295\u7a3f\u3057\u3066\u6295\u7a3fURL\u3092\u767b\u9332\u3059\u308b'], [document, action])
+    prepared = next(t for t in plan['tasks'] if t['task_key'] == 'SC00')
+    posted = next(t for t in plan['tasks'] if t['task_key'] == 'SC02')
+    prep_contract = contract_of(prepared)
+    final = contract_of(plan['tasks'][-1])
+    assert prep_contract['role'] == 'preparation'
+    assert len(prep_contract['exit_checks']) == 3
+    assert posted['depends_on'] == ['SC00', 'SC01']
+    assert contract_of(posted)['inputs'] == ['result/sc00.md', 'result/sc01.md']
+    assert final['human_confirmation_required'] is True
+    assert final['semantic_review_required'] is True
+
+
+def test_completion_evidence_and_pre_action_semantic_confirmation():
+    document = compile_task(1, 'Create a verified proposal', {
+        'title': 'Proposal', 'scope': 'Create evidence based proposal',
+        'headings': ['Content', 'Evidence'], 'depends_on': [],
+    }, [])
+    action = compile_task(2, 'SNS\u3078\u6295\u7a3f\u3057\u3066URL\u3092\u767b\u9332\u3059\u308b', {
+        'title': 'Post', 'scope': 'Publish only after approval',
+        'headings': ['Payload', 'Evidence'], 'depends_on': [],
+    }, [])
+    plan = compile_plan(['Create a verified proposal', 'SNS\u3078\u6295\u7a3f\u3057\u3066URL\u3092\u767b\u9332\u3059\u308b'], [document, action])
+    ordinary = contract_of(next(t for t in plan['tasks'] if t['task_key'] == 'SC01'))
+    external = contract_of(next(t for t in plan['tasks'] if t['task_key'] == 'SC02'))
+    final = contract_of(plan['tasks'][-1])
+    assert ordinary['evidence_required'] is True
+    assert len(ordinary['exit_checks']) == 3
+    assert external['human_confirmation_required'] is True
+    assert external['semantic_review_required'] is True
+    assert final.get('action_requirements') is None
+    assert final['evidence_required'] is True
+    assert len(final['exit_checks']) == 3
+
+
+def test_generic_external_actions_have_safe_operation_category():
+    task = compile_task(1, '\u9867\u5ba2\u3078\u9023\u7d61\u3092\u9001\u4fe1\u3057\u3066\u7d50\u679c\u3092\u767b\u9332\u3059\u308b', {
+        'title': 'Contact', 'scope': 'Contact only after approval',
+        'headings': ['Payload', 'Evidence'], 'depends_on': [],
+    }, [])
+    contract = contract_of(task)
+    assert contract['execution_kind'] == 'approved_outbound_communication'
+    assert contract['public_purpose_code'] == 'approved_outbound_communication'
+
+
+def test_extract_criteria_includes_additional_requirements_and_main_section():
+    goal = '''\u3010\u8ffd\u52a0\u8981\u4ef6\u3011
+1. Google Sites\u3092\u516c\u958b\u3059\u308b
+2. SNS\u6295\u7a3fURL\u3092\u767b\u9332\u3059\u308b
+\u3010\u518d\u8a08\u753b\u6761\u4ef6\u3011
+- keep
+## \u9054\u6210\u6761\u4ef6
+1. \u5e02\u5834\u3092\u5b9a\u7fa9\u3059\u308b
+2. \u5546\u54c1\u3092\u8a2d\u8a08\u3059\u308b
+## \u5236\u7d04
+- safe
+'''
+    criteria = extract_criteria(goal, '\u5b9f\u884c\u3057\u3066\u691c\u8a3c\u3059\u308b')
+    assert criteria == [
+        'Google Sites\u3092\u516c\u958b\u3059\u308b',
+        'SNS\u6295\u7a3fURL\u3092\u767b\u9332\u3059\u308b',
+        '\u5e02\u5834\u3092\u5b9a\u7fa9\u3059\u308b',
+        '\u5546\u54c1\u3092\u8a2d\u8a08\u3059\u308b',
+        '\u5b9f\u884c\u3057\u3066\u691c\u8a3c\u3059\u308b',
+    ]
+
+
+def test_extract_criteria_includes_additional_requirements_and_main_section():
+    goal = '''\u3010\u8ffd\u52a0\u8981\u4ef6\u3011
+1. Google Sites\u3092\u516c\u958b\u3059\u308b
+2. SNS\u6295\u7a3fURL\u3092\u767b\u9332\u3059\u308b
+\u3010\u518d\u8a08\u753b\u6761\u4ef6\u3011
+- keep
+## \u9054\u6210\u6761\u4ef6
+1. \u5e02\u5834\u3092\u5b9a\u7fa9\u3059\u308b
+2. \u5546\u54c1\u3092\u8a2d\u8a08\u3059\u308b
+## \u5236\u7d04
+- safe
+'''
+    criteria = extract_criteria(goal, '\u5b9f\u884c\u3057\u3066\u691c\u8a3c\u3059\u308b')
+    assert len(criteria) == 5
+    assert criteria[0].startswith('Google Sites')
+    assert criteria[-1] == '\u5b9f\u884c\u3057\u3066\u691c\u8a3c\u3059\u308b'
+
+
+def test_sales_semantic_dependencies_and_status_is_not_external_action():
+    criteria = [
+        '\u5e02\u5834\u3068\u9867\u5ba2\u8ab2\u984c\u3092\u5b9a\u7fa9\u3059\u308b',
+        '\u5546\u54c1\u306e\u5951\u7d04\u30d7\u30e9\u30f3\u3092\u8a2d\u8a08\u3059\u308b',
+        '\u4fa1\u683c\u3068\u9664\u5916\u4e8b\u9805\u3092\u6574\u7406\u3059\u308b',
+        '\u63d0\u6848\u66f8\u3068\u898b\u7a4d\u3072\u306a\u578b\u3092\u4f5c\u6210\u3059\u308b',
+        '\u8ca9\u58f2\u8a08\u753b\u3068KPI\u3092\u4f5c\u6210\u3059\u308b',
+        '\u898b\u8fbc\u307f\u5ba2\u306e\u512a\u5148\u9806\u4f4d\u3092\u6574\u7406\u3059\u308b',
+        '\u627f\u8a8d\u6e08\u307f\u9867\u5ba2\u3078\u306e\u55b6\u696d\u6587\u9762\u3068\u30d5\u30a9\u30ed\u30fc\u6587\u9762\u3092\u4f5c\u6210\u3059\u308b',
+        '\u6848\u4ef6\u7ba1\u7406\u8868\u3092\u4f5c\u6210\u3059\u308b',
+        '\u53d7\u6ce8\u5f8c\u306e\u5c0e\u5165\u6a19\u6e96\u624b\u9806\u3092\u4f5c\u6210\u3059\u308b',
+        '\u5b9f\u969b\u306e\u55b6\u696d\u6d3b\u52d5\u306e\u72b6\u614b\u5831\u544a\u3092\u4f5c\u6210\u3059\u308b',
+    ]
+    tasks = [compile_task(i, criterion, {
+        'title': f'T{i}', 'scope': 'Create and verify the deliverable',
+        'headings': ['Content', 'Evidence'], 'depends_on': [],
+    }, []) for i, criterion in enumerate(criteria, 1)]
+    plan = compile_plan(criteria, tasks)
+    by_key = {t['task_key']: t for t in plan['tasks']}
+    assert by_key['SC05']['depends_on'] == ['SC01', 'SC02', 'SC03', 'SC04']
+    assert by_key['SC07']['depends_on'] == ['SC06', 'SC04']
+    assert by_key['SC08']['depends_on'] == ['SC06', 'SC07']
+    assert by_key['SC09']['depends_on'] == ['SC02', 'SC03']
+    assert (contract_of(by_key['SC10']) or {}).get('action_requirements') is None
+
+
+def test_external_control_requirements_are_not_misclassified_as_actions():
+    controls = [
+        'SNS\u306f\u81ea\u52d5\u6295\u7a3f\u305b\u305a\u3001\u4eba\u9593\u627f\u8a8d\u5f8c\u306b\u6295\u7a3f\u753b\u9762\u3092\u958b\u304f',
+        'Google Sites\u516c\u958b\u3068SNS\u6295\u7a3f\u306f\u500b\u5225\u306e\u4eba\u9593\u627f\u8a8d\u3092\u5fc5\u8981\u3068\u3059\u308b',
+        '\u5b9f\u884c\u8a3c\u62e0\u3067\u9054\u6210\u5224\u5b9a\u3059\u308b',
+    ]
+    for index, criterion in enumerate(controls, 1):
+        task = compile_task(index, criterion, {
+            'title': f'C{index}', 'scope': 'Define the control',
+            'headings': ['Rule', 'Evidence'], 'depends_on': [],
+        }, [])
+        assert (contract_of(task) or {}).get('action_requirements') is None
+
+
+def test_campaign_sequence_has_ordered_actions_and_limited_dependencies():
+    criteria = [
+        '\u5931\u6557\u6642\u306f\u539f\u56e0\u3092\u5206\u985e\u3059\u308b',
+        'Google Sites\u516c\u958b\u3068SNS\u6295\u7a3f\u306f\u500b\u5225\u306e\u4eba\u9593\u627f\u8a8d\u3092\u5fc5\u8981\u3068\u3059\u308b',
+        'SNS\u306f\u81ea\u52d5\u6295\u7a3f\u305b\u305a\u4eba\u9593\u304c\u6295\u7a3f\u3059\u308b',
+        '\u5b9f\u884c\u8a3c\u62e0\u3067\u9054\u6210\u5224\u5b9a\u3059\u308b',
+        '\u5e02\u5834\u3068\u9867\u5ba2\u8ab2\u984c\u3092\u5b9a\u7fa9\u3059\u308b',
+        '\u5546\u54c1\u306e\u5951\u7d04\u30d7\u30e9\u30f3\u3092\u8a2d\u8a08\u3059\u308b',
+        '\u4fa1\u683c\u3068\u9664\u5916\u4e8b\u9805\u3092\u6574\u7406\u3059\u308b',
+        '\u63d0\u6848\u66f8\u3068\u898b\u7a4d\u3072\u306a\u578b\u3092\u4f5c\u6210\u3059\u308b',
+        '\u55b6\u696d\u6587\u9762\u3068\u30d5\u30a9\u30ed\u30fc\u6587\u9762\u3092\u4f5c\u6210\u3059\u308b',
+        '\u516c\u958b\u5f8c\u306b\u6295\u7a3fURL\u3092\u767b\u9332\u3057\u5fdc\u7b54\u3092\u540c\u671f\u3057\u30ea\u30fc\u30c9\u8a55\u4fa1\u3059\u308b',
+        '\u627f\u8a8d\u6e08\u307f\u9867\u5ba2\u3068\u306e\u5546\u8ac7\u3092\u5b9f\u65bd\u3059\u308b',
+    ]
+    tasks = [compile_task(i, c, {'title': f'T{i}', 'scope': 'deliver', 'headings': ['A', 'B']}, ['source-a']) for i, c in enumerate(criteria, 1)]
+    plan = compile_plan(criteria, tasks, goal='\u55b6\u696d\u6d3b\u52d5')
+    by_purpose = {contract_of(t).get('public_purpose_code'): t for t in plan['tasks']}
+    campaign = by_purpose['campaign_execution_sequence']
+    contract = contract_of(campaign)
+    assert [x['kind'] for x in contract['action_requirements']] == [
+        'google_site_publication', 'social_posting_kit_generation', 'social_copy_approval',
+        'manual_social_post', 'post_url_registration', 'form_response_sync', 'lead_evaluation',
+    ]
+    assert contract['ordered_actions'] == [x['kind'] for x in contract['action_requirements']]
+    assert campaign['depends_on']
+    assert len(campaign['depends_on']) < len(plan['tasks']) - 2
+    assert plan['tasks'].index(campaign) > plan['tasks'].index(by_purpose['sales_assets'])
+    engagement = by_purpose['approved_customer_engagement']
+    assert len(engagement['depends_on']) < len(plan['tasks']) - 2
+    assert campaign['task_key'] in engagement['depends_on']
+
+
+def test_sales_decisions_require_semantic_human_approval():
+    criteria = [
+        '\u4fa1\u683c\u3068\u9664\u5916\u4e8b\u9805\u3092\u6574\u7406\u3059\u308b',
+        '\u63d0\u6848\u66f8\u3068\u898b\u7a4d\u3072\u306a\u578b\u3092\u4f5c\u6210\u3059\u308b',
+        '\u55b6\u696d\u6587\u9762\u3068\u30d5\u30a9\u30ed\u30fc\u6587\u9762\u3092\u4f5c\u6210\u3059\u308b',
+    ]
+    compiled = [compile_task(i, c, {'title': f'T{i}', 'scope': 'deliver', 'headings': ['A', 'B']}, ['source-a']) for i, c in enumerate(criteria, 1)]
+    for task_item in compiled:
+        contract = contract_of(task_item)
+        assert contract['approval_required'] is True
+        assert contract['human_confirmation_required'] is True
+        assert contract['semantic_review_required'] is True
+        assert contract['reviewer_role'] == 'human_approver'
+
+
+def test_public_review_counts_preparation_sources_scalar_approval_and_final_sources():
+    criterion = '\u4fa1\u683c\u3068\u9664\u5916\u4e8b\u9805\u3092\u6574\u7406\u3059\u308b'
+    current = compile_task(1, criterion, {'title': 'Terms', 'scope': 'deliver', 'headings': ['A', 'B']}, ['source-a'])
+    plan = compile_plan([criterion], [current], goal='\u55b6\u696d\u6d3b\u52d5')
+    packet = public_structure({'tasks': plan['tasks']})
+    prep = next(x for x in packet['tasks'] if x['role'] == 'preparation')
+    terms = next(x for x in packet['tasks'] if x['public_purpose_code'] == 'commercial_terms')
+    final = next(x for x in packet['tasks'] if x['role'] == 'final_verification')
+    assert prep['input_count'] >= 1
+    assert terms['approval_required'] is True
+    assert final['source_reference_count'] >= 1
+
+
+def test_actual_sales_activity_report_maps_to_execution_status():
+    criterion = '\u5b9f\u969b\u306e\u55b6\u696d\u6d3b\u52d5\u306b\u3064\u3044\u3066\u672a\u7740\u624b\u3068\u5931\u6557\u3068\u6b21\u56de\u884c\u52d5\u3092\u5831\u544a\u3059\u308b'
+    current = compile_task(1, criterion, {'title': 'Status', 'scope': 'report', 'headings': ['A', 'B']}, [])
+    assert contract_of(current)['public_purpose_code'] == 'execution_status'

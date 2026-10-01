@@ -349,6 +349,13 @@ def validate_candidate(body, issues, snapshot, detail):
     if not isinstance(actions,list) or len(actions)!=len(expected) or {x.get('issue_id') for x in actions if isinstance(x,dict)}!=expected:
         raise ValueError('全指摘に対する対応表が必要です。指摘の欠落・重複は保存できません')
     step_targets = {s['id'] for s in detail['steps']} if detail else {t['task_key'] for t in snapshot['tasks']}
+    kinds={(contract_of(t) or {}).get('execution_kind') for t in snapshot['tasks']}
+    is_vehicle = bool(kinds and any(str(k or '').startswith('vehicle_') for k in kinds)) or 'vehicle_calculate' in kinds
+    structural_rebuild_ids={
+        str(item.get('id') or item.get('issue_id') or '')
+        for item in issues
+        if re.search(r'criteria_count|document_or_legacy|parents|period_months|公開目標|目標.{0,16}(?:整合|不明)|達成条件.{0,16}(?:不明|定義)|入力.{0,16}(?:契約|不足|ゼロ)|実処理|実データ|調査|実装能力|purpose|semantic_review|source_reference|結果指標|形式的|目的コード|意味的|意味上|承認.{0,12}(?:工程|点|操作)|外部.{0,16}(?:操作|具体)|最終.{0,16}(?:工程|検証|成果)|完了判定|失敗時|依存.{0,20}(?:不足|無い|ない|欠落)|全.{0,8}工程', str(item.get('text') or ''), re.I)
+    }
     normalized = []
     for action in actions:
         if not isinstance(action, dict) or 'contract_fix' in action:
@@ -360,17 +367,29 @@ def validate_candidate(body, issues, snapshot, detail):
             raise ValueError('対応種別と具体的な理由が必要です')
         if not isinstance(action['change'],str) or len(action['change'])>4000:
             raise ValueError('修正内容が長すぎるか形式が不正です')
+        if (not detail and not is_vehicle and str(action.get('issue_id') or '') in structural_rebuild_ids
+                and action['disposition'] in {'amend','development','unresolved'}):
+            action = dict(action)
+            action['disposition'] = 'rebuild_generic'
+            action['reason'] = (action['reason'].rstrip() +
+                ' 工程構造・依存関係・完了契約の指摘は説明追記では解消できないため、汎用計画を再構成します。')[:2000]
         if action['disposition']=='amend':
             if action['target'] not in step_targets or len(action['change'].strip())<20:
                 raise ValueError('修正対象と具体的な修正内容が必要です')
         row = {k: action[k] for k in ACTION_REQUIRED}
+        # Normalize a local-model label error only for generic whole-plan rebuilding.
+        if row['disposition']=='rebuild_vehicle' and not detail and not is_vehicle:
+            row['disposition']='rebuild_generic'
+            row['reason']=(row['reason'].rstrip()+' 汎用案件のため汎用計画再構成として処理します。')[:2000]
+        if (not detail and not is_vehicle and row['issue_id'] in structural_rebuild_ids
+                and row['disposition'] in {'amend','development','unresolved'}):
+            row['disposition']='rebuild_generic'
+            row['reason']=(row['reason'].rstrip()+' 工程構造・依存関係・完了契約の指摘は説明追記では解消できないため、汎用計画を再構成します。')[:2000]
         row['targets'] = _reserved_targets(action.get('targets'))
         row['binds'] = _reserved_binds(action.get('binds'))
         row['lifecycle'] = 'classified'
         normalized.append(row)
     for action in normalized:
-        kinds={(contract_of(t) or {}).get('execution_kind') for t in snapshot['tasks']}
-        is_vehicle = bool(kinds and any(str(k or '').startswith('vehicle_') for k in kinds)) or 'vehicle_calculate' in kinds
         if action['disposition']=='rebuild_vehicle':
             if detail or 'vehicle_calculate' not in kinds or 'vehicle_extract' in kinds:
                 raise ValueError('自動抽出工程のない車両全体計画だけを実装済みパイプラインへ再構成できます')
@@ -408,12 +427,16 @@ async def propose(manager,pid,signature,tid=None,*,_generation=False,idempotency
     store=ReviewStore(manager.memory.path)
     previous=store.get(pid,'revision',signature) or {}
     attempts=previous.get('attempts',0)
-    if attempts>=3:
+    validation_recovery = (attempts == 3 and previous.get('status') == 'error' and
+                           previous.get('error') == '修正対象と具体的な修正内容が必要です' and
+                           not previous.get('validation_recovery_used'))
+    if attempts>=3 and not validation_recovery:
+        raise ValueError('同じ版の修正案生成は3回までです。指摘と目標を人間が整理してください')
         raise ValueError('同じ版の修正案生成は3回までです。指摘と目標を人間が整理してください')
     job=begin_job(store,pid,'propose',idempotency_key or fingerprint(['propose',pid,signature,tid]),
                   extra={'plan_signature':signature,'task_id':tid,'resume_from':'local_proposal'})
     manager.planning_projects.add(pid)
-    row={'status':'generating','attempts':attempts+1,'started':time.time(),'task_id':tid,'issues':issues,'job_id':job['id']}
+    row={'status':'generating','attempts':attempts+1,'validation_recovery_used':validation_recovery,'started':time.time(),'task_id':tid,'issues':issues,'job_id':job['id']}
     store.put(pid,'revision',signature,row)
     try:
         action_schema={'type':'object','additionalProperties':False,'properties':{
