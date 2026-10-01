@@ -30,3 +30,9 @@
 - 旧イメージ: `localsaporter-web:before-mmi-20261001`。
 - 旧静的ファイルと `app/web.py`: `temp/mmi_backup_20261001`。
 - OCR有効化設定、外部AIへの送信条件、人間確認およびRAG登録のゲートは変更していない。
+
+## GitHub連携と次回再開
+
+- MMIの本番版は `68c0a1122662767d0a0ac875e989cbe1ad9cdb77` として `Nemosoft1963/sebas` の `main` に公開。GitHub Actions の `test` と `security` は success。
+- 2026-10-02のヘルスチェックは全項目 PASS。販売案件は計画Ver.33・20工程、`plan_issues_open` で停止中。MMI反映を計画承認・目標達成とは扱わない。
+- 最新の作業記憶と次回操作は `docs/SEBAS_WORK_MEMORY.md` に記録。

@@ -1677,3 +1677,10 @@ Validation:
 - Broader local pytest: 817 passed, 2 skipped, 19 failed; 18 failures were caused by missing `openpyxl`/`pypdf` in the local `.venv`, and the one UI regression was fixed and rechecked in the 41-test suite. This is not a full-suite pass.
 - `scripts/healthcheck.ps1`: all PASS. HTTP health: ok; MMI presenter route: 200. Browser visual check unavailable due Windows sandbox startup error.
 - Full deployment and rollback details: `docs/CHANGELOG_2026-10-01_mmi_deployment.md`.
+
+## 2026-10-02 GitHub sync and work memory
+
+- Confirmed `origin/main` at MMI commit `68c0a1122662767d0a0ac875e989cbe1ad9cdb77`; GitHub Actions `test` and `security` both succeeded.
+- Rechecked production: Web container healthy and `scripts/healthcheck.ps1` all PASS.
+- Sales project remains plan Version 33 with 20 tasks; `plan_issues_open`, external review `not_passed` (0/5). No approval or execution completion is claimed.
+- Updated the MMI design status and recorded restart guidance in `docs/SEBAS_WORK_MEMORY.md`.
