@@ -10,6 +10,23 @@ from app.goal_review import *
 from app.experience_memory import ExperienceMemory
 
 
+def test_decode_object_accepts_fenced_json_and_surrounding_text():
+    from app.structured_planning import decode_object
+    response = '確認結果です。\n```json\n{"verdict":"pass","issues":[]}\n```\n以上です。'
+    assert decode_object(response) == {'verdict': 'pass', 'issues': []}
+
+
+def test_decode_object_uses_first_complete_object_instead_of_greedy_span():
+    from app.structured_planning import decode_object
+    response = 'result={"verdict":"pass","issues":[]} appendix={"note":"別のJSON"}'
+    assert decode_object(response) == {'verdict': 'pass', 'issues': []}
+
+
+def test_decode_object_rejects_malformed_response():
+    from app.structured_planning import decode_object
+    with pytest.raises(ValueError, match='JSON object required'):
+        decode_object('```json\n{"verdict":"pass"\n```')
+
 def setup(tmp_path,required=False):
     memory=ShortTermMemory(tmp_path/'conversations.db');p=memory.create_project('private',workspace_path='projects/private');pid=p['id']
     memory.save_mission(pid,'機密会社の作業結果を整理する','根拠を示す','',True,['a','b'])
@@ -174,3 +191,19 @@ async def test_new_plan_cannot_reuse_review_of_other_detail(tmp_path):
     require_review(manager,pid,one)
     with pytest.raises(ValueError):require_review(manager,pid,two)
     with pytest.raises(ValueError):require_review(manager,pid)
+
+@pytest.mark.asyncio
+async def test_fenced_external_review_json_is_evaluated(tmp_path):
+    manager,pid,_=setup(tmp_path,True)
+    async def runner(text,providers):
+        return [
+            {'id':x,'ok':True,'review':'説明文\n```json\n{"verdict":"pass","issues":[]}\n```\n完了'}
+            for x in providers
+        ]
+    manager.plan_review_runner=runner
+    result=await review_plan(
+        manager,pid,plan_snapshot(manager,pid)[1],
+        '目標と達成条件と全工程を照合し、不足なく完了できる計画か検証します。',True,
+    )
+    assert result['status']=='passed'
+    assert result['success_count']==2

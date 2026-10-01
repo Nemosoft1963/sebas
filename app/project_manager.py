@@ -1136,7 +1136,7 @@ class ProjectOrchestrator:
             if item.get('kind') != 'mission_instruction_user':
                 continue
             instruction = str(item.get('message', '')).strip()
-            if instruction and instruction not in criteria:
+            if instruction and instruction not in criteria and len(criteria) < MAX_CRITERIA:
                 criteria.append(instruction)
         consolidated: list[str] = []
         web_group_positions: dict[str, int] = {}
@@ -4193,3 +4193,4 @@ Python/pandas等、許可されていない実行を実施済みと記載して�
             )
             report = f"# {project['name']} 未完了報告\n\n## 目標\n{mission['goal']}\n\n## タスク成果\n\n{results}"
             return report, "failed", ["最終目標評価を生成できませんでした"]
+

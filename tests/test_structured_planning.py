@@ -559,6 +559,8 @@ def test_sales_semantic_dependencies_and_status_is_not_external_action():
     }, []) for i, criterion in enumerate(criteria, 1)]
     plan = compile_plan(criteria, tasks)
     by_key = {t['task_key']: t for t in plan['tasks']}
+    assert by_key['SC02']['depends_on'] == ['SC01']
+    assert by_key['SC03']['depends_on'] == ['SC01', 'SC02']
     assert by_key['SC05']['depends_on'] == ['SC01', 'SC02', 'SC03', 'SC04']
     assert by_key['SC07']['depends_on'] == ['SC06', 'SC04']
     assert by_key['SC08']['depends_on'] == ['SC06', 'SC07']
@@ -644,3 +646,81 @@ def test_actual_sales_activity_report_maps_to_execution_status():
     criterion = '\u5b9f\u969b\u306e\u55b6\u696d\u6d3b\u52d5\u306b\u3064\u3044\u3066\u672a\u7740\u624b\u3068\u5931\u6557\u3068\u6b21\u56de\u884c\u52d5\u3092\u5831\u544a\u3059\u308b'
     current = compile_task(1, criterion, {'title': 'Status', 'scope': 'report', 'headings': ['A', 'B']}, [])
     assert contract_of(current)['public_purpose_code'] == 'execution_status'
+
+def test_sales_strategy_decisions_require_human_confirmation():
+    criteria = [
+        '市場と理想顧客と顧客課題を定義する',
+        '複数の商品と契約プランを設計する',
+        '販売計画とKPIと収支見込みを作成する',
+        '見込み客候補を評価して優先順位を付ける',
+        '受注後の導入標準手順を作成する',
+    ]
+    compiled = [compile_task(i, c, {'title': f'T{i}', 'scope': 'deliver', 'headings': ['A', 'B']}, ['source-a']) for i, c in enumerate(criteria, 1)]
+    plan = compile_plan(criteria, compiled, goal='営業活動と販売促進')
+    by_purpose = {contract_of(t).get('public_purpose_code'): t for t in plan['tasks']}
+    for purpose in ('market_and_customer_definition', 'service_package_design', 'sales_plan', 'prospect_prioritization', 'delivery_process'):
+        contract = contract_of(by_purpose[purpose])
+        assert contract['approval_required'] is True
+        assert contract['human_confirmation_required'] is True
+        assert contract['semantic_review_required'] is True
+        assert contract['completion_evidence'] == 'validated_artifact_and_human_confirmation'
+    market = by_purpose['market_and_customer_definition']['task_key']
+    service = by_purpose['service_package_design']
+    terms = next(t for t in plan['tasks'] if contract_of(t).get('public_purpose_code') == 'commercial_terms') if 'commercial_terms' in by_purpose else None
+    assert service['depends_on'] == [market]
+
+def test_planning_criteria_keeps_eighteen_goal_criteria_when_history_has_more_instructions():
+    mission = {
+        'goal': '## 達成条件\n' + '\n'.join(f'{i}. 条件{i}' for i in range(1, 19)),
+        'success_criteria': '',
+        'instruction_messages': [
+            {'kind': 'mission_instruction_user', 'message': '過去の追加指示1'},
+            {'kind': 'mission_instruction_user', 'message': '過去の追加指示2'},
+        ],
+    }
+    criteria = ProjectOrchestrator._planning_criteria(mission)
+    assert len(criteria) == 18
+    assert criteria == [f'条件{i}' for i in range(1, 19)]
+
+def test_semantic_dependencies_are_topologically_ordered_after_model_ordering():
+    criteria = [
+        '受注後の導入標準手順を作成する',
+        '販売計画とKPIと収支見込みを作成する',
+        '価格と除外事項を整理する',
+        '商品と契約プランを設計する',
+        '市場と顧客課題を定義する',
+        '提案書と見積ひな型を作成する',
+    ]
+    tasks = [compile_task(i, c, {'title': f'T{i}', 'scope': 'deliver', 'headings': ['A', 'B']}, ['source-a']) for i, c in enumerate(criteria, 1)]
+    plan = compile_plan(criteria, tasks, goal='営業活動と販売促進')
+    positions = {task['task_key']: index for index, task in enumerate(plan['tasks'])}
+    for task in plan['tasks']:
+        for dependency in task.get('depends_on', []):
+            assert positions[dependency] < positions[task['task_key']]
+
+def test_external_dependency_normalization_keeps_final_order_and_inputs_in_sync():
+    criteria = [
+        '承認済み顧客との商談を実施する',
+        '実際の営業活動の状態報告を作成する',
+        '公開後に投稿URLを登録し回答を同期しリード評価する',
+        '見込み客の優先順位を整理する',
+        '営業文面とフォロー文面を作成する',
+        '案件管理表を作成する',
+        '市場と顧客課題を定義する',
+        '販売計画とKPIを作成する',
+        '提案書と見積ひな型を作成する',
+        '商品と契約プランを設計する',
+        '価格と除外事項を整理する',
+        '失敗時は原因を分類する',
+        'Google Sites公開とSNS投稿は個別の人間承認を必要とする',
+        'SNSは自動投稿せず人間が投稿する',
+        '実行証拠で達成判定する',
+    ]
+    tasks = [compile_task(i, c, {'title': f'T{i}', 'scope': 'deliver', 'headings': ['A', 'B'], 'depends_on': [f'SC{i-1:02d}'] if i > 1 else []}, ['source-a']) for i, c in enumerate(criteria, 1)]
+    plan = compile_plan(criteria, tasks, goal='営業活動と販売促進')
+    positions = {task['task_key']: index for index, task in enumerate(plan['tasks'])}
+    outputs = {task['task_key']: [out['path'] for out in contract_of(task).get('outputs', [])] for task in plan['tasks']}
+    for task in plan['tasks'][1:]:
+        assert all(positions[dep] < positions[task['task_key']] for dep in task.get('depends_on', []))
+        expected = [path for dep in task.get('depends_on', []) for path in outputs[dep]]
+        assert contract_of(task).get('inputs', []) == expected

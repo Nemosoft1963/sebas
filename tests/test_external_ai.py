@@ -46,3 +46,17 @@ async def test_research_and_synthesis_receive_same_front_context(monkeypatch):
     assert result["synthesis"] == "調査結果"
     assert len(prompts) == 2
     assert all("共有すべき前提" in prompt for prompt in prompts)
+@pytest.mark.asyncio
+async def test_goal_gate_requests_compact_complete_json(monkeypatch):
+    calls = []
+
+    async def fake_invoke(provider_id, prompt, system, max_tokens=2200, reasoning_effort=None, result_key='review'):
+        calls.append((provider_id, prompt, system, max_tokens, reasoning_effort, result_key))
+        return {'id': provider_id, 'ok': True, result_key: '{"verdict":"pass","issues":[]}'}
+
+    monkeypatch.setattr(external_ai, 'invoke_provider_isolated', fake_invoke)
+    result = await external_ai.run_plan_reviews('GOAL_GATE_V1\n{}', ['claude'])
+    assert result[0]['ok'] is True
+    assert calls[0][3] == 3200
+    assert '最大6件' in calls[0][2]
+    assert 'コードフェンスを付けない' in calls[0][2]

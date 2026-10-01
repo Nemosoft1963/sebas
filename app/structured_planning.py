@@ -37,11 +37,17 @@ def extract_criteria(goal: str, success: str) -> list[str]:
 
 
 def decode_object(response: str) -> dict:
-    start, end = response.find("{"), response.rfind("}")
-    value = json.loads(response[start:end + 1]) if start >= 0 and end > start else None
-    if not isinstance(value, dict):
+    if not isinstance(response, str):
         raise ValueError("JSON object required")
-    return value
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", response):
+        try:
+            value, _ = decoder.raw_decode(response, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("JSON object required")
 
 
 def sanitize_proposal(proposal: dict) -> dict:
@@ -407,7 +413,11 @@ def compile_task(index: int, criterion: str, proposal: dict, source_ids: list[st
                          'estimated_days':1,'completion_evidence':'registered_external_evidence',
                          'artifact_category':'external_action_record','human_confirmation_required':True,
                          'semantic_review_required':True})
-    if purpose_code in {'commercial_terms', 'sales_assets', 'outreach_content'}:
+    if purpose_code in {
+        'market_and_customer_definition', 'service_package_design', 'commercial_terms',
+        'sales_assets', 'sales_plan', 'prospect_prioritization', 'outreach_content',
+        'delivery_process',
+    }:
         contract.update({
             'approval_required': True,
             'human_confirmation_required': True,
@@ -508,6 +518,8 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
         purpose = (contract_of(current) or {}).get('public_purpose_code')
         keys_by_purpose.setdefault(purpose, []).append(current['task_key'])
     semantic_parents = {
+        'service_package_design': ['market_and_customer_definition'],
+        'commercial_terms': ['market_and_customer_definition', 'service_package_design'],
         'sales_assets': ['market_and_customer_definition', 'service_package_design', 'commercial_terms'],
         'sales_plan': ['market_and_customer_definition', 'service_package_design', 'commercial_terms', 'sales_assets'],
         'prospect_prioritization': ['market_and_customer_definition', 'sales_plan'],
@@ -534,6 +546,29 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
         required = [key for p in semantic_parents.get(purpose, []) for key in keys_by_purpose.get(p, [])]
         if required:
             current['depends_on'] = list(dict.fromkeys(required))
+    # Semantic dependencies are added after the model proposal order is chosen.
+    # Reorder again so every dependency is guaranteed to precede its consumer.
+    pending_tasks = list(tasks[1:])
+    semantic_order = []
+    resolved_keys = {'SC00'}
+    while pending_tasks:
+        ready_tasks = [
+            item for item in pending_tasks
+            if (contract_of(item) or {}).get('public_web_research', {}).get('required')
+            or set(item.get('depends_on', [])) <= resolved_keys
+        ]
+        ready_tasks.sort(key=lambda item: (
+            0 if (contract_of(item) or {}).get('public_web_research', {}).get('required') else 1
+        ))
+        if not ready_tasks:
+            # Validation below reports an actual cycle or missing key with details.
+            semantic_order.extend(pending_tasks)
+            break
+        for item in ready_tasks:
+            pending_tasks.remove(item)
+            semantic_order.append(item)
+            resolved_keys.add(item['task_key'])
+    tasks = [tasks[0], *semantic_order]
     outputs_by_key = {
         current["task_key"]: [
             output["path"] for output in (contract_of(current) or {}).get("outputs", [])
@@ -575,6 +610,44 @@ def compile_plan(criteria: list[str], tasks: list[dict], goal: str = "") -> dict
             for output in contract_of(parent)['outputs']
         ]
         current['acceptance_criteria'] = json.dumps(current_contract, ensure_ascii=False)
+    # External-action dependency normalization above can change the graph again.
+    # Perform one final topological ordering and synchronize every input contract.
+    remaining_final = list(tasks[1:])
+    final_order = []
+    final_resolved = {'SC00'}
+    while remaining_final:
+        final_ready = [
+            item for item in remaining_final
+            if set(item.get('depends_on', [])) <= final_resolved
+        ]
+        if not final_ready:
+            # Model-authored dependencies may conflict with backend semantic ordering.
+            # Keep only already resolved edges on the safest next domain step.
+            selected = min(remaining_final, key=lambda item: (
+                priority.get((contract_of(item) or {}).get('public_purpose_code'), 29),
+                item['task_key'],
+            ))
+            selected['depends_on'] = [
+                dependency for dependency in selected.get('depends_on', [])
+                if dependency in final_resolved
+            ] or ['SC00']
+            final_ready = [selected]
+        for item in final_ready:
+            remaining_final.remove(item)
+            final_order.append(item)
+            final_resolved.add(item['task_key'])
+    tasks = [tasks[0], *final_order]
+    outputs_by_key = {
+        item['task_key']: [output['path'] for output in contract_of(item).get('outputs', [])]
+        for item in tasks
+    }
+    for item in tasks[1:]:
+        item_contract = contract_of(item)
+        item_contract['inputs'] = [
+            path for dependency in item.get('depends_on', [])
+            for path in outputs_by_key.get(dependency, [])
+        ]
+        item['acceptance_criteria'] = json.dumps(item_contract, ensure_ascii=False)
     paths = [output['path'] for task in tasks for output in contract_of(task)['outputs']]
     source_refs = list(dict.fromkeys(
         ref for task in tasks for ref in (contract_of(task) or {}).get('source_refs', [])
