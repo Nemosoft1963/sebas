@@ -135,10 +135,8 @@ async def test_provider_http_integration(tmp_path,monkeypatch):
     assert len(calls)==1
 
 
-def test_real_chroma_persistence_and_filter(tmp_path,monkeypatch):
-    pytest.importorskip('langchain_chroma')
-    from langchain_core.embeddings import Embeddings
-    class LocalEmbedding(Embeddings):
+def test_local_vector_index_persistence_and_filter(tmp_path,monkeypatch):
+    class LocalEmbedding:
         def embed_documents(self,texts):return [self.embed_query(t) for t in texts]
         def embed_query(self,t):return [float('cap' in t),float('quote' in t),0.1]
     config={'embedding_model':'deterministic-test-v1'}

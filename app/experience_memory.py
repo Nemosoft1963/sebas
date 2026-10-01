@@ -4,8 +4,10 @@ import contextvars
 import functools
 import hashlib
 import json
+import math
 import os
 import re
+import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,12 +18,12 @@ from app.experience_store import ExperienceStore, MemoryPolicyError, canonical, 
 CURRENT_MEMORY = contextvars.ContextVar('experience_memory', default=None)
 
 
-class ChromaIndex:
+class LocalVectorIndex:
+    """Rebuildable project-scoped vector index stored locally in SQLite."""
     def __init__(self, root, config, embeddings=None):
         if any(os.getenv(k,'').lower() in {'true','1'} for k in ('LANGCHAIN_TRACING','LANGCHAIN_TRACING_V2','LANGSMITH_TRACING')):
             raise MemoryPolicyError('External tracing must be disabled')
         if embeddings is None:
-            from langchain_ollama import OllamaEmbeddings
             url = config.get('embedding_url','http://127.0.0.1:11434')
             parsed = urlparse(url)
             if parsed.hostname not in {'localhost','127.0.0.1','::1','host.docker.internal'} or parsed.scheme != 'http' or parsed.username or parsed.password:
@@ -29,26 +31,58 @@ class ChromaIndex:
             model = config.get('embedding_model','')
             if not model:
                 raise MemoryPolicyError('Explicit local embedding model required')
-            embeddings = OllamaEmbeddings(model=model,base_url=url,keep_alive=0,client_kwargs={'timeout':60.0})
-        import chromadb
-        from chromadb.config import Settings
-        from langchain_chroma import Chroma
-        client = chromadb.PersistentClient(path=str(Path(root)/'chroma'),settings=Settings(anonymized_telemetry=False,chroma_otel_collection_endpoint='',chroma_otel_granularity='none'))
-        identity = fingerprint([config.get('embedding_model'),config.get('embedding_revision',''), 'experience-v1'])[:24]
+            embeddings = _OllamaEmbeddings(url, model)
+        self.identity = fingerprint([config.get('embedding_model'),config.get('embedding_revision',''), 'experience-v1'])[:24]
+        self.embeddings = embeddings
+        self.path = Path(root)/'vector_index.sqlite3'
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_distance = float(config.get('max_cosine_distance', 0.35))
-        if not 0 <= self.max_distance <= 1:raise ValueError('Invalid retrieval distance')
-        self.vector = Chroma(client=client, collection_name='experience_'+identity, embedding_function=embeddings, collection_metadata={'hnsw:space':'cosine'})
+        if not 0 <= self.max_distance <= 1: raise ValueError('Invalid retrieval distance')
+        with self._connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS vectors(identity TEXT,id TEXT,project TEXT,content TEXT,vector TEXT,PRIMARY KEY(identity,id))')
+            db.execute('CREATE INDEX IF NOT EXISTS vectors_project ON vectors(identity,project)')
+
+    def _connect(self):
+        db=sqlite3.connect(self.path,timeout=30)
+        db.execute('PRAGMA journal_mode=WAL')
+        return db
 
     def sync(self, rows, project):
-        from langchain_core.documents import Document
-        previous=self.vector.get(where={'project':project})['ids']
-        stale=set(previous)-{r['id'] for r in rows}
-        if stale:self.vector.delete(ids=list(stale))
-        if rows:
-            self.vector.add_documents([Document(page_content=r['content'], metadata={'project':r['project'],'record_id':r['id']}) for r in rows],ids=[r['id'] for r in rows])
+        ids={r['id'] for r in rows}
+        vectors=self.embeddings.embed_documents([r['content'] for r in rows]) if rows else []
+        if len(vectors)!=len(rows): raise ValueError('Embedding result count mismatch')
+        with self._connect() as db:
+            previous={r[0] for r in db.execute('SELECT id FROM vectors WHERE identity=? AND project=?',(self.identity,project))}
+            stale=previous-ids
+            if stale: db.executemany('DELETE FROM vectors WHERE identity=? AND id=?',[(self.identity,rid) for rid in stale])
+            db.executemany('INSERT OR REPLACE INTO vectors(identity,id,project,content,vector) VALUES(?,?,?,?,?)',[(self.identity,row['id'],project,row['content'],json.dumps(vector,separators=(',',':'))) for row,vector in zip(rows,vectors)])
 
     def search(self, project, query, limit):
-        return [d.metadata['record_id'] for d, distance in self.vector.similarity_search_with_score(query,k=limit,filter={'project':project}) if distance <= self.max_distance]
+        target=self.embeddings.embed_query(query)
+        with self._connect() as db:
+            rows=db.execute('SELECT id,vector FROM vectors WHERE identity=? AND project=?',(self.identity,project)).fetchall()
+        ranked=sorted(((_cosine_distance(target,json.loads(vector)),rid) for rid,vector in rows),key=lambda item:item[0])
+        return [rid for distance,rid in ranked[:limit] if distance<=self.max_distance]
+
+
+class _OllamaEmbeddings:
+    def __init__(self,url,model): self.url,self.model=url.rstrip('/'),model
+    def embed_documents(self,texts):
+        import httpx
+        response=httpx.post(self.url+'/api/embed',json={'model':self.model,'input':texts,'keep_alive':0},timeout=60.0)
+        response.raise_for_status()
+        return response.json()['embeddings']
+    def embed_query(self,text): return self.embed_documents([text])[0]
+
+
+def _cosine_distance(left,right):
+    if len(left)!=len(right) or not left: return 1.0
+    dot=sum(float(a)*float(b) for a,b in zip(left,right))
+    ln=math.sqrt(sum(float(a)*float(a) for a in left)); rn=math.sqrt(sum(float(b)*float(b) for b in right))
+    return 1.0 if not ln or not rn else max(0.0,min(2.0,1.0-dot/(ln*rn)))
+
+
+ChromaIndex=LocalVectorIndex
 
 
 class ExperienceMemory:
@@ -60,7 +94,7 @@ class ExperienceMemory:
 
     def build_index(self):
         if self.index is None:
-            self.index = ChromaIndex(self.root,self.config)
+            self.index = LocalVectorIndex(self.root,self.config)
         return self.index
 
     def reindex(self, project):

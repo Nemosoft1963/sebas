@@ -23,3 +23,11 @@
 - Structured JSON requests explicitly disable model thinking to keep schema output stable.
 - The runtime image upgrades Debian packages before installing application packages, incorporating current security fixes.
 - Validation: 70 focused planning and local-model tests passed; runtime health check passed.
+
+## 2026-10-01 Experience RAG security update
+
+- Replaced ChromaDB with a project-scoped SQLite vector index.
+- The reviewed experience store remains authoritative; the vector index is rebuildable and cannot grant approval.
+- Removed ChromaDB and LangChain vector dependencies because no patched ChromaDB release was available for the reported critical advisories.
+- Local Ollama remains the only embedding endpoint and is restricted to loopback or the Docker host bridge.
+- Validation: 33 experience-memory, import UI, and human-review tests passed.

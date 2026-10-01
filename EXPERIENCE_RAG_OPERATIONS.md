@@ -24,7 +24,7 @@ LangSmithトレースは禁止し、ChromaテレメトリとOTELエクスポー�
 作業コピーの専用.venvにインストール・検証済み。既存環境のPythonは変更していない。
 Python版はpip install -e ".[dev,rag]"。本番Dockerはdocker/Dockerfileのビルド引数INSTALL_EXPERIENCE_RAG=1で必要パッケージを追加できる。
 既定ビルド引数は0。DockerのRAG入りイメージのビルド・本番起動は今回未実施。
-検証した直接依存: langchain-chroma 1.1.0、langchain-ollama 1.1.0、chromadb 1.5.9。
+ベクトル索引は組み込みSQLiteを使用する。埋め込み生成はローカルOllamaだけを使用し、外部のベクトルDB依存はない。
 requirements-rag-tested.txtは専用Windows環境の記録で、Linux用の完全なlockfileではない。
 
 ## 経験の整理
