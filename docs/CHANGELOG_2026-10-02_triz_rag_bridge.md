@@ -29,3 +29,4 @@
 - 原本不足、既知欠陥、未確認の業務事実は従来どおり発明対象外または追加開発扱い。RAG候補の存在を自動採用や再実行許可には使用しない。
 
 - 最終反映後、販売案件のAPIは 	riz_generation_enabled=true、ag_status=ready、ag_reference_count=0、ecovery_success=false。ヘルスチェック全項目PASS、コンテナhealthy。関連34テストPASS・1 skipped、画面構文PASS。
+- 追加の結合テストで、通常のcapability upgradeがoffでもTRIZ専用スイッチが入口を開き、ローカルLLM不在時は候補なし・業務回復なしで止まることを確認。関連35テストPASS・1 skipped。

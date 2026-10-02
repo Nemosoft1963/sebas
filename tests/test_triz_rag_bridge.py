@@ -1,3 +1,5 @@
+import json
+from app.upgrade_runtime import configured_mode
 import time
 
 from app.automatic_triz import approved_rag_for_failure
@@ -79,3 +81,24 @@ def test_triz_generation_requires_explicit_project_switch(tmp_path):
     assert triz_generation_enabled(memory_path, 'p') is True
     assert triz_generation_enabled(memory_path, 'other') is False
     assert triz_generation_enabled(memory_path, 'unlisted') is False
+
+
+import pytest
+from app.automatic_triz import on_failure
+from app.upgrade_runtime import ReviewRequired
+from test_vehicle_workflow import setup
+
+
+@pytest.mark.asyncio
+async def test_triz_switch_bypasses_upgrade_off_without_changing_execution_mode(tmp_path):
+    manager, pid = setup(tmp_path)
+    (tmp_path / 'automatic_triz.json').write_text(
+        json.dumps({'projects': {pid: True}}), encoding='utf-8'
+    )
+    task = {'id': 'generic-triz', 'title': '未対応形式', 'description': '', 'acceptance_criteria': '{}'}
+    assert configured_mode(manager.memory.path, pid, task['id']) == 'off'
+    await on_failure(manager, pid, task, ReviewRequired('未対応形式の adapter が必要です'))
+    records = list((tmp_path / 'workspace').rglob('*.json'))
+    body = next(json.loads(path.read_text(encoding='utf-8')) for path in records if 'triz' in path.parts)
+    assert body['reason'] == 'ローカル推論アダプターが利用できません'
+    assert body['business_passed'] is False
