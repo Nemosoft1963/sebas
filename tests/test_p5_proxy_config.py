@@ -46,6 +46,9 @@ def test_nginx_syntax_when_binary_is_available(tmp_path):
     rendered = template.replace('${SEBAS_PROXY_TOKEN}', '0123456789abcdef')
     rendered = rendered.replace('${SEBAS_CLIENT_ACCESS_RULES}', 'allow 127.0.0.1; deny all;')
     rendered = rendered.replace('local-voice-ai-web:8000', '127.0.0.1:8000')
+    rendered = rendered.replace('/var/log/nginx/access.log', str(tmp_path/'access.log'))
+    rendered = rendered.replace('/var/log/nginx/error.log', str(tmp_path/'error.log'))
+    rendered = f'pid {tmp_path / "nginx.pid"};\n' + rendered
     config = tmp_path/'nginx.conf'; config.write_text(rendered)
     result = subprocess.run([binary, '-t', '-c', str(config), '-p', str(tmp_path)],
                             capture_output=True, text=True, env={**os.environ})
