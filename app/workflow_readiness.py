@@ -552,8 +552,18 @@ def _triz_view(manager, pid):
         'recovery_success': False,
         'business_recovered': False,
         'adopt_allowed': False,
+        'rag_status': 'off',
+        'rag_reference_count': 0,
         'adopt_blocked_reason': 'P2完了までTRIZ採用は blocked。framed/candidates/tried は回復成功ではありません',
     }
+    try:
+        from app.experience_memory import configured_memory
+        from app.experience_store import MemoryPolicyError
+        setting = configured_memory(manager.memory.path, pid)
+        if setting and setting[1] == 'enforce':
+            view['rag_status'] = 'ready'
+    except (OSError, ValueError, KeyError, MemoryPolicyError):
+        view['rag_status'] = 'unavailable'
     try:
         root = resolve(manager, pid, 'result/triz')
     except Exception:
@@ -576,6 +586,9 @@ def _triz_view(manager, pid):
         body = json.loads(latest.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError):
         return view
+    rag = body.get('rag') if isinstance(body.get('rag'), dict) else {}
+    view['rag_status'] = str(rag.get('status') or 'off')
+    view['rag_reference_count'] = len(rag.get('references') or [])
     status = str(body.get('status') or '')
     view['status'] = status
     view['label'] = library_status_label(status)
