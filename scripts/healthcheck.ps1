@@ -36,10 +36,17 @@ $configuredOllamaModel = [regex]::Match($envContent, "(?m)^OLLAMA_MODEL=(.+)$").
 $workspaceValue = [regex]::Match($envContent, "(?m)^WORKSPACE_PATH=(.+)$").Groups[1].Value.Trim()
 $workspace = $workspaceValue.Replace("/", "\")
 Add-Result "Workspace" (Test-Path -LiteralPath $workspace) $workspace
+$composeConfig = docker compose config --format json 2>$null | ConvertFrom-Json
+$composeBindings = @($composeConfig.services.web.ports | Where-Object { [string]$_.published -eq "8099" } | ForEach-Object { [string]$_.host_ip })
+$allowed8099 = @(if ($env:SEBAS_ALLOWED_8099_BINDINGS) { $env:SEBAS_ALLOWED_8099_BINDINGS.Split(",") | ForEach-Object { $_.Trim() } } else { $composeBindings })
+$wildcardAllowed = @($allowed8099 | Where-Object { $_ -in @("0.0.0.0", "::", "[::]", "*") }).Count -gt 0
 foreach ($port in 8099,3000,8000,8010) {
     $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
-    $safe = $listeners.Count -gt 0 -and @($listeners | Where-Object { $_.LocalAddress -notin @("127.0.0.1","::1") }).Count -eq 0
-    Add-Result "Localhost port $port" $safe (($listeners.LocalAddress | Sort-Object -Unique) -join ",")
+    # 8099 intentionally permits the configured LAN address; all other ports remain loopback-only.
+    $allowed = if ($port -eq 8099) { $allowed8099 } else { @("127.0.0.1","::1") }
+    $safe = $listeners.Count -gt 0 -and @($listeners | Where-Object { $_.LocalAddress -notin $allowed }).Count -eq 0
+    if ($port -eq 8099 -and $wildcardAllowed) { $safe = $false }
+    Add-Result "Localhost port $port / allowed bindings" $safe (($listeners.LocalAddress | Sort-Object -Unique) -join ",")
 }
 $ollama = Get-Command ollama -ErrorAction SilentlyContinue
 if (-not $ollama) {

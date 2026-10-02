@@ -2930,6 +2930,13 @@ async def get_plan_coverage(project_id: str):
     return get_coverage(orchestrator, project_id) or {}
 
 
+@app.get('/api/projects/{project_id}/completion-replay')
+async def get_completion_replay(project_id: str):
+    require_project(project_id)
+    from app.completion_replay import preview
+    return preview(orchestrator, project_id)
+
+
 @app.get('/api/projects/{project_id}/completion-gate')
 async def get_completion_gate(project_id: str):
     require_project(project_id)
