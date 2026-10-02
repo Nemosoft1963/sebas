@@ -3138,6 +3138,35 @@ async def propose_plan_feedback(project_id: str,payload: PlanFeedbackPayload):
     except Exception as exc:raise HTTPException(502,'修正案を生成できませんでした: '+str(exc)[:500]) from exc
 
 
+class PlanFeedbackRepairPayload(BaseModel):
+    contract_hash: str
+    signature: str
+    candidate_id: str
+    task_id: str | None = None
+    patches: list[dict] = Field(default_factory=list)
+
+
+@app.get('/api/projects/{project_id}/goal-review/feedback/repair-preview')
+async def preview_plan_feedback_repair(project_id: str, signature: str, candidate_id: str,
+                                       task_id: str | None = None):
+    require_project(project_id)
+    from app.plan_feedback import repair_preview
+    try:
+        return repair_preview(orchestrator, project_id, signature, candidate_id, task_id)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/feedback/repair')
+async def repair_plan_feedback(project_id: str, payload: PlanFeedbackRepairPayload):
+    require_project(project_id)
+    from app.plan_feedback import repair_saved_draft
+    try:
+        return repair_saved_draft(orchestrator, project_id, payload.signature,
+                                  payload.candidate_id, payload.patches, payload.task_id, payload.contract_hash)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
 @app.post('/api/projects/{project_id}/goal-review/feedback/apply')
 async def apply_plan_feedback(project_id: str,payload: PlanFeedbackPayload):
     require_project(project_id)

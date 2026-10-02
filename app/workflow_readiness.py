@@ -25,6 +25,7 @@ IMPLEMENTED_ACTIONS = (
     'confirm_allocation',
     'apply_prior_answers',
     'resolve_development',
+    'review_feedback',
     'review_artifacts',
     'approve_result',
     'wait_budget',
@@ -61,7 +62,7 @@ REPLAN_FAILURE_CATEGORIES = {
     },
     'conflict_unresolved': {
         'label': '指摘の未解決・矛盾',
-        'next_work': '指摘内容とプロジェクト目標の整合性を確認し、不要な指摘の除外または目標の再定義を行ってください。',
+        'next_work': '保存済み修正案の対象を現行達成条件と照合し、目標との整合性を保って根拠付きで局所修復してください。',
     },
     'external_ai_failed': {
         'label': '外部AI・LLM呼び出し失敗',
@@ -84,6 +85,8 @@ PHASE_LABELS = {
     'accuracy_blocked': ('source_read_failed', '原本の正確性を確認してください'),
     'fact_confirm': ('allocation_unresolved', '配賦・業務事実の確認待ち'),
     'dev_blocked': ('development_blocker', '追加開発が必要な指摘があります'),
+    'plan_conflict': ('plan_conflict', '修正案の対象・根拠を確認してください'),
+    'plan_fact_confirm': ('plan_fact_confirm', '計画に必要な業務事実を確認してください'),
     'issues_open': ('plan_issues_open', '計画への指摘が未対応です'),
     'waiting_budget': ('waiting_budget', '外部検証の予算回復待ち'),
     'unverified': ('external_review_required', '現行版の外部検証が未完了です'),
@@ -172,6 +175,9 @@ def resolve_pipeline_stage(mission: dict, plan: dict, revision: dict, issues: li
     has_changes = bool(revision.get('changes'))
     draft_ok = revision_status == 'draft' and not blockers and has_changes
 
+    if blockers:
+        failure = classify_replan_failure(revision) or {}
+        return 'proposal_ready', ('resolve_development' if failure.get('code') == 'development_required' else 'review_feedback')
     if mission_status in {'ready', 'paused'} and not gate.get('blocked'):
         return 'execution_start', 'start'
     if mission_status == 'ready':
@@ -334,7 +340,8 @@ def _phase(mission, vehicle, revision, plan, queue, gate, issues, failures, job,
     if vehicle['applicable'] and vehicle['unresolved_allocations']:
         return 'fact_confirm'
     if revision.get('blockers'):
-        return 'dev_blocked'
+        code = (classify_replan_failure(revision) or {}).get('code')
+        return {'development_required': 'dev_blocked', 'input_insufficient': 'plan_fact_confirm'}.get(code, 'plan_conflict')
     plan_status = plan.get('status')
     if plan_status == 'connection_failed' or gate.get('stop_kind') == 'connection_settings':
         return 'connection_failed'
@@ -376,6 +383,10 @@ def _next_action(phase, vehicle, issues, pid='', allowed_actions=None):
         action = {'id': 'confirm_allocation', 'label': '未配賦の確認事項に回答する', 'endpoint': _endpoint(pid, '/vehicle-profit/decision'), 'class': 'human_fact', 'auto_executable': False}
     elif phase == 'dev_blocked':
         action = {'id': 'resolve_development', 'label': '追加開発が必要な指摘を確認する', 'endpoint': _endpoint(pid, '/goal-review'), 'class': 'development', 'auto_executable': False}
+    elif phase == 'plan_conflict':
+        action = {'id': 'review_feedback', 'label': '保存済み修正案の対象と根拠を確認する', 'endpoint': _endpoint(pid, '/goal-review'), 'class': 'human_approval', 'auto_executable': False}
+    elif phase == 'plan_fact_confirm':
+        action = {'id': 'review_feedback', 'label': '必要な業務事実と修正案を確認する', 'endpoint': _endpoint(pid, '/goal-review'), 'class': 'human_fact', 'auto_executable': False}
     elif phase == 'issues_open':
         action = {'id': 'propose_feedback', 'label': '指摘から修正案を作成する', 'endpoint': _endpoint(pid, '/goal-review/feedback/propose'), 'class': 'local_safe', 'auto_executable': False}
     elif phase == 'waiting_budget':
@@ -414,6 +425,9 @@ def _stop_reason(phase, gate, vehicle, revision, issues, failures, plan=None):
         return '原本統制値が不足しているため確定できません。'
     if phase == 'fact_confirm':
         return '未配賦または業務事実の確認が残っています。'
+    if phase in {'plan_conflict', 'plan_fact_confirm'}:
+        failure = classify_replan_failure(revision) or {}
+        return str(failure.get('reason') or failure.get('next_work') or '修正案の未解決事項を確認してください。')
     if phase == 'dev_blocked':
         blockers = revision.get('blockers') or []
         first = blockers[0] if blockers and isinstance(blockers[0], dict) else {}
@@ -441,12 +455,14 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
     running = bool(job) or mission.get('status') == 'running' or pid in getattr(manager, 'planning_projects', set())
     busy = '実行中です' if running else ''
     blockers = list(revision.get('blockers') or [])
+    failure = classify_replan_failure(revision) or {}
+    blocker_label = failure.get('label') or '未解決の指摘'
     draft_ok = revision.get('status') == 'draft' and not blockers and revision.get('changes')
     start_reason = ''
     if running:
         start_reason = busy
     elif blockers:
-        start_reason = '追加開発が必要な指摘があるため実行を開始できません'
+        start_reason = blocker_label + 'があるため実行を開始できません'
     elif gate.get('blocked'):
         start_reason = gate.get('reason') or '外部検証が未完了です'
     elif mission.get('status') not in {'ready', 'paused'}:
@@ -467,8 +483,8 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
             busy or ('外部AIの許可・接続が揃っていません' if not send_allowed(manager, pid) else ''),
         ),
         'approve_plan': _action(
-            mission.get('status') == 'planning' and not running,
-            busy or '承認できる計画がありません',
+            mission.get('status') == 'planning' and not running and not blockers,
+            busy or (blocker_label + 'を解消してから計画を承認してください' if blockers else '承認できる計画がありません'),
         ),
         'start': _action(not start_reason, start_reason),
         'cancel_queue': _action(
@@ -492,8 +508,12 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
             busy or ('未解決の配賦はありません' if not vehicle['unresolved_allocations'] else ''),
         ),
         'resolve_development': _action(
+            bool(blockers) and failure.get('code') == 'development_required' and not running,
+            busy or '追加開発が必要な指摘はありません',
+        ),
+        'review_feedback': _action(
             bool(blockers) and not running,
-            busy or ('追加開発が必要な指摘はありません' if not blockers else ''),
+            busy or '確認する保存済み修正案はありません',
         ),
         'review_artifacts': _action(
             bool(vehicle['needs_review'] or vehicle['xlsx']) and not running,
@@ -654,6 +674,8 @@ def build_readiness(manager, pid: str) -> dict:
         'accuracy_blocked': 'needs_input',
         'fact_confirm': 'needs_input',
         'dev_blocked': 'development_required',
+        'plan_conflict': 'plan_review',
+        'plan_fact_confirm': 'needs_input',
         'issues_open': 'plan_review',
         'waiting_budget': 'plan_review',
         'unverified': 'plan_review',

@@ -131,3 +131,11 @@ async def test_goal_metrics_api_responds(tmp_path, monkeypatch):
         result = await web.get_goal_metrics(pid)
     assert result["project_id"] == pid
     assert "gate" in result
+
+
+def test_flag_on_approval_check_error_fails_closed(tmp_path):
+    manager, pid = vehicle_setup(tmp_path)
+    enable(manager.memory.path, pid)
+    with patch("app.goal_contract.preview", side_effect=sqlite3.OperationalError("readonly")):
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            before_approve(manager, pid)

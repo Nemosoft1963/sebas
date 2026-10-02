@@ -977,8 +977,15 @@ def build_rebuild_generic_plan(
         # Feedback targets refer to the old plan; never attach an amendment to
         # a different criterion merely because its new SC index matches.
         target_key = old_task.get("task_key") if old_task else key
-        target_changes = (action_changes_by_target.get(target_key, [])
-                          + action_changes_by_target.get("execution_pipeline", []))
+        target_changes = list(action_changes_by_target.get(target_key, []))
+        for action in generic_actions:
+            if action.get("target") != "execution_pipeline" or not action.get("change"):
+                continue
+            bound_ids = (action.get("binds") or {}).get("goal_criterion_ids") or []
+            # A repaired action names current GoalContract criteria. Its text
+            # must not be broadcast to unrelated criteria.
+            if not bound_ids or key in bound_ids:
+                target_changes.append(action["change"].strip())
 
         if old_task:
             old_contract = contract_of(old_task) or {}

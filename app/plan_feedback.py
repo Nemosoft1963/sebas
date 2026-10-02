@@ -343,7 +343,7 @@ def _lifecycle_for(disposition):
     return 'proposed'
 
 
-def validate_candidate(body, issues, snapshot, detail):
+def validate_candidate(body, issues, snapshot, detail, *, preserve_unresolved=False):
     actions = body.get('actions')
     expected = {x['id'] for x in issues}
     if not isinstance(actions,list) or len(actions)!=len(expected) or {x.get('issue_id') for x in actions if isinstance(x,dict)}!=expected:
@@ -368,7 +368,7 @@ def validate_candidate(body, issues, snapshot, detail):
         if not isinstance(action['change'],str) or len(action['change'])>4000:
             raise ValueError('修正内容が長すぎるか形式が不正です')
         if (not detail and not is_vehicle and str(action.get('issue_id') or '') in structural_rebuild_ids
-                and action['disposition'] in {'amend','development','unresolved'}):
+                and (action['disposition'] == 'amend' or (not preserve_unresolved and action['disposition'] in {'development','unresolved'}))):
             action = dict(action)
             action['disposition'] = 'rebuild_generic'
             action['reason'] = (action['reason'].rstrip() +
@@ -388,7 +388,7 @@ def validate_candidate(body, issues, snapshot, detail):
             row['disposition']='rebuild_generic'
             row['reason']=(row['reason'].rstrip()+' 汎用案件のため汎用計画再構成として処理します。')[:2000]
         if (not detail and not is_vehicle and row['issue_id'] in structural_rebuild_ids
-                and row['disposition'] in {'amend','development','unresolved'}):
+                and (row['disposition'] == 'amend' or (not preserve_unresolved and row['disposition'] in {'development','unresolved'}))):
             row['disposition']='rebuild_generic'
             row['reason']=(row['reason'].rstrip()+' 工程構造・依存関係・完了契約の指摘は説明追記では解消できないため、汎用計画を再構成します。')[:2000]
         row['targets'] = _reserved_targets(action.get('targets'))
@@ -500,9 +500,11 @@ async def propose(manager,pid,signature,tid=None,*,_generation=False,idempotency
             execution_plan = build_rebuild_generic_plan(mission, snapshot, actions, issues, goal_contract)
             validate_rebuild_generic_candidate(execution_plan, goal_contract, mission)
             changes.append({'target':'execution_pipeline','before':canonical(snapshot['tasks']),'after':canonical(execution_plan['tasks'])})
+        from app.goal_contract import preview as get_goal_contract
         row.update(status='draft',candidate_id=uuid.uuid4().hex,actions=actions,changes=changes,execution_plan=execution_plan,
                    blockers=[a for a in actions if a['disposition'] not in {'amend','rebuild_vehicle','rebuild_generic'}],finished=time.time(),
-                   lifecycle='proposed',job_id=job['id'])
+                   lifecycle='proposed',job_id=job['id'],
+                   contract_hash=(get_goal_contract(manager,pid).get('content_hash') or '') if not detail else '')
         store.put(pid,'revision',signature,row)
         finish_job(store,pid,job['id'],'succeeded',last_completed_stage='local_proposal')
         save_orchestration(store,pid,last_completed_stage='local_proposal',plan_signature=signature,resume_from='human_confirmation')
@@ -524,6 +526,10 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
     if not row or row.get('status')!='draft' or row.get('candidate_id')!=candidate_id or row.get('task_id')!=tid:
         raise ValueError('反映対象の修正案がありません。再読込してください')
     if row['issues']!=issues_for(manager,pid,signature):raise ValueError('指摘が追加されています。修正案を再生成してください')
+    if row.get('contract_hash') and not detail:
+        from app.goal_contract import preview as get_goal_contract
+        if row['contract_hash'] != (get_goal_contract(manager, pid).get('content_hash') or ''):
+            raise ValueError('GoalContractが変わりました。修正案を再確認してください')
     if row['blockers'] or not row['changes']:raise ValueError('未解決または追加開発が必要な指摘があります。対応表を確認してください')
     if row.get('execution_plan'):
         if detail:raise ValueError('車両実行器は全体計画で変更してください')
@@ -612,3 +618,173 @@ async def finish_generation(manager,pid,issues,source_signature):
         db.execute('UPDATE project_missions SET plan_summary=? WHERE project_id=? AND plan_version=?',
                    (mission.get('plan_summary','')+'\n\n## 外部AI指摘への対応\n'+'\n'.join(lines),pid,mission['plan_version']))
     manager._sync_memos(pid)
+
+
+def repair_preview(manager, pid, signature, candidate_id, tid=None):
+    """Read-only suggestions for a saved proposal; never infer an approval."""
+    import difflib
+    from app.goal_contract import preview as goal_preview
+
+    _, snapshot, detail = current(manager, pid, signature, tid)
+    row = ReviewStore(manager.memory.path).get(pid, 'revision', signature) or {}
+    if row.get('status') != 'draft' or row.get('candidate_id') != candidate_id or row.get('task_id') != tid:
+        raise ValueError('現行版の保存済み修正案がありません')
+    if row.get('issues') != issues_for(manager, pid, signature):
+        raise ValueError('指摘が変更されました。修正案を再確認してください')
+    contract = goal_preview(manager, pid) if not detail else {}
+    criteria = [
+        {'id': str(item['criterion_id']), 'statement': str(item.get('statement') or '')}
+        for item in (contract.get('criteria') or []) if item.get('criterion_id')
+    ]
+    by_issue = {item['id']: item for item in row['issues']}
+    current_ids = {item['id'] for item in criteria}
+    suggestions = []
+    for action in row.get('blockers') or []:
+        issue = by_issue.get(action.get('issue_id')) or {}
+        text = str(issue.get('text') or '')
+        explicit = [cid for cid in re.findall(r'\bSC\d{2}\b', text) if cid in current_ids]
+        ranks = sorted(
+            ((difflib.SequenceMatcher(None, text, item['statement']).ratio(), item['id'])
+             for item in criteria), reverse=True,
+        )
+        suggested_ids = list(dict.fromkeys(explicit or [
+            cid for score, cid in ranks[:2] if score >= 0.18
+        ]))
+        suggestions.append({
+            'issue_id': action.get('issue_id'),
+            'issue_text': text[:1000],
+            'current_disposition': action.get('disposition'),
+            'old_target': action.get('target'),
+            'current_change': action.get('change') or '',
+            'current_reason': action.get('reason') or '',
+            'suggested_criterion_ids': suggested_ids,
+            'suggested_disposition': 'rebuild_generic' if not detail and criteria else 'unresolved',
+            'requires_human_fact': bool(re.search(r'人間が設定|業務判断|閾値|価格.*確定', text)),
+        })
+    return {
+        'signature': signature,
+        'candidate_id': candidate_id,
+        'contract_hash': contract.get('content_hash') or '',
+        'criteria': criteria,
+        'suggestions': suggestions,
+        'generation_attempts': row.get('attempts', 0),
+    }
+
+
+def repair_saved_draft(manager, pid, signature, candidate_id, patches, tid=None, expected_contract_hash=''):
+    """Edit only named actions of the current draft; revalidate the whole table."""
+    from app.goal_contract import preview as goal_preview
+    from app.structured_planning import (
+        build_rebuild_generic_plan, validate_rebuild_generic_candidate,
+    )
+
+    mission, snapshot, detail = current(manager, pid, signature, tid)
+    if pid in manager.planning_projects:
+        raise ValueError('計画生成中は修正できません')
+    store = ReviewStore(manager.memory.path)
+    row = store.get(pid, 'revision', signature) or {}
+    if row.get('status') != 'draft' or row.get('candidate_id') != candidate_id or row.get('task_id') != tid:
+        raise ValueError('現行版の保存済み修正案がありません。再読込してください')
+    issues = issues_for(manager, pid, signature)
+    if row.get('issues') != issues:
+        raise ValueError('指摘が変更されました。修正案を再確認してください')
+    if not isinstance(patches, list) or not patches:
+        raise ValueError('修正する指摘を指定してください')
+    blocker_ids = {str(item.get('issue_id') or '') for item in row.get('blockers') or []}
+    patch_ids = [str(item.get('issue_id') or '') for item in patches if isinstance(item, dict)]
+    if len(patch_ids) != len(patches) or len(set(patch_ids)) != len(patch_ids):
+        raise ValueError('修正対象の指摘IDが重複または不正です')
+    if not set(patch_ids) <= blocker_ids:
+        raise ValueError('未解決の指摘だけを局所修復できます')
+    contract = goal_preview(manager, pid) if not detail else {}
+    if not detail and (not expected_contract_hash or expected_contract_hash != (contract.get('content_hash') or '')):
+        raise ValueError('GoalContractが変わりました。現行版を再確認してください')
+    known_ids = {item['criterion_id'] for item in contract.get('criteria') or []}
+    actions = deepcopy(row.get('actions') or [])
+    action_by_id = {item.get('issue_id'): item for item in actions if isinstance(item, dict)}
+    if len(action_by_id) != len(issues):
+        raise ValueError('保存済み対応表に欠落・重複があります')
+    for patch in patches:
+        allowed = {'issue_id', 'disposition', 'target', 'change', 'reason', 'criterion_ids'}
+        if not isinstance(patch, dict) or set(patch) - allowed:
+            raise ValueError('局所修復の形式が不正です')
+        cid_list = patch.get('criterion_ids') or []
+        if not isinstance(cid_list, list) or any(cid not in known_ids for cid in cid_list):
+            raise ValueError('現行GoalContractに無い達成条件を指定できません')
+        disposition = str(patch.get('disposition') or '')
+        if disposition not in DISPOSITIONS:
+            raise ValueError('対応種別が不正です')
+        target = str(patch.get('target') or '').strip()
+        if disposition == 'rebuild_generic':
+            if target != 'execution_pipeline':
+                raise ValueError('汎用計画再構成の対象はexecution_pipelineです')
+            if not cid_list:
+                raise ValueError('再構成する現行達成条件を指定してください')
+            if len(str(patch.get('change') or '').strip()) < 20:
+                raise ValueError('再構成の具体的な変更内容が必要です')
+        if disposition == 'amend' and target not in {t['task_key'] for t in snapshot['tasks']}:
+            raise ValueError('現行計画に無い工程を修正できません')
+        if disposition in {'development', 'business_fact', 'unresolved'} and not str(patch.get('reason') or '').strip():
+            raise ValueError('未解決事項の理由が必要です')
+        current_action = action_by_id[patch['issue_id']]
+        current_action.update({
+            'disposition': disposition,
+            'target': target,
+            'change': str(patch.get('change') or '').strip(),
+            'reason': str(patch.get('reason') or '').strip(),
+            'binds': {
+                'goal_criterion_ids': list(dict.fromkeys(cid_list)),
+                'task_key': target if disposition == 'amend' else '',
+                'contract_patch': None,
+                'test_ref': '',
+            },
+        })
+    normalized = validate_candidate({'actions': actions}, issues, snapshot, detail, preserve_unresolved=True)
+    normalized_by_id = {item['issue_id']: item for item in normalized}
+    for patch in patches:
+        if normalized_by_id[patch['issue_id']]['disposition'] != patch['disposition']:
+            raise ValueError('対応種別が自動変更されました。内容と根拠を再確認してください')
+    changes = []
+    for target in dict.fromkeys(a['target'] for a in normalized if a['disposition'] == 'amend'):
+        old = next(s['objective'] for s in detail['steps'] if s['id'] == target) if detail else next(
+            t['description'] for t in snapshot['tasks'] if t['task_key'] == target)
+        additions = [a['change'].strip() for a in normalized if a['disposition'] == 'amend' and a['target'] == target]
+        new = old + '\n\n外部指摘への対応手順:\n' + '\n'.join(additions)
+        if len(new) > (800 if detail else 16000):
+            raise ValueError('修正後の工程説明が長すぎます')
+        changes.append({'target': target, 'before': old, 'after': new})
+    execution_plan = None
+    if any(a['disposition'] == 'rebuild_generic' for a in normalized):
+        if detail:
+            raise ValueError('汎用計画の再構成は全体計画で行ってください')
+        execution_plan = build_rebuild_generic_plan(mission, snapshot, normalized, issues, contract)
+        validate_rebuild_generic_candidate(execution_plan, contract, mission)
+        changes.append({
+            'target': 'execution_pipeline',
+            'before': canonical(snapshot['tasks']),
+            'after': canonical(execution_plan['tasks']),
+        })
+    elif any(a['disposition'] == 'rebuild_vehicle' for a in normalized):
+        raise ValueError('車両再構成の局所修復は未対応です。既存の生成経路を利用してください')
+    repaired = deepcopy(row)
+    repaired.update(
+        candidate_id=uuid.uuid4().hex,
+        actions=normalized,
+        changes=changes,
+        execution_plan=execution_plan,
+        blockers=[a for a in normalized if a['disposition'] in BLOCKING],
+        finished=time.time(),
+        lifecycle='proposed',
+        contract_hash=contract.get('content_hash') or '',
+    )
+    repaired.setdefault('repair_history', []).append({
+        'at': time.time(), 'previous_candidate_id': candidate_id,
+        'issue_ids': patch_ids, 'before_hash': fingerprint(row.get('actions') or []),
+        'after_hash': fingerprint(normalized), 'contract_hash': contract.get('content_hash') or '',
+    })
+    store.put(pid, 'revision', signature, repaired)
+    manager.memory.add_event(pid, 'plan_feedback_repaired',
+                             '保存済み指摘対応表の一部を修正し、現行契約で再検査しました',
+                             detail=canonical({'signature': signature, 'candidate_id': repaired['candidate_id'],
+                                               'patched_issue_ids': patch_ids, 'remaining_blockers': len(repaired['blockers'])}))
+    return repaired

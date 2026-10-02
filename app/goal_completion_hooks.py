@@ -50,15 +50,8 @@ def after_generate(manager, project_id: str) -> dict | None:
 def before_approve(manager, project_id: str) -> dict | None:
     if not enabled(manager.memory.path, project_id):
         return None
-    try:
-        from app.goal_contract import preview
+    from app.goal_contract import preview
 
-        contract = preview(manager, project_id)
-        return ensure_approvable(manager, project_id, contract)
-    except ValueError as exc:
-        if _is_business_rejection(exc):
-            raise
-        LOGGER.warning("goal_completion: before_approve failed: %s", exc, exc_info=True)
-    except Exception as exc:
-        LOGGER.warning("goal_completion: before_approve failed: %s", exc, exc_info=True)
-    return None
+    # Enabled projects must fail closed when the contract/coverage check fails.
+    contract = preview(manager, project_id)
+    return ensure_approvable(manager, project_id, contract)

@@ -1473,6 +1473,9 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         if project_id in self.planning_projects:
             raise ValueError('計画生成中は承認できません')
         mission = self.memory.get_mission(project_id)
+        from app.goal_review import development_blockers
+        if development_blockers(self, project_id):
+            raise ValueError("未解決・追加開発・業務事実の指摘が残る計画は承認できません")
         structured = [task for task in mission['tasks'] if contract_of(task)]
         if structured:
             expected = {f'SC{i:02d}' for i in range(1, len(self._effective_planning_criteria(mission)) + 1)}

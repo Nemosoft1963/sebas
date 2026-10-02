@@ -4,7 +4,7 @@ import pytest
 from test_goal_review import setup
 from app.core import Ollama
 from app.goal_review import ReviewStore,plan_snapshot,review_plan,require_review
-from app.plan_feedback import import_feedback,issues_for,propose,apply
+from app.plan_feedback import import_feedback,issues_for,propose,apply,repair_preview,repair_saved_draft
 
 
 def feedback(manager,pid):
@@ -297,3 +297,67 @@ async def test_human_approval_does_not_bypass_external_execution_gate(tmp_path):
     assert not execution_gate(manager,pid)['blocked']
     manager.memory.add_mission_instruction(pid,'追加の原本照合条件')
     assert execution_gate(manager,pid)['blocked']
+
+
+
+@pytest.mark.asyncio
+async def test_saved_draft_repair_keeps_issue_and_attempt_budget(tmp_path):
+    from app.goal_contract import preview as contract_preview
+    manager,pid,task=setup(tmp_path)
+    sig=feedback(manager,pid)
+    async def local(*args):
+        data=answer(manager,pid,sig,'unresolved')
+        data['actions'][0]['target']='SC99'
+        return json.dumps(data)
+    manager._local_complete=local
+    row=await propose(manager,pid,sig)
+    assert row['blockers'] and row['attempts']==1
+    preview=repair_preview(manager,pid,sig,row['candidate_id'])
+    assert len(preview['suggestions'])==1
+    assert preview['contract_hash']==contract_preview(manager,pid)['content_hash']
+    assert preview['generation_attempts']==1
+    issue_id=preview['suggestions'][0]['issue_id']
+    with pytest.raises(ValueError,match='GoalContract'):
+        repair_saved_draft(manager,pid,sig,row['candidate_id'],[{
+            'issue_id':issue_id,'disposition':'amend','target':task['task_key'],
+            'change':'原本の該当箇所と出力を一対一で照合して記録する。',
+            'reason':'指摘された照合不足に具体的な検査工程を追加する。'
+        }],expected_contract_hash='old')
+    repaired=repair_saved_draft(manager,pid,sig,row['candidate_id'],[{
+        'issue_id':issue_id,'disposition':'amend','target':task['task_key'],
+        'change':'原本の該当箇所と出力を一対一で照合して記録する。',
+        'reason':'指摘された照合不足に具体的な検査工程を追加する。'
+    }],expected_contract_hash=preview['contract_hash'])
+    assert repaired['candidate_id']!=row['candidate_id']
+    assert repaired['attempts']==1
+    assert len(repaired['actions'])==len(row['issues'])==1
+    assert repaired['blockers']==[]
+    assert repaired['repair_history'][-1]['issue_ids']==[issue_id]
+    with pytest.raises(ValueError,match='現行版'):
+        repair_preview(manager,pid,sig,row['candidate_id'])
+    assert manager.memory.get_mission(pid)['plan_version']==1
+
+
+@pytest.mark.asyncio
+async def test_saved_draft_repair_rejects_unknown_criterion_and_silent_reclassification(tmp_path):
+    manager,pid,task=setup(tmp_path)
+    sig=feedback(manager,pid)
+    async def local(*args):
+        data=answer(manager,pid,sig,'unresolved')
+        data['actions'][0]['target']='SC99'
+        return json.dumps(data)
+    manager._local_complete=local
+    row=await propose(manager,pid,sig)
+    preview=repair_preview(manager,pid,sig,row['candidate_id'])
+    issue_id=preview['suggestions'][0]['issue_id']
+    patch={'issue_id':issue_id,'disposition':'rebuild_generic','target':'execution_pipeline',
+           'change':'原本と成果物の照合結果を記録する。','reason':'目標全体の証拠確認工程を構造化して追加する。',
+           'criterion_ids':['SC99']}
+    with pytest.raises(ValueError,match='無い達成条件'):
+        repair_saved_draft(manager,pid,sig,row['candidate_id'],[patch],
+                           expected_contract_hash=preview['contract_hash'])
+    patch['criterion_ids']=[]
+    with pytest.raises(ValueError,match='達成条件'):
+        repair_saved_draft(manager,pid,sig,row['candidate_id'],[patch],
+                           expected_contract_hash=preview['contract_hash'])
+    assert ReviewStore(manager.memory.path).get(pid,'revision',sig)['candidate_id']==row['candidate_id']

@@ -145,3 +145,41 @@ async def test_api_does_not_mix_200_and_4xx(tmp_path, monkeypatch):
         await web.get_workflow_readiness('missing-project')
     assert error.value.status_code == 404
     assert error.value.status_code != 200
+
+
+@pytest.mark.asyncio
+async def test_unresolved_repair_target_is_not_called_development_or_approvable(tmp_path):
+    manager, pid = vehicle_plan(tmp_path)
+    await manager.generate_plan(pid)
+    sig = plan_snapshot(manager, pid)[1]
+    ReviewStore(manager.memory.path).put(pid, 'revision', sig, {
+        'status': 'draft', 'candidate_id': 'saved-draft',
+        'blockers': [{'disposition': 'unresolved', 'reason': '旧SC番号の修正対象が不明です'}],
+        'changes': [], 'actions': [], 'issues': [],
+    })
+    row = build_readiness(manager, pid)
+    assert row['replan_failure']['code'] == 'conflict_unresolved'
+    assert row['phase'] == 'plan_conflict'
+    assert row['next_action']['id'] == 'review_feedback'
+    assert row['next_action']['manual_executable'] is True
+    assert row['allowed_actions']['approve_plan']['allowed'] is False
+    assert row['allowed_actions']['resolve_development']['allowed'] is False
+    with pytest.raises(ValueError, match='未解決'):
+        manager.approve(pid)
+
+
+@pytest.mark.asyncio
+async def test_business_fact_blocker_has_distinct_guidance(tmp_path):
+    manager, pid = vehicle_plan(tmp_path)
+    await manager.generate_plan(pid)
+    sig = plan_snapshot(manager, pid)[1]
+    ReviewStore(manager.memory.path).put(pid, 'revision', sig, {
+        'status': 'draft', 'candidate_id': 'saved-draft',
+        'blockers': [{'disposition': 'business_fact', 'reason': '配賦対象の業務判断が必要です'}],
+        'changes': [], 'actions': [], 'issues': [],
+    })
+    row = build_readiness(manager, pid)
+    assert row['phase'] == 'plan_fact_confirm'
+    assert row['next_action']['id'] == 'review_feedback'
+    assert row['allowed_actions']['approve_plan']['allowed'] is False
+    assert row['allowed_actions']['start']['allowed'] is False
