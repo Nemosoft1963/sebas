@@ -1519,12 +1519,14 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         evidence = []
         for action in self.memory.list_actions(project_id):
             reference = str(action.get("evidence") or "").strip()
-            if action.get("status") != "executed" or not action.get("approved_at") or not reference:
+            action_kind = str(action.get("kind") or "").strip()
+            if (action.get("status") != "executed" or not action.get("approved_at")
+                    or not action.get("executed_at") or not action.get("target")
+                    or not reference or action_kind in CAMPAIGN_OPERATION_KINDS):
                 continue
             evidence.append({"kind": "external_action", "id": action.get("id"),
                              "reference": reference})
-            action_kind = str(action.get("kind") or "").strip()
-            if action_kind and action_kind != "external_action" and action_kind not in CAMPAIGN_OPERATION_KINDS:
+            if action_kind and action_kind != "external_action":
                 evidence.append({"kind": action_kind, "id": action.get("id"),
                                  "reference": reference})
 
@@ -1566,8 +1568,10 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         ]
         for requirement in requirements:
             kind = str(requirement.get('kind') or '')
-            candidates = evidence if kind == 'approved_external_action' else [
-                item for item in evidence if item.get('kind') == kind
+            candidates = [
+                item for item in evidence if item.get('kind') == (
+                    'external_action' if kind == 'approved_external_action' else kind
+                )
             ]
             if len(candidates) < int(requirement.get('minimum_executed') or 0):
                 return False
@@ -1591,8 +1595,10 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
             if count <= 0:
                 continue
             kind = str(requirement.get('kind') or '')
-            matching = evidence if kind == 'approved_external_action' else [
-                item for item in evidence if item.get('kind') == kind
+            matching = [
+                item for item in evidence if item.get('kind') == (
+                    'external_action' if kind == 'approved_external_action' else kind
+                )
             ]
             if len(matching) < count:
                 missing.append(kind)

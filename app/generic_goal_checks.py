@@ -226,6 +226,8 @@ def _https_url(value: str) -> bool:
 
 
 def collect_external_evidence(manager, project_id: str) -> dict:
+    from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS, campaign_evidence
+
     actions = []
     try:
         raw_actions = manager.memory.list_actions(project_id)
@@ -249,8 +251,21 @@ def collect_external_evidence(manager, project_id: str) -> dict:
         if item.get("status") == "executed" and item.get("evidence")
         and item.get("approved_at") and item.get("executed_at")
         and item.get("target")
+        and str(item.get("kind") or "") not in CAMPAIGN_OPERATION_KINDS
     ]
     pending = [item for item in actions if item.get("status") in {"pending_approval", "approved"}]
+    operations = []
+    for item in executed:
+        kind = str(item.get("kind") or "")
+        operations.append({"kind": "approved_external_action", "id": item["id"],
+                           "reference": item["evidence"]})
+        if kind and kind != "approved_external_action":
+            operations.append({"kind": kind, "id": item["id"],
+                               "reference": item["evidence"]})
+    try:
+        leads = [item for item in manager.memory.list_leads(project_id) or [] if item.get("consent")]
+    except Exception:
+        leads = []
     campaigns = []
     try:
         campaigns = list(manager.memory.list_campaigns(project_id) or [])
@@ -261,7 +276,8 @@ def collect_external_evidence(manager, project_id: str) -> dict:
     social = []
     for campaign in campaigns:
         public_url = str(campaign.get("google_site_url") or "").strip()
-        if campaign.get("site_publication_status") == "published" and _https_url(public_url):
+        if (campaign.get("site_publication_status") == "published"
+                and campaign.get("site_publication_approved_at") and _https_url(public_url)):
             sites.append({
                 "id": campaign.get("id"),
                 "url": public_url,
@@ -269,7 +285,9 @@ def collect_external_evidence(manager, project_id: str) -> dict:
             })
         form_url = str(campaign.get("google_form_url") or "").strip()
         form_status = str(campaign.get("publication_status") or "")
-        if form_url and form_status in {"published", "monitoring"} and campaign.get("publication_approved_at"):
+        if (form_url and campaign.get("google_form_id") and _https_url(form_url)
+                and form_status in {"published", "monitoring"}
+                and campaign.get("publication_approved_at")):
             forms.append({
                 "id": campaign.get("id"),
                 "url": form_url,
@@ -282,22 +300,33 @@ def collect_external_evidence(manager, project_id: str) -> dict:
             shares = []
         for share in shares:
             url = str(share.get("evidence_url") or "").strip()
-            if share.get("status") == "evidence_registered" and _https_url(url):
+            if (share.get("status") == "evidence_registered" and share.get("approved_at")
+                    and share.get("evidence_registered_at") and _https_url(url)):
                 social.append({
                     "id": share.get("id"),
                     "channel": share.get("channel"),
                     "url": url,
                     "approved_at": share.get("approved_at"),
                 })
-    leads = []
-    try:
-        leads = [item for item in manager.memory.list_leads(project_id) or [] if item.get("consent")]
-    except Exception:
-        leads = []
+        kit_exists = False
+        try:
+            kit = _resolve(manager, project_id,
+                           f"premarketing/{campaign['id']}/social/social_post_kit.md",
+                           must_exist=True)
+            kit_exists = kit.is_file()
+        except (OSError, ValueError, FileNotFoundError, KeyError):
+            pass
+        for event in campaign_evidence(campaign, shares, leads, kit_exists=kit_exists):
+            if event["kind"] in {"google_site_publication", "social_post",
+                                 "manual_social_post", "post_url_registration"}:
+                if not _https_url(event.get("reference") or ""):
+                    continue
+            operations.append(event)
     return {
         "actions": actions,
         "executed": executed,
         "pending": pending,
+        "operations": operations,
         "sites": sites,
         "forms": forms,
         "social": social,
@@ -341,80 +370,37 @@ def _needs_external(item: dict, exec_tasks: list[dict]) -> bool:
 
 
 def _check_external(cid: str, kinds: list[str], evidence: dict, evidence_path: str):
-    pending = evidence.get("pending") or []
-    executed = evidence.get("executed") or []
+    from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS
+
+    known = CAMPAIGN_OPERATION_KINDS | {
+        "google_form_publication", "lead_capture", "approved_external_action",
+        "approved_publication", "approved_outbound_communication",
+        "approved_contract_confirmation", "approved_customer_engagement",
+    }
+    operations = evidence.get("operations") or []
     for kind in kinds or ["approved_external_action"]:
-        if kind == "google_site_publication":
-            if evidence.get("sites"):
-                continue
-            if pending:
-                return _blocked(
-                    cid, CHECK_EXTERNAL,
-                    "Google Sites公開の人間承認または公開URL登録待ちです", evidence_path,
-                )
-            return _fail(
-                cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-                "公開承認と公開URLの証拠がありません。資料作成だけではPASSしません",
+        if kind not in known:
+            return _untestable(
+                cid, CHECK_EXTERNAL, f"未対応の外部操作種別です: {kind}",
+                evidence_path, code="CHECK_UNIMPLEMENTED",
+            )
+        # Use the same campaign classifier as the task execution gate.
+        matched = [item for item in operations if item.get("kind") == kind]
+        if matched:
+            continue
+        waiting = any(item.get("kind") == kind for item in evidence.get("pending") or [])
+        if waiting:
+            return _blocked(
+                cid, CHECK_EXTERNAL, f"{kind} の承認または実行証拠を待っています",
                 evidence_path,
             )
-        if kind == "google_form_publication":
-            if evidence.get("forms"):
-                continue
-            if pending:
-                return _blocked(
-                    cid, CHECK_EXTERNAL,
-                    "Google Forms公開の人間承認待ちです", evidence_path,
-                )
-            return _fail(
-                cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-                "フォーム公開の承認と公開結果の証拠がありません",
-                evidence_path,
-            )
-        if kind == "social_post":
-            if evidence.get("social"):
-                continue
-            if pending:
-                return _blocked(
-                    cid, CHECK_EXTERNAL,
-                    "SNS投稿の人間承認または公開投稿URL登録待ちです", evidence_path,
-                )
-            return _fail(
-                cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-                "SNS投稿の承認と公開結果URLがありません",
-                evidence_path,
-            )
-        if kind == "lead_capture":
-            if evidence.get("leads") or evidence.get("forms"):
-                continue
-            return _fail(
-                cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-                "同意付きリード取得の結果証拠がありません",
-                evidence_path,
-            )
-        if not executed:
-            if pending:
-                return _blocked(
-                    cid, CHECK_EXTERNAL,
-                    "外部アクションの人間承認または実行証拠待ちです", evidence_path,
-                )
-            return _fail(
-                cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-                "承認済みの実行日時・実行者・対象・結果の証拠がありません。資料だけではPASSしません",
-                evidence_path,
-            )
-        incomplete = [
-            item for item in executed
-            if not (item.get("executed_at") and item.get("target") and item.get("evidence"))
-        ]
-        if len(incomplete) == len(executed):
-            return _fail(
-                cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-                "実行記録に日時・対象・結果が不足しています",
-                evidence_path,
-            )
+        return _fail(
+            cid, CHECK_EXTERNAL, REASON_EXTERNAL,
+            f"{kind} の承認済み実行結果と固有の証拠がありません",
+            evidence_path,
+        )
     summary = (
-        f"executed={len(executed)} sites={len(evidence.get('sites') or [])} "
-        f"forms={len(evidence.get('forms') or [])} social={len(evidence.get('social') or [])} "
+        f"operations={len(operations)} forms={len(evidence.get('forms') or [])} "
         f"leads={len(evidence.get('leads') or [])}"
     )
     return None, summary

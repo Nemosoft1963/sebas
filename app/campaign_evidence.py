@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 
 def _time(value: Any) -> datetime | None:
@@ -22,7 +23,13 @@ CAMPAIGN_OPERATION_KINDS = frozenset({
     "google_site_publication", "social_posting_kit_generation",
     "social_copy_approval", "social_post", "manual_social_post",
     "post_url_registration", "form_response_sync", "lead_evaluation",
+    "google_form_publication", "lead_capture",
 })
+
+
+def _https_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme == "https" and bool(parsed.hostname)
 
 
 def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
@@ -32,12 +39,31 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
         return []
     evidence: list[dict] = []
     site_url = str(campaign.get("google_site_url") or "").strip()
-    site_ready = (campaign.get("site_publication_status") == "published" and bool(site_url)
+    site_ready = (campaign.get("site_publication_status") == "published" and _https_url(site_url)
                   and bool(campaign.get("site_publication_approved_at")))
     if site_ready:
         evidence.append({"kind": "google_site_publication", "id": campaign_id,
                          "campaign_id": campaign_id, "reference": site_url})
 
+    form_url = str(campaign.get("google_form_url") or "").strip()
+    form_ready = (
+        bool(campaign.get("google_form_id")) and _https_url(form_url)
+        and campaign.get("publication_status") in {"published", "monitoring"}
+        and bool(campaign.get("publication_approved_at"))
+        and _time(campaign.get("published_at")) is not None
+    )
+    if form_ready:
+        evidence.append({"kind": "google_form_publication", "id": campaign_id,
+                         "campaign_id": campaign_id, "reference": form_url})
+        published_at = _time(campaign.get("published_at"))
+        for lead in leads:
+            if lead.get("campaign_id") != campaign_id or not lead.get("consent"):
+                continue
+            created = _time(lead.get("created_at"))
+            if created is not None and created >= published_at:
+                evidence.append({"kind": "lead_capture", "id": lead.get("id"),
+                                 "campaign_id": campaign_id,
+                                 "reference": str(lead.get("id"))})
     if kit_exists and shares:
         evidence.append({"kind": "social_posting_kit_generation", "id": campaign_id,
                          "campaign_id": campaign_id,
@@ -56,7 +82,7 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
                              "reference": str(share.get("approved_at"))})
         url = str(share.get("evidence_url") or "").strip()
         registered = _time(share.get("evidence_registered_at"))
-        if approved and share.get("status") == "evidence_registered" and url and registered:
+        if approved and share.get("status") == "evidence_registered" and _https_url(url) and registered:
             posted_at.append(registered)
             for kind in ("social_post", "manual_social_post", "post_url_registration"):
                 event = {"kind": kind, "id": share.get("id"),

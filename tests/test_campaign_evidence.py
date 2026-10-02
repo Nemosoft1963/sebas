@@ -133,6 +133,4 @@ def test_generic_action_cannot_impersonate_campaign_operation(tmp_path):
     memory.update_action(project["id"], action["id"], "approved")
     memory.update_action(project["id"], action["id"], "executed", evidence="URLなし")
     manager = ProjectOrchestrator(memory, None, lambda _: ("", []), None, lambda: [])
-    assert {item["kind"] for item in manager._external_execution_evidence(project["id"])} == {
-        "external_action",
-    }
+    assert manager._external_execution_evidence(project["id"]) == []
