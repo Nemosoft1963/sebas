@@ -226,7 +226,7 @@ def _https_url(value: str) -> bool:
 
 
 def collect_external_evidence(manager, project_id: str) -> dict:
-    from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS, campaign_evidence
+    from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS, _time, campaign_evidence
 
     actions = []
     try:
@@ -249,7 +249,9 @@ def collect_external_evidence(manager, project_id: str) -> dict:
     executed = [
         item for item in actions
         if item.get("status") == "executed" and item.get("evidence")
-        and item.get("approved_at") and item.get("executed_at")
+        and _time(item.get("approved_at")) is not None
+        and _time(item.get("executed_at")) is not None
+        and _time(item.get("executed_at")) >= _time(item.get("approved_at"))
         and item.get("target")
         and str(item.get("kind") or "") not in CAMPAIGN_OPERATION_KINDS
     ]
@@ -276,8 +278,11 @@ def collect_external_evidence(manager, project_id: str) -> dict:
     social = []
     for campaign in campaigns:
         public_url = str(campaign.get("google_site_url") or "").strip()
+        site_approved = _time(campaign.get("site_publication_approved_at"))
+        published = _time(campaign.get("published_at"))
         if (campaign.get("site_publication_status") == "published"
-                and campaign.get("site_publication_approved_at") and _https_url(public_url)):
+                and site_approved is not None and published is not None
+                and published >= site_approved and _https_url(public_url)):
             sites.append({
                 "id": campaign.get("id"),
                 "url": public_url,
@@ -287,7 +292,9 @@ def collect_external_evidence(manager, project_id: str) -> dict:
         form_status = str(campaign.get("publication_status") or "")
         if (form_url and campaign.get("google_form_id") and _https_url(form_url)
                 and form_status in {"published", "monitoring"}
-                and campaign.get("publication_approved_at")):
+                and _time(campaign.get("publication_approved_at")) is not None
+                and published is not None
+                and published >= _time(campaign.get("publication_approved_at"))):
             forms.append({
                 "id": campaign.get("id"),
                 "url": form_url,
@@ -300,8 +307,11 @@ def collect_external_evidence(manager, project_id: str) -> dict:
             shares = []
         for share in shares:
             url = str(share.get("evidence_url") or "").strip()
-            if (share.get("status") == "evidence_registered" and share.get("approved_at")
-                    and share.get("evidence_registered_at") and _https_url(url)):
+            social_approved = _time(share.get("approved_at"))
+            social_registered = _time(share.get("evidence_registered_at"))
+            if (share.get("status") == "evidence_registered"
+                    and social_approved is not None and social_registered is not None
+                    and social_registered >= social_approved and _https_url(url)):
                 social.append({
                     "id": share.get("id"),
                     "channel": share.get("channel"),
@@ -369,7 +379,7 @@ def _needs_external(item: dict, exec_tasks: list[dict]) -> bool:
     return False
 
 
-def _check_external(cid: str, kinds: list[str], evidence: dict, evidence_path: str):
+def _check_external(cid: str, kinds: list[str], evidence: dict, evidence_path: str, minimums: dict | None = None):
     from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS
 
     known = CAMPAIGN_OPERATION_KINDS | {
@@ -378,6 +388,7 @@ def _check_external(cid: str, kinds: list[str], evidence: dict, evidence_path: s
         "approved_contract_confirmation", "approved_customer_engagement",
     }
     operations = evidence.get("operations") or []
+    minimums = minimums or {}
     for kind in kinds or ["approved_external_action"]:
         if kind not in known:
             return _untestable(
@@ -385,18 +396,20 @@ def _check_external(cid: str, kinds: list[str], evidence: dict, evidence_path: s
                 evidence_path, code="CHECK_UNIMPLEMENTED",
             )
         # Use the same campaign classifier as the task execution gate.
-        matched = [item for item in operations if item.get("kind") == kind]
-        if matched:
+        matched = {(item.get("kind"), item.get("id")) for item in operations
+                   if item.get("kind") == kind}
+        required = max(1, int(minimums.get(kind) or 1))
+        if len(matched) >= required:
             continue
         waiting = any(item.get("kind") == kind for item in evidence.get("pending") or [])
         if waiting:
             return _blocked(
-                cid, CHECK_EXTERNAL, f"{kind} の承認または実行証拠を待っています",
+                cid, CHECK_EXTERNAL, f"{kind} の承認または実行証拠を待っています（必要{required}件、確認{len(matched)}件）",
                 evidence_path,
             )
         return _fail(
             cid, CHECK_EXTERNAL, REASON_EXTERNAL,
-            f"{kind} の承認済み実行結果と固有の証拠がありません",
+            f"{kind} の承認済み実行結果と固有の証拠が不足しています（必要{required}件、確認{len(matched)}件）",
             evidence_path,
         )
     summary = (
@@ -539,7 +552,16 @@ def _evaluate_one(
     kinds = _action_kinds(item, exec_tasks) if _needs_external(item, exec_tasks) else []
     external_summary = ""
     if kinds or _needs_external(item, exec_tasks):
-        extra = _check_external(cid, kinds, evidence, primary)
+        minimums = {}
+        for task in exec_tasks:
+            for requirement in (contract_of(task) or {}).get("action_requirements") or []:
+                if not isinstance(requirement, dict):
+                    continue
+                kind = str(requirement.get("kind") or "")
+                if kind:
+                    minimums[kind] = max(minimums.get(kind, 0),
+                                         int(requirement.get("minimum_executed") or 0))
+        extra = _check_external(cid, kinds, evidence, primary, minimums)
         if extra is None:
             external_summary = ""
         elif isinstance(extra, tuple):

@@ -115,3 +115,28 @@ def test_social_regeneration_route_archives_and_guards_evidence():
     assert "social_package_regenerated" in source
     assert "archive_paths" in source
     assert "公開投稿URLが登録済みのため既存キットは再生成できません" in source
+
+
+def test_social_evidence_registration_is_idempotent_and_immutable(tmp_path):
+    from app.memory.short_term import ShortTermMemory
+    import pytest
+
+    memory = ShortTermMemory(tmp_path / "memory.db")
+    project = memory.create_project("SNS idempotency")
+    campaign = memory.create_campaign(project["id"], "test", "audience", "offer", "CTA", "")
+    memory.save_social_drafts(project["id"], campaign["id"], [{
+        "channel": "x", "label": "X", "mode": "composer", "variant": "primary",
+        "post_text": "post", "tracking_url": "https://example.test/",
+        "compose_url": "https://x.com/intent/post",
+    }])
+    memory.update_social_campaign_status(project["id"], campaign["id"], "draft_ready", "awaiting_approval")
+    memory.update_social_campaign_status(project["id"], campaign["id"], "awaiting_approval", "approved")
+    first = memory.register_social_evidence(project["id"], campaign["id"], "x",
+                                            "https://x.com/example/status/1")
+    repeat = memory.register_social_evidence(project["id"], campaign["id"], "x",
+                                             "https://x.com/example/status/1")
+    assert repeat["evidence_registered_at"] == first["evidence_registered_at"]
+    with pytest.raises(ValueError, match="上書き"):
+        memory.register_social_evidence(project["id"], campaign["id"], "x",
+                                        "https://x.com/example/status/2")
+    assert memory.get_social_share(project["id"], campaign["id"], "x")["evidence_url"] == first["evidence_url"]

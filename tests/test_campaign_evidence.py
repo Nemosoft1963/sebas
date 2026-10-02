@@ -134,3 +134,16 @@ def test_generic_action_cannot_impersonate_campaign_operation(tmp_path):
     memory.update_action(project["id"], action["id"], "executed", evidence="URLなし")
     manager = ProjectOrchestrator(memory, None, lambda _: ("", []), None, lambda: [])
     assert manager._external_execution_evidence(project["id"]) == []
+
+
+def test_out_of_order_publication_and_post_are_not_evidence():
+    assert "google_site_publication" not in kinds(
+        campaign(site_publication_approved_at=POSTED, published_at=SITE), [])
+    assert "google_form_publication" not in kinds(
+        campaign(google_form_url="https://docs.google.com/forms/d/e/example/viewform",
+                 publication_approved_at=POSTED, published_at=SITE), [])
+    invalid_post = share(approved_at=POSTED, evidence_registered_at=APPROVED)
+    found = kinds(campaign(), [invalid_post])
+    assert "social_copy_approval" in found
+    assert "social_post" not in found
+    assert "form_response_sync" not in found

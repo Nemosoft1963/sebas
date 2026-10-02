@@ -825,6 +825,10 @@ async def request_google_publication(project_id: str, campaign_id: str):
         raise HTTPException(404, "キャンペーンが見つかりません")
     if campaign.get("google_form_id"):
         raise HTTPException(409, "Googleフォームは作成済みです")
+    if campaign.get("publication_status") in {"publishing_form", "failed", "reauth_required"}:
+        raise HTTPException(
+            409, "前回の作成結果が未確認です。Google側で同名フォームの有無を照合してから復旧してください",
+        )
     updated = memory.update_campaign_publication(
         project_id, campaign_id, "awaiting_approval", publication_error="",
     )
@@ -871,13 +875,17 @@ async def publish_google_form(project_id: str, campaign_id: str):
         raise HTTPException(409, "人間によるGoogle公開承認が必要です")
     if campaign.get("google_form_id"):
         raise HTTPException(409, "Googleフォームは作成済みです")
-    attempts = int(campaign.get("publication_attempts") or 0) + 1
-    memory.update_campaign_publication(
-        project_id, campaign_id, "publishing_form",
-        publication_attempts=attempts, publication_error="",
-    )
+    if campaign.get("publication_status") != "approved":
+        raise HTTPException(
+            409, "承認済みの新規作成だけを実行できます。中断・失敗時はGoogle側の作成結果を先に照合してください",
+        )
     try:
-        result = await google_publisher.create_and_publish(campaign)
+        claimed = memory.claim_form_publication(project_id, campaign_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    attempts = int(claimed.get("publication_attempts") or 0)
+    try:
+        result = await google_publisher.create_and_publish(claimed)
     except GoogleAuthenticationRequired as exc:
         updated = memory.update_campaign_publication(
             project_id, campaign_id, "reauth_required",
@@ -927,6 +935,14 @@ async def register_google_site(project_id: str, campaign_id: str,
         validate_google_site_url(public_url)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if campaign.get("site_publication_status") == "published":
+        if (campaign.get("google_site_url") == public_url
+                and (not campaign.get("landing_asset_version")
+                     or campaign.get("landing_asset_version") == campaign.get("published_asset_version"))):
+            return campaign
+        raise HTTPException(
+            409, "公開済みLPのURLや版を上書きできません。改訂を作成して再承認してください",
+        )
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             response = await client.get(public_url, headers={"User-Agent": "LocalSupporter/1.0"})
@@ -1598,17 +1614,20 @@ async def register_social_evidence(project_id: str, campaign_id: str, channel: s
     require_project(project_id)
     try:
         evidence_url = validate_evidence_url(channel, payload.public_post_url)
+        previous = memory.get_social_share(project_id, campaign_id, channel)
         share = memory.register_social_evidence(
             project_id, campaign_id, channel, evidence_url,
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    memory.add_event(
-        project_id, "social_evidence_registered",
-        f"{share['label']}の公開投稿URLを登録",
-        detail=json.dumps({"campaign_id": campaign_id, "channel": channel,
-                           "public_post_url": evidence_url}, ensure_ascii=False),
-    )
+    if not (previous and previous.get("status") == "evidence_registered"
+            and previous.get("evidence_url") == evidence_url):
+        memory.add_event(
+            project_id, "social_evidence_registered",
+            f"{share['label']}の公開投稿URLを登録",
+            detail=json.dumps({"campaign_id": campaign_id, "channel": channel,
+                               "public_post_url": evidence_url}, ensure_ascii=False),
+        )
     return share
 
 

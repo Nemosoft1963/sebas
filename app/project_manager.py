@@ -1517,41 +1517,16 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         return self.memory.get_mission(project_id)
 
     def _external_execution_evidence(self, project_id: str) -> list[dict]:
-        from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS, campaign_evidence
+        from app.generic_goal_checks import collect_external_evidence
 
-        evidence = []
-        for action in self.memory.list_actions(project_id):
-            reference = str(action.get("evidence") or "").strip()
-            action_kind = str(action.get("kind") or "").strip()
-            if (action.get("status") != "executed" or not action.get("approved_at")
-                    or not action.get("executed_at") or not action.get("target")
-                    or not reference or action_kind in CAMPAIGN_OPERATION_KINDS):
-                continue
-            evidence.append({"kind": "external_action", "id": action.get("id"),
-                             "reference": reference})
-            if action_kind and action_kind != "external_action":
-                evidence.append({"kind": action_kind, "id": action.get("id"),
-                                 "reference": reference})
-
-        project = self.memory.get_project(project_id) or {}
-        leads = self.memory.list_leads(project_id)
-        for campaign in self.memory.list_campaigns(project_id):
-            shares = self.memory.list_social_shares(project_id, campaign["id"])
-            kit_exists = False
-            if self.workspace is not None and shares:
-                try:
-                    _, _, kit = self.workspace.resolve_file(
-                        project.get("workspace_path", ""), project_id,
-                        f"premarketing/{campaign['id']}/social/social_post_kit.md",
-                        must_exist=True,
-                    )
-                    kit_exists = kit.is_file()
-                except (OSError, ValueError):
-                    pass
-            evidence.extend(campaign_evidence(
-                campaign, shares, leads, kit_exists=kit_exists,
-            ))
-        return evidence
+        # Task execution and goal acceptance read one validated operation stream.
+        # Keep the historical task-gate alias for generic approved actions.
+        operations = collect_external_evidence(self, project_id)["operations"]
+        return [
+            dict(item, kind="external_action")
+            if item.get("kind") == "approved_external_action" else item
+            for item in operations
+        ]
     @staticmethod
     def _task_requires_external_evidence(task: dict) -> bool:
         contract = contract_of(task) or {}
@@ -1576,7 +1551,8 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                     'external_action' if kind == 'approved_external_action' else kind
                 )
             ]
-            if len(candidates) < int(requirement.get('minimum_executed') or 0):
+            distinct = {(item.get('kind'), item.get('id')) for item in candidates}
+            if len(distinct) < int(requirement.get('minimum_executed') or 0):
                 return False
         return True
 

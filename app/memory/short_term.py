@@ -843,6 +843,21 @@ class ShortTermMemory:
                 raise KeyError(campaign_id)
         return self.get_campaign(project_id, campaign_id) or {}
 
+    def claim_form_publication(self, project_id: str, campaign_id: str) -> dict:
+        """Atomically claim the one approved remote create attempt."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            cursor = db.execute("""UPDATE premarketing_campaigns
+                SET publication_status='publishing_form',
+                    publication_attempts=publication_attempts+1,
+                    publication_error='',updated_at=?
+                WHERE project_id=? AND id=? AND publication_status='approved'
+                  AND google_form_id='' AND publication_approved_at IS NOT NULL""",
+                (now, project_id, campaign_id))
+            if cursor.rowcount != 1:
+                raise ValueError("承認済みの新規フォーム作成だけを開始できます")
+        return self.get_campaign(project_id, campaign_id) or {}
+
     def update_campaign_assets(self, campaign_id: str, assets_path: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
@@ -999,13 +1014,20 @@ class ShortTermMemory:
                                  variant: str = "primary") -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
-            cursor = db.execute("""UPDATE campaign_social_shares SET status='evidence_registered',
-                evidence_url=?,evidence_registered_at=?,updated_at=?
-                WHERE project_id=? AND campaign_id=? AND channel=? AND variant=?
-                AND status IN ('approved','composer_opened','evidence_registered')""",
-                (evidence_url, now, now, project_id, campaign_id, channel, variant))
-            if not cursor.rowcount:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("""SELECT status,evidence_url FROM campaign_social_shares
+                WHERE project_id=? AND campaign_id=? AND channel=? AND variant=?""",
+                (project_id, campaign_id, channel, variant)).fetchone()
+            if not current or current[0] not in ('approved', 'composer_opened', 'evidence_registered'):
                 raise ValueError("Social share is not approved")
+            if current[0] == 'evidence_registered':
+                if current[1] != evidence_url:
+                    raise ValueError("公開投稿URLは登録済みです。異なるURLで上書きできません")
+            else:
+                db.execute("""UPDATE campaign_social_shares SET status='evidence_registered',
+                    evidence_url=?,evidence_registered_at=?,updated_at=?
+                    WHERE project_id=? AND campaign_id=? AND channel=? AND variant=?""",
+                    (evidence_url, now, now, project_id, campaign_id, channel, variant))
         return self.get_social_share(project_id, campaign_id, channel, variant) or {}
 
     def create_lead(self, campaign: dict, name: str, email: str, company: str,

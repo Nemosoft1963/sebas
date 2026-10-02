@@ -106,3 +106,59 @@ def test_consented_postpublication_lead_satisfies_both_gates(tmp_path):
     assert manager._task_external_evidence_satisfied(
         _task("lead_capture"), manager._external_execution_evidence(pid)
     )
+
+def test_same_evidence_id_cannot_satisfy_two_required_operations(tmp_path):
+    manager, pid = _manager(tmp_path)
+    action = manager.memory.create_action(pid, "approved_customer_engagement",
+                                          "customer", "contact")
+    manager.memory.update_action(pid, action["id"], "approved")
+    manager.memory.update_action(pid, action["id"], "executed", evidence="contact record")
+    evidence = collect_external_evidence(manager, pid)
+    duplicated = list(evidence["operations"]) + list(evidence["operations"])
+    evidence["operations"] = duplicated
+    goal = _check_external(
+        "SC1", ["approved_customer_engagement"], evidence, "result.md",
+        {"approved_customer_engagement": 2},
+    )
+    assert goal["status"] == "FAIL"
+    task = {"acceptance_criteria": json.dumps({
+        "schema": "local-cowork-plan/v1",
+        "action_requirements": [{
+            "kind": "approved_customer_engagement",
+            "minimum_executed": 2, "evidence_required": True,
+        }],
+    })}
+    task_evidence = manager._external_execution_evidence(pid)
+    assert not manager._task_external_evidence_satisfied(task, task_evidence + task_evidence)
+
+
+def test_cancelled_action_does_not_satisfy_either_gate(tmp_path):
+    manager, pid = _manager(tmp_path)
+    action = manager.memory.create_action(pid, "approved_customer_engagement",
+                                          "customer", "contact")
+    manager.memory.update_action(pid, action["id"], "approved")
+    manager.memory.update_action(pid, action["id"], "executed", evidence="contact record")
+    assert manager._task_external_evidence_satisfied(
+        _task("approved_customer_engagement"), manager._external_execution_evidence(pid))
+    manager.memory.update_action(pid, action["id"], "cancelled")
+    evidence = collect_external_evidence(manager, pid)
+    assert _check_external("SC1", ["approved_customer_engagement"], evidence, "result.md")["status"] == "FAIL"
+    assert not manager._task_external_evidence_satisfied(
+        _task("approved_customer_engagement"), manager._external_execution_evidence(pid))
+
+
+def test_execution_before_approval_is_not_evidence(tmp_path):
+    manager, pid = _manager(tmp_path)
+    action = manager.memory.create_action(pid, "approved_customer_engagement",
+                                          "customer", "contact")
+    manager.memory.update_action(pid, action["id"], "approved")
+    manager.memory.update_action(pid, action["id"], "executed", evidence="contact record")
+    with manager.memory._connect() as db:
+        db.execute("UPDATE project_actions SET executed_at=? WHERE id=?",
+                   ("2026-01-01T00:00:00+00:00", action["id"]))
+        db.execute("UPDATE project_actions SET approved_at=? WHERE id=?",
+                   ("2026-01-02T00:00:00+00:00", action["id"]))
+    evidence = collect_external_evidence(manager, pid)
+    assert _check_external("SC1", ["approved_customer_engagement"], evidence, "result.md")["status"] == "FAIL"
+    assert not manager._task_external_evidence_satisfied(
+        _task("approved_customer_engagement"), manager._external_execution_evidence(pid))

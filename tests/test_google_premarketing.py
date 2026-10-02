@@ -104,3 +104,19 @@ def test_campaign_publication_state_is_persisted(tmp_path):
     )
     assert updated["publication_status"] == "awaiting_approval"
     assert memory.get_campaign(project["id"], campaign["id"])["id"] == campaign["id"]
+
+
+def test_form_creation_claim_is_single_use(tmp_path):
+    memory = ShortTermMemory(tmp_path / "memory.db")
+    project = memory.create_project("claim")
+    campaign = memory.create_campaign(project["id"], "相談", "対象", "価値", "CTA", "")
+    memory.update_campaign_publication(
+        project["id"], campaign["id"], "approved",
+        publication_approved_at="2026-10-01T00:00:00+00:00",
+    )
+    claimed = memory.claim_form_publication(project["id"], campaign["id"])
+    assert claimed["publication_status"] == "publishing_form"
+    assert claimed["publication_attempts"] == 1
+    with pytest.raises(ValueError, match="承認済み"):
+        memory.claim_form_publication(project["id"], campaign["id"])
+    assert memory.get_campaign(project["id"], campaign["id"])["publication_attempts"] == 1

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.campaign_evidence import campaign_evidence
+
 
 def _stage(key: str, label: str, state: str, detail: str) -> dict[str, str]:
     return {"key": key, "label": label, "state": state, "detail": detail}
@@ -9,7 +11,11 @@ def _stage(key: str, label: str, state: str, detail: str) -> dict[str, str]:
 
 def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
                                leads: list[dict]) -> dict[str, Any]:
-    campaign_leads = [lead for lead in leads if lead.get("campaign_id") == campaign.get("id")]
+    events = campaign_evidence(campaign, shares, leads)
+    by_kind = {}
+    for event in events:
+        by_kind.setdefault(event["kind"], set()).add(event.get("id"))
+    campaign_leads = [lead for lead in leads if lead.get("id") in by_kind.get("lead_capture", set())]
     form_status = str(campaign.get("publication_status") or "local_only")
     site_status = str(campaign.get("site_publication_status") or "not_requested")
     error = str(campaign.get("site_publication_error") or campaign.get("publication_error") or "")
@@ -30,17 +36,23 @@ def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
                              str(creative.get("error") or "再制作が必要")))
     else:
         stages.append(_stage("creative", "デザイン品質", "waiting", "品質向上資材の生成が必要"))
-    if campaign.get("google_form_id"):
-        stages.append(_stage("form", "Googleフォーム", "complete", "公開・回答受付設定済み"))
+    if by_kind.get("google_form_publication"):
+        stages.append(_stage("form", "Googleフォーム", "complete", "承認済み公開を確認"))
+    elif campaign.get("google_form_id"):
+        stages.append(_stage("form", "Googleフォーム", "running", "作成済み・公開証拠の確認待ち"))
     elif form_status in {"failed", "reauth_required"}:
         stages.append(_stage("form", "Googleフォーム", "attention", error or "再設定が必要"))
-    elif form_status in {"awaiting_approval", "approved", "publishing_form"}:
+    elif form_status == "publishing_form":
+        stages.append(_stage("form", "Googleフォーム", "attention", "作成処理の結果をGoogle側で確認してください"))
+    elif form_status in {"awaiting_approval", "approved"}:
         stages.append(_stage("form", "Googleフォーム", "running", form_status))
     else:
         stages.append(_stage("form", "Googleフォーム", "waiting", "公開申請が必要"))
 
-    if site_status == "published" and campaign.get("google_site_url"):
-        stages.append(_stage("landing", "公開LP", "complete", "公開URL検証済み"))
+    if by_kind.get("google_site_publication"):
+        stages.append(_stage("landing", "公開LP", "complete", "承認済み公開URLを確認"))
+    elif site_status == "published":
+        stages.append(_stage("landing", "公開LP", "attention", "公開URL・承認・時刻を再確認してください"))
     elif site_status in {"failed", "reauth_required"}:
         stages.append(_stage("landing", "公開LP", "attention", error or "再確認が必要"))
     elif site_status in {"awaiting_approval", "approved"}:
@@ -65,7 +77,7 @@ def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
                              "公開LP登録後に生成可能" if not campaign.get("google_site_url") else "投稿キット未生成"))
 
     open_count = sum(int(share.get("open_count") or 0) for share in shares)
-    evidence_count = sum(1 for share in shares if share.get("evidence_url"))
+    evidence_count = len(by_kind.get("social_post", set()))
     if evidence_count:
         stages.append(_stage("outreach", "SNS発信", "complete", f"公開投稿 {evidence_count}件を確認"))
     elif open_count:
@@ -78,7 +90,11 @@ def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
     else:
         stages.append(_stage("leads", "リード獲得", "waiting", "回答・問い合わせを監視中"))
 
-    if not campaign.get("google_form_id"):
+    if form_status == "reauth_required":
+        next_action = "Google OAuthを人間が再認証し、フォーム状態を確認する"
+    elif form_status == "publishing_form" and not campaign.get("google_form_id"):
+        next_action = "Google側に作成済みフォームがないか確認し、二重作成を避ける"
+    elif not campaign.get("google_form_id"):
         next_action = "Googleフォームの公開処理を進める"
     elif creative_status != "approved":
         next_action = "デザイン品質向上を実施し、レビュー結果を承認する"
@@ -113,7 +129,9 @@ def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
             "composer_opens": open_count,
             "published_posts": evidence_count,
             "leads": len(campaign_leads),
-            "qualified_leads": sum(1 for lead in campaign_leads if int(lead.get("score") or 0) >= 60),
+            "qualified_leads": sum(1 for lead in campaign_leads
+                                   if lead.get("id") in by_kind.get("lead_evaluation", set())
+                                   and int(lead.get("score") or 0) >= 60),
         },
         "last_activity_at": max(updated_values),
     }

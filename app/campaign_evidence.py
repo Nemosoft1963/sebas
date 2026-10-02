@@ -39,8 +39,11 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
         return []
     evidence: list[dict] = []
     site_url = str(campaign.get("google_site_url") or "").strip()
+    site_approved = _time(campaign.get("site_publication_approved_at"))
+    published_at = _time(campaign.get("published_at"))
     site_ready = (campaign.get("site_publication_status") == "published" and _https_url(site_url)
-                  and bool(campaign.get("site_publication_approved_at")))
+                  and site_approved is not None and published_at is not None
+                  and published_at >= site_approved)
     if site_ready:
         evidence.append({"kind": "google_site_publication", "id": campaign_id,
                          "campaign_id": campaign_id, "reference": site_url})
@@ -49,8 +52,9 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
     form_ready = (
         bool(campaign.get("google_form_id")) and _https_url(form_url)
         and campaign.get("publication_status") in {"published", "monitoring"}
-        and bool(campaign.get("publication_approved_at"))
-        and _time(campaign.get("published_at")) is not None
+        and _time(campaign.get("publication_approved_at")) is not None
+        and published_at is not None
+        and published_at >= _time(campaign.get("publication_approved_at"))
     )
     if form_ready:
         evidence.append({"kind": "google_form_publication", "id": campaign_id,
@@ -73,7 +77,8 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
     for share in shares:
         if share.get("campaign_id") != campaign_id:
             continue
-        approved = bool(share.get("approved_at")) and share.get("status") in {
+        approved_at = _time(share.get("approved_at"))
+        approved = approved_at is not None and share.get("status") in {
             "approved", "composer_opened", "evidence_registered",
         }
         if approved:
@@ -82,7 +87,8 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
                              "reference": str(share.get("approved_at"))})
         url = str(share.get("evidence_url") or "").strip()
         registered = _time(share.get("evidence_registered_at"))
-        if approved and share.get("status") == "evidence_registered" and _https_url(url) and registered:
+        if (approved and share.get("status") == "evidence_registered"
+                and _https_url(url) and registered and registered >= approved_at):
             posted_at.append(registered)
             for kind in ("social_post", "manual_social_post", "post_url_registration"):
                 event = {"kind": kind, "id": share.get("id"),
