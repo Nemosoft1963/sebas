@@ -2964,6 +2964,45 @@ async def post_completion_gate_accept(project_id: str, payload: CompletionGateAc
         raise HTTPException(409, str(exc)) from exc
 
 
+class AutoResumeEnablePayload(BaseModel):
+    enabled: bool
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.get('/api/projects/{project_id}/auto-resume')
+async def get_auto_resume(project_id: str):
+    require_project(project_id)
+    from app.safe_auto_resume import enabled, records
+    return {'enabled': enabled(orchestrator, project_id), 'records': records(orchestrator, project_id)}
+
+
+@app.post('/api/projects/{project_id}/auto-resume/enable')
+async def post_auto_resume_enable(project_id: str, payload: AutoResumeEnablePayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app.safe_auto_resume import set_enabled
+    try:
+        result = set_enabled(orchestrator, project_id, payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    memory.add_event(project_id, 'auto_resume_setting_changed',
+                     f"安全な自動再開を{'有効' if payload.enabled else '無効'}にしました",
+                     detail=json.dumps({'actor': actor, 'enabled': payload.enabled}, ensure_ascii=False))
+    return result
+
+
+@app.post('/api/projects/{project_id}/auto-resume/run')
+async def post_auto_resume_run(project_id: str):
+    require_project(project_id)
+    from app.safe_auto_resume import resume
+    try:
+        return await resume(orchestrator, project_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 class NextActionExecutePayload(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     chain: bool = False
