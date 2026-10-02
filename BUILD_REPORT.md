@@ -1684,3 +1684,9 @@ Validation:
 - Rechecked production: Web container healthy and `scripts/healthcheck.ps1` all PASS.
 - Sales project remains plan Version 33 with 20 tasks; `plan_issues_open`, external review `not_passed` (0/5). No approval or execution completion is claimed.
 - Updated the MMI design status and recorded restart guidance in `docs/SEBAS_WORK_MEMORY.md`.
+
+## 2026-10-02 TRIZ/RAG integration
+
+- Connected reviewed local RAG lessons to automatic TRIZ as reference data. Retrieval rejects unapproved, revoked, expired, other-project, old-input, and raw external records; a proposal or artifact trial is not business recovery.
+- Added an explicit project-scoped TRIZ generation switch independent of the normal execution mode. The production Web service is healthy; the enabled project's approved RAG lessons currently number zero, so no real-case recovery is claimed.
+- Focused validation: 35 passed, 1 skipped; JavaScript syntax and scripts/healthcheck.ps1 passed. GitHub Actions 	est and security passed for code commit 11774ce. Details and rollback: docs/CHANGELOG_2026-10-02_triz_rag_bridge.md.
