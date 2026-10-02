@@ -314,6 +314,9 @@ async def lifespan(_: FastAPI):
     global memory, llm, orchestrator, workspace, google_publisher, google_sync_task
     global model_warmup_task
     memory = ShortTermMemory(DB_PATH)
+    recovered_forms = memory.recover_interrupted_form_publications()
+    if recovered_forms:
+        LOGGER.warning("Marked %s interrupted Google form publication(s) for reconciliation", recovered_forms)
     try:
         from app.ocr_runtime import install_default_runtime
         install_default_runtime()
@@ -873,19 +876,35 @@ async def publish_google_form(project_id: str, campaign_id: str):
         raise HTTPException(404, "キャンペーンが見つかりません")
     if not campaign.get("publication_approved_at"):
         raise HTTPException(409, "人間によるGoogle公開承認が必要です")
-    if campaign.get("google_form_id"):
-        raise HTTPException(409, "Googleフォームは作成済みです")
-    if campaign.get("publication_status") != "approved":
-        raise HTTPException(
-            409, "承認済みの新規作成だけを実行できます。中断・失敗時はGoogle側の作成結果を先に照合してください",
-        )
-    try:
-        claimed = memory.claim_form_publication(project_id, campaign_id)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+    existing_id = str(campaign.get("google_form_id") or "")
+    resumed = bool(existing_id)
+    if resumed:
+        if campaign.get("publication_status") not in {"failed", "reauth_required"}:
+            raise HTTPException(409, "Googleフォームは作成済み、または処理中です")
+        try:
+            claimed = memory.claim_form_resume(project_id, campaign_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    else:
+        if campaign.get("publication_status") != "approved":
+            raise HTTPException(
+                409, "承認済みの新規作成だけを実行できます。ID不明の中断時はGoogle側の作成結果を先に照合してください",
+            )
+        try:
+            claimed = memory.claim_form_publication(project_id, campaign_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     attempts = int(claimed.get("publication_attempts") or 0)
     try:
-        result = await google_publisher.create_and_publish(claimed)
+        if resumed:
+            result = await google_publisher.resume_existing(claimed)
+        else:
+            def checkpoint(form_id, responder_uri):
+                memory.update_campaign_publication(
+                    project_id, campaign_id, "publishing_form",
+                    google_form_id=form_id, google_form_url=responder_uri,
+                )
+            result = await google_publisher.create_and_publish(claimed, on_created=checkpoint)
     except GoogleAuthenticationRequired as exc:
         updated = memory.update_campaign_publication(
             project_id, campaign_id, "reauth_required",
@@ -906,7 +925,7 @@ async def publish_google_form(project_id: str, campaign_id: str):
     )
     memory.add_event(
         project_id, "google_form_published",
-        f"Googleフォームを作成・公開: {campaign['title']}",
+        f"Googleフォームを{'既存IDから再開・公開' if resumed else '作成・公開'}: {campaign['title']}",
         detail=json.dumps({
             "campaign_id": campaign_id, "form_id": result["form_id"],
             "responder_uri": result["responder_uri"],

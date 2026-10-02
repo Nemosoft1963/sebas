@@ -164,13 +164,34 @@ class GoogleFormsPublisher:
             }
         }
 
-    async def create_and_publish(self, campaign: dict) -> dict[str, Any]:
+    async def create_and_publish(self, campaign: dict, on_created=None) -> dict[str, Any]:
         created = await self._request("POST", "forms?unpublished=true", json={
             "info": {"title": campaign["title"]},
         })
         form_id = str(created.get("formId", ""))
         if not form_id:
             raise GooglePremarketingError("GoogleフォームIDを取得できませんでした")
+        if on_created is not None:
+            on_created(form_id, str(created.get("responderUri") or ""))
+        return await self.resume_existing({**campaign, "google_form_id": form_id})
+
+    async def resume_existing(self, campaign: dict) -> dict[str, Any]:
+        """Finish a known form ID without issuing forms.create again."""
+        form_id = str(campaign.get("google_form_id") or "")
+        if not form_id:
+            raise GooglePremarketingError("再開するフォームIDがありません")
+        form = await self._request("GET", f"forms/{form_id}")
+        if str(form.get("formId") or "") != form_id:
+            raise GooglePremarketingError("保存済みフォームIDとGoogleの回答が一致しません")
+        if str((form.get("info") or {}).get("title") or "") != str(campaign.get("title") or ""):
+            raise GooglePremarketingError("Googleフォームのタイトルが案件と一致しません")
+        items = form.get("items") or []
+        by_title = {str(item.get("title") or ""): item for item in items if isinstance(item, dict)}
+        expected = [(key, title, required, paragraph) for key, title, required, paragraph in FORM_FIELDS]
+        titles = {title for _, title, _, _ in expected} | {CONSENT_TITLE}
+        for title in titles & set(by_title):
+            if not (by_title[title].get("questionItem") or {}).get("question"):
+                raise GooglePremarketingError("既存フォームの質問が不完全です。人間が確認してください")
         requests = [{
             "updateFormInfo": {
                 "info": {"description": (
@@ -180,49 +201,58 @@ class GoogleFormsPublisher:
                 "updateMask": "description",
             }
         }]
-        for index, (_, title, required, paragraph) in enumerate(FORM_FIELDS):
-            requests.append(self._create_item(title, required, paragraph, index))
-        requests.append({
-            "createItem": {
-                "item": {
-                    "title": CONSENT_TITLE,
-                    "questionItem": {"question": {
-                        "required": True,
-                        "choiceQuestion": {
-                            "type": "CHECKBOX",
-                            "options": [{"value": CONSENT_VALUE}],
-                            "shuffle": False,
-                        },
-                    }},
-                },
-                "location": {"index": len(FORM_FIELDS)},
-            }
-        })
-        await self._request("POST", f"forms/{form_id}:batchUpdate", json={
-            "requests": requests,
-        })
-        await self._request("POST", f"forms/{form_id}:setPublishSettings", json={
-            "publishSettings": {"publishState": {
-                "isPublished": True, "isAcceptingResponses": True,
-            }},
-        })
-        form = await self._request("GET", f"forms/{form_id}")
+        index = len(items)
+        for _, title, required, paragraph in expected:
+            if title not in by_title:
+                requests.append(self._create_item(title, required, paragraph, index))
+                index += 1
+        if CONSENT_TITLE not in by_title:
+            requests.append({
+                "createItem": {
+                    "item": {
+                        "title": CONSENT_TITLE,
+                        "questionItem": {"question": {
+                            "required": True,
+                            "choiceQuestion": {
+                                "type": "CHECKBOX",
+                                "options": [{"value": CONSENT_VALUE}],
+                                "shuffle": False,
+                            },
+                        }},
+                    },
+                    "location": {"index": index},
+                }
+            })
+        await self._request("POST", f"forms/{form_id}:batchUpdate", json={"requests": requests})
+        state = (form.get("publishSettings") or {}).get("publishState") or {}
+        if not (state.get("isPublished") and state.get("isAcceptingResponses")):
+            await self._request("POST", f"forms/{form_id}:setPublishSettings", json={
+                "publishSettings": {"publishState": {
+                    "isPublished": True, "isAcceptingResponses": True,
+                }},
+            })
+        verified = await self._request("GET", f"forms/{form_id}")
+        if str(verified.get("formId") or "") != form_id:
+            raise GooglePremarketingError("再開後のフォームIDを検証できません")
+        state = (verified.get("publishSettings") or {}).get("publishState") or {}
+        if not (state.get("isPublished") and state.get("isAcceptingResponses")):
+            raise GooglePremarketingError("フォームの公開・回答受付を検証できません")
         title_to_key = {title: key for key, title, _, _ in FORM_FIELDS}
-        question_map: dict[str, str] = {}
-        for item in form.get("items", []):
-            title = item.get("title", "")
-            question_id = (
-                item.get("questionItem", {}).get("question", {}).get("questionId", "")
-            )
+        question_map = {}
+        for item in verified.get("items") or []:
+            title = str(item.get("title") or "")
+            question_id = (item.get("questionItem") or {}).get("question", {}).get("questionId")
             if question_id and title in title_to_key:
                 question_map[question_id] = title_to_key[title]
             elif question_id and title == CONSENT_TITLE:
                 question_map[question_id] = "consent"
-        return {
-            "form_id": form_id,
-            "responder_uri": form.get("responderUri", created.get("responderUri", "")),
-            "question_map": question_map,
-        }
+        expected_keys = {key for key, *_ in FORM_FIELDS} | {"consent"}
+        if set(question_map.values()) != expected_keys:
+            raise GooglePremarketingError("再開後の質問項目が不足しています")
+        uri = str(verified.get("responderUri") or "")
+        if not uri.startswith("https://"):
+            raise GooglePremarketingError("回答URLを検証できません")
+        return {"form_id": form_id, "responder_uri": uri, "question_map": question_map}
 
     async def list_responses(self, form_id: str,
                              since: str = "") -> list[dict[str, Any]]:

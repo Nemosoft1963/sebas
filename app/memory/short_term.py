@@ -858,6 +858,34 @@ class ShortTermMemory:
                 raise ValueError("承認済みの新規フォーム作成だけを開始できます")
         return self.get_campaign(project_id, campaign_id) or {}
 
+    def claim_form_resume(self, project_id: str, campaign_id: str) -> dict:
+        """Resume only a known form ID; never create a second remote form."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            cursor = db.execute("""UPDATE premarketing_campaigns
+                SET publication_status='publishing_form',
+                    publication_attempts=publication_attempts+1,
+                    publication_error='',updated_at=?
+                WHERE project_id=? AND id=? AND publication_status IN ('failed','reauth_required')
+                  AND google_form_id<>'' AND publication_approved_at IS NOT NULL""",
+                (now, project_id, campaign_id))
+            if cursor.rowcount != 1:
+                raise ValueError("既存フォームIDと承認記録がある失敗だけを再開できます")
+        return self.get_campaign(project_id, campaign_id) or {}
+
+    def recover_interrupted_form_publications(self) -> int:
+        """A restarted process cannot still own an in-flight Google request."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            cursor = db.execute("""UPDATE premarketing_campaigns
+                SET publication_status='failed',
+                    publication_error=CASE WHEN google_form_id=''
+                        THEN '作成結果が不明です。Google側のフォーム有無を照合してください'
+                        ELSE '処理が中断しました。保存済みフォームIDから再開できます' END,
+                    updated_at=?
+                WHERE publication_status='publishing_form'""", (now,))
+            return cursor.rowcount
+
     def update_campaign_assets(self, campaign_id: str, assets_path: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
