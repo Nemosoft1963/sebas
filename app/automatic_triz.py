@@ -183,6 +183,16 @@ def build_vehicle_failure(manager, pid, task, error) -> VehicleFailure:
     )
 
 
+def triz_generation_enabled(memory_path, project_id: str) -> bool:
+    """Explicit project switch; does not alter the normal capability upgrade mode."""
+    from pathlib import Path
+    path = Path(memory_path).parent / 'automatic_triz.json'
+    if not path.exists():
+        return False
+    settings = json.loads(path.read_text(encoding='utf-8-sig'))
+    value = settings.get('projects', {}).get(project_id, False)
+    return value is True
+
 def approved_rag_for_failure(problem: dict) -> dict:
     """Read only reviewed, current-project local lessons; they never execute a recovery."""
     from app.experience_memory import CURRENT_MEMORY
@@ -558,7 +568,10 @@ async def on_failure(manager, pid, task, error):
     write_json(path, result)
     try:
         from app.upgrade_runtime import ReviewRequired, configured_mode
-        if not isinstance(error, ReviewRequired) or configured_mode(manager.memory.path, pid, task['id']) in ('off', 'shadow'):
+        if not isinstance(error, ReviewRequired) or (
+            configured_mode(manager.memory.path, pid, task['id']) in ('off', 'shadow')
+            and not triz_generation_enabled(manager.memory.path, pid)
+        ):
             result.update(status='development_required', reason='停止・運用モードを維持。課題と根拠のみ保存し、追加推論は行わない',
                           display=triz_display('development_required'))
             return

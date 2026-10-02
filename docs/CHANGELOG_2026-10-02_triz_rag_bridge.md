@@ -23,3 +23,9 @@
 - 販売プロジェクトを既存の '/data/memory/experience_memory.json' のenforce対象へ追加。既存の車両設定と外部AI予算は維持。ローカル埋め込み768次元の応答を確認。
 - 本番の検証済み経験は0件、検索はno_match。初回TRIZ前の画面/APIはRAG有効・参照0件・業務回復false。実案件のTRIZ発明・限定再実行・最終達成は未検証。
 
+
+## 追加の起動経路修正
+- 販売案件の既存 capability_upgrade モードはoffであり、従来のままでは一般TRIZ候補生成が抑止されていた。通常実行経路や計画状態は変更せず、/data/memory/automatic_triz.json の案件別trueでローカルTRIZ候補生成のみ許可する。既定はfalse。
+- 原本不足、既知欠陥、未確認の業務事実は従来どおり発明対象外または追加開発扱い。RAG候補の存在を自動採用や再実行許可には使用しない。
+
+- 最終反映後、販売案件のAPIは 	riz_generation_enabled=true、ag_status=ready、ag_reference_count=0、ecovery_success=false。ヘルスチェック全項目PASS、コンテナhealthy。関連34テストPASS・1 skipped、画面構文PASS。

@@ -554,6 +554,7 @@ def _triz_view(manager, pid):
         'adopt_allowed': False,
         'rag_status': 'off',
         'rag_reference_count': 0,
+        'triz_generation_enabled': False,
         'adopt_blocked_reason': 'P2完了までTRIZ採用は blocked。framed/candidates/tried は回復成功ではありません',
     }
     try:
@@ -564,6 +565,11 @@ def _triz_view(manager, pid):
             view['rag_status'] = 'ready'
     except (OSError, ValueError, KeyError, MemoryPolicyError):
         view['rag_status'] = 'unavailable'
+    try:
+        from app.automatic_triz import triz_generation_enabled
+        view['triz_generation_enabled'] = triz_generation_enabled(manager.memory.path, pid)
+    except (OSError, ValueError, KeyError):
+        view['triz_generation_enabled'] = False
     try:
         root = resolve(manager, pid, 'result/triz')
     except Exception:

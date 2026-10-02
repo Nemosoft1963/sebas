@@ -67,3 +67,15 @@ def test_readiness_reports_rag_ready_before_first_triz_failure(tmp_path):
     assert view['rag_status'] == 'ready'
     assert view['recovery_success'] is False
     assert view['rag_reference_count'] == 0
+
+
+def test_triz_generation_requires_explicit_project_switch(tmp_path):
+    from app.automatic_triz import triz_generation_enabled
+    memory_path = tmp_path / 'conversations.db'
+    assert triz_generation_enabled(memory_path, 'p') is False
+    (tmp_path / 'automatic_triz.json').write_text(
+        '{"projects":{"p":true,"other":false}}', encoding='utf-8'
+    )
+    assert triz_generation_enabled(memory_path, 'p') is True
+    assert triz_generation_enabled(memory_path, 'other') is False
+    assert triz_generation_enabled(memory_path, 'unlisted') is False
