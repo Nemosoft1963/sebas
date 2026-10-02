@@ -1690,3 +1690,10 @@ Validation:
 - Connected reviewed local RAG lessons to automatic TRIZ as reference data. Retrieval rejects unapproved, revoked, expired, other-project, old-input, and raw external records; a proposal or artifact trial is not business recovery.
 - Added an explicit project-scoped TRIZ generation switch independent of the normal execution mode. The production Web service is healthy; the enabled project's approved RAG lessons currently number zero, so no real-case recovery is claimed.
 - Focused validation: 35 passed, 1 skipped; JavaScript syntax and scripts/healthcheck.ps1 passed. GitHub Actions 	est and security passed for code commit 11774ce. Details and rollback: docs/CHANGELOG_2026-10-02_triz_rag_bridge.md.
+
+## 2026-10-03 P5 authenticated LAN proxy
+
+- Web is bound to localhost only; a dedicated nginx proxy exposes only tokened collection endpoints on a configured LAN address.
+- Proxy settings are baked into a local image so a network-drive bind mount is not required. Runtime token/denial checks and healthcheck passed.
+- 48G end-to-end sending remains unverified; current source-IP ACL is unrestricted and HTTP has no TLS. See docs/CHANGELOG_2026-10-03_p5_lan_proxy.md.
+- Public checkout full pytest: 1051 passed, 2 skipped, 1 warning (84.94 s). Focused P4/P5 check: 4 passed, 1 skipped.

@@ -1,0 +1,26 @@
+services:
+  sebas-lan-proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    image: local-cowork/sebas-lan-proxy:p5
+    container_name: local-cowork-sebas-lan-proxy
+    environment:
+      SEBAS_PROXY_TOKEN: ${SEBAS_PROXY_TOKEN:?SEBAS_PROXY_TOKEN is required}
+      SEBAS_ALLOWED_CLIENT: ${SEBAS_ALLOWED_CLIENT:-}
+    entrypoint: ["/bin/sh", "/opt/sebas/entrypoint.sh"]
+    ports:
+      - "${PROXY_BIND_IP:?PROXY_BIND_IP is required}:8099:8080"
+    networks:
+      - local-cowork-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --header='X-Sebas-Token: '$$SEBAS_PROXY_TOKEN http://127.0.0.1:8080/api/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  local-cowork-net:
+    external: true
+    name: localsaporter_local_cowork_net

@@ -36,10 +36,39 @@ $configuredOllamaModel = [regex]::Match($envContent, "(?m)^OLLAMA_MODEL=(.+)$").
 $workspaceValue = [regex]::Match($envContent, "(?m)^WORKSPACE_PATH=(.+)$").Groups[1].Value.Trim()
 $workspace = $workspaceValue.Replace("/", "\")
 Add-Result "Workspace" (Test-Path -LiteralPath $workspace) $workspace
-$composeConfig = docker compose config --format json 2>$null | ConvertFrom-Json
-$composeBindings = @($composeConfig.services.web.ports | Where-Object { [string]$_.published -eq "8099" } | ForEach-Object { [string]$_.host_ip })
-$allowed8099 = @(if ($env:SEBAS_ALLOWED_8099_BINDINGS) { $env:SEBAS_ALLOWED_8099_BINDINGS.Split(",") | ForEach-Object { $_.Trim() } } else { $composeBindings })
+$proxyConfigured = [regex]::IsMatch($envContent, '(?m)^SEBAS_PROXY_TOKEN=[A-Za-z0-9._~+=-]{16,}$') -and [regex]::IsMatch($envContent, '(?m)^PROXY_BIND_IP=[^\r\n]+')
+if ($proxyConfigured) {
+    $composeConfig = docker compose -f docker-compose.yml -f docker-compose.lan-off.yml -f docker-compose.proxy.yml config --format json 2>$null | ConvertFrom-Json
+} else {
+    $composeConfig = docker compose config --format json 2>$null | ConvertFrom-Json
+}
+$webBindings = @($composeConfig.services.web.ports | Where-Object { [string]$_.published -eq "8099" } | ForEach-Object { [string]$_.host_ip })
+$proxyBindings = @()
+if ($proxyConfigured) {
+    $proxyBindings = @($composeConfig.services.'sebas-lan-proxy'.ports | Where-Object { [string]$_.published -eq "8099" } | ForEach-Object { [string]$_.host_ip })
+}
+$allowed8099 = @($webBindings + $proxyBindings)
 $wildcardAllowed = @($allowed8099 | Where-Object { $_ -in @("0.0.0.0", "::", "[::]", "*") }).Count -gt 0
+Add-Result "Compose web loopback only" ($webBindings.Count -eq 1 -and $webBindings[0] -eq "127.0.0.1") ($webBindings -join ",")
+if ($proxyConfigured) {
+    Add-Result "Compose proxy LAN only" ($proxyBindings.Count -eq 1 -and $proxyBindings[0] -notin @("127.0.0.1", "0.0.0.0", "::", "[::]", "*", "")) ($proxyBindings -join ",")
+}
+function Check-RuntimeBinding {
+    param([string]$Name, [string]$PortKey, [string]$ExpectedIp)
+    $raw = docker inspect $Name --format '{{json .NetworkSettings.Ports}}' 2>$null
+    $ports = $raw | ConvertFrom-Json
+    $actual = @($ports.PSObject.Properties[$PortKey].Value | ForEach-Object { $_.HostIp })
+    Add-Result "Runtime binding $Name" ($actual.Count -eq 1 -and $actual[0] -eq $ExpectedIp) ($actual -join ",")
+}
+Check-RuntimeBinding "local-voice-ai-web" "8000/tcp" "127.0.0.1"
+if ($proxyConfigured) { Check-RuntimeBinding "local-cowork-sebas-lan-proxy" "8080/tcp" $proxyBindings[0] }
+if ($proxyConfigured) {
+    $proxyState = docker inspect local-cowork-sebas-lan-proxy --format '{{.State.Health.Status}}' 2>$null
+    Add-Result "Proxy healthy" ($proxyState -eq "healthy") "$proxyState"
+} else {
+    $proxyExists = @(docker ps --filter name=local-cowork-sebas-lan-proxy --format '{{.Names}}' 2>$null).Count -gt 0
+    Add-Result "Proxy configuration" (-not $proxyExists) "proxy not configured"
+}
 foreach ($port in 8099,3000,8000,8010) {
     $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
     # 8099 intentionally permits the configured LAN address; all other ports remain loopback-only.
