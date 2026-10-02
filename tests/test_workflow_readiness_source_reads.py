@@ -70,7 +70,8 @@ def test_rd_03_missing_stale_or_stale_check_error_allows_prepare(tmp_path):
         _vehicle(prepared=False, stale=True),
         _vehicle(prepared=True, stale=True),
     ):
-        action = _next_action("accuracy_blocked", vehicle, [], "p")
+        assert _next_action("accuracy_blocked", vehicle, [], "p")["auto_executable"] is False
+        action = _next_action("accuracy_blocked", vehicle, [], "p", allowed_actions={"prepare": {"allowed": True}})
         assert action["id"] == "prepare"
         assert action["auto_executable"] is True
 
