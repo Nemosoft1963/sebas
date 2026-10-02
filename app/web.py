@@ -3618,6 +3618,52 @@ async def import_success_cases_api(project_id: str, payload: ImportSuccessCasesP
         raise HTTPException(422, str(exc)) from exc
 
 
+class RecoveryStartPayload(BaseModel):
+    task_key: str = Field(min_length=1, max_length=100)
+    failure: dict = Field(default_factory=dict)
+    actor: str = Field(min_length=1, max_length=100)
+    input_version: str = Field(min_length=1, max_length=200)
+    source_hash: str = Field(default='', max_length=128)
+    ocr_needs_review: bool = False
+
+
+class RecoveryAdvancePayload(BaseModel):
+    next_state: str = Field(min_length=1, max_length=40)
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence: dict = Field(default_factory=dict)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.get('/api/projects/{project_id}/recovery')
+async def get_recovery_records(project_id: str):
+    require_project(project_id)
+    from app.recovery_record import list_records
+    return {'records': list_records(orchestrator, project_id)}
+
+
+@app.post('/api/projects/{project_id}/recovery/start')
+async def post_recovery_start(project_id: str, payload: RecoveryStartPayload):
+    require_project(project_id)
+    from app.recovery_record import start
+    try:
+        return start(orchestrator, project_id, payload.task_key, payload.failure,
+                     payload.actor.strip(), payload.input_version, payload.source_hash,
+                     payload.ocr_needs_review)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/recovery/{rid}/advance')
+async def post_recovery_advance(project_id: str, rid: str, payload: RecoveryAdvancePayload):
+    require_project(project_id)
+    from app.recovery_record import advance
+    try:
+        return advance(orchestrator, project_id, rid, payload.next_state,
+                       payload.reason, payload.evidence, payload.actor.strip())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 class RecoveryApplyPayload(BaseModel):
     reviewer: str = Field(min_length=1, max_length=100)
     note: str = Field(default='', max_length=4000)
