@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict
 
 from app.goal_review import ReviewStore, enabled, execution_gate, plan_snapshot, active_jobs, orchestration_view, send_allowed
+from app.pending_ledger import build as build_pending_ledger, decide_action
 from app.plan_feedback import issues_for
 from app.vehicle_workflow import applicable, goal_failures, load_input, source_reconciliation_report, sources
 
@@ -364,8 +365,7 @@ def _endpoint(pid, suffix):
     return f'/api/projects/{pid}{suffix}' if suffix else None
 
 
-def _next_action(phase, vehicle, issues, pid='', allowed_actions=None):
-    allowed_actions = allowed_actions or {}
+def _next_action(phase, vehicle, issues, pid='', allowed_actions=None, stop_reason=''):
     action = None
     if phase == 'running':
         action = {'id': 'wait', 'label': '処理の完了を待つ', 'endpoint': None, 'class': 'local_safe', 'auto_executable': False}
@@ -406,11 +406,8 @@ def _next_action(phase, vehicle, issues, pid='', allowed_actions=None):
         action = {'id': 'idle', 'label': '次の操作はありません', 'endpoint': None, 'class': 'local_safe', 'auto_executable': False}
 
     action_id = action['id']
-    rule = allowed_actions.get(action_id) or {}
-    is_allowed = bool(rule.get('allowed', False)) if isinstance(rule, dict) else bool(rule)
-    action['executable'] = is_allowed and action_id not in {'idle', 'wait'}
-    action['manual_executable'] = is_allowed and action_id not in {'idle', 'wait'}
-    action['reason'] = '' if is_allowed else (rule.get('reason') if isinstance(rule, dict) else '')
+    decision = decide_action(action_id, str(action.get('class') or ''), bool(action.get('auto_executable')), allowed_actions, stop_reason)
+    action.update(decision)
     return action
 
 
@@ -706,7 +703,19 @@ def build_readiness(manager, pid: str) -> dict:
 
     pipeline_stage, pipeline_action_id = resolve_pipeline_stage(mission, plan, revision, issues, gate, job)
     replan_fail = classify_replan_failure(revision)
-    next_act = _next_action(phase, vehicle, issues, pid, allowed_actions=allowed)
+    stop_reason = _stop_reason(phase, gate, vehicle, revision, issues, failures, plan)
+    next_act = _next_action(phase, vehicle, issues, pid, allowed_actions=allowed, stop_reason=stop_reason)
+    try:
+        pending = build_pending_ledger(manager, pid, allowed)
+        pending_items = pending['items']
+        pending_summary = pending['summary']
+    except Exception as exc:
+        # A failed ledger read must not become an empty or approved queue.
+        pending_items = []
+        pending_summary = {'status': 'unavailable', 'issue_count': None, 'unresolved_count': None,
+                           'external_pending_count': None, 'plan_status': 'unknown',
+                           'plan_approval_blocked': True, 'result_state': 'unknown',
+                           'result_approved': False, 'error': type(exc).__name__}
 
     return {
         'project_id': pid,
@@ -720,7 +729,7 @@ def build_readiness(manager, pid: str) -> dict:
         'pipeline_stage': pipeline_stage,
         'pipeline_next_action': pipeline_action_id,
         'replan_failure': replan_fail,
-        'stop_reason': _stop_reason(phase, gate, vehicle, revision, issues, failures, plan),
+        'stop_reason': stop_reason,
         'provisional': bool(not final_completed and artifact == 'provisional'),
         'final_completed': bool(final_completed),
         'next_action': next_act,
@@ -750,5 +759,7 @@ def build_readiness(manager, pid: str) -> dict:
             'controls': vehicle['controls'],
         },
         'triz': _triz_view(manager, pid),
+        'pending_ledger': pending_items,
+        'pending_summary': pending_summary,
         'revision_token': _token(signature, mission.get('plan_version'), vehicle.get('controls'), plan.get('status')),
     }

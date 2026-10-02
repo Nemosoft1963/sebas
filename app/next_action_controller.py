@@ -9,6 +9,7 @@ from typing import Callable
 from app.goal_completion_flag import enabled
 from app.goal_completion_store import GoalCompletionStore
 from app.goal_state_machine import read_goal_state
+from app.pending_ledger import decide_action
 from app.recovery_policy import RecoveryBudget, RecoveryStopped
 from app.workflow_readiness import UNIMPLEMENTED_ACTIONS, build_readiness
 
@@ -76,35 +77,20 @@ def _compute_from(manager, project_id: str, readiness: dict) -> dict:
     auto = bool(action.get("auto_executable"))
     label = action.get("label") or ""
     endpoint = action.get("endpoint")
-    allowed, reason = _allowed(readiness, action_id)
+    allowed_actions = readiness.get("allowed_actions") or {}
     if action_id == "confirm_allocation" and _prior_answers_available(manager, project_id):
         action_id = "apply_prior_answers"
         action_class = "local_safe"
         auto = True
-        allowed, reason = True, ""
+        # Keep the existing gate: prior answers do not override a blocked action.
+        allowed_actions = dict(allowed_actions)
+        allowed_actions[action_id] = allowed_actions.get(action_id, {"allowed": False, "reason": "確認事項の適用は許可されていません"})
         label = "既回答を条件一致の確認事項へ適用する"
         endpoint = None
 
-    if action_id in UNIMPLEMENTED_ACTION_IDS:
-        allowed = False
-        reason = next(
-            (item["reason"] for item in UNIMPLEMENTED_BLOCKED_ACTIONS if item["id"] == action_id),
-            reason or "automatic execution is not permitted",
-        )
-
-    # allowed_actions を判定元とし、手動実行可能と自動実行可能を分離 (P0-5)
-    if action_class == "local_safe":
-        executable = bool(allowed) and action_id not in {"idle", "wait"} and action_id not in UNIMPLEMENTED_ACTION_IDS
-    else:
-        executable = False
-    blocked = not executable
-
-    # 「人が操作すれば実行できる(manual_executable)」と「システムが自動実行できる(auto_executable)」を分離
-    auto_executable = bool(auto) and action_class == "local_safe" and executable
-    manual_executable = bool(allowed) and action_id not in {"idle", "wait"} and action_id not in UNIMPLEMENTED_ACTION_IDS
-
-    if not reason and blocked:
-        reason = str(readiness.get("stop_reason") or "automatic execution is not permitted")
+    decision = decide_action(action_id, action_class, auto, allowed_actions,
+                             str(readiness.get("stop_reason") or ""),
+                             unimplemented_ids=UNIMPLEMENTED_ACTION_IDS)
 
     state_view = read_goal_state(manager, project_id)
     return {
@@ -112,12 +98,13 @@ def _compute_from(manager, project_id: str, readiness: dict) -> dict:
         "label": label,
         "endpoint": endpoint,
         "action_class": action_class,
-        "auto_executable": auto_executable,
-        "manual_executable": manual_executable,
-        "executable": executable,
-        "allowed": allowed,
-        "reason": reason,
-        "blocked": blocked,
+        "auto_executable": decision["auto_executable"],
+        "manual_executable": decision["manual_executable"],
+        "executable": decision["executable"],
+        "allowed": decision["allowed"],
+        "reason": decision["reason"],
+        "blocked": decision["blocked"],
+        "navigable": decision["navigable"],
         "criterion": _criterion(readiness),
         "state": state_view.get("state") or "",
         "blocked_actions": list(UNIMPLEMENTED_BLOCKED_ACTIONS),

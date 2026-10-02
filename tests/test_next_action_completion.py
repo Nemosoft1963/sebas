@@ -296,7 +296,9 @@ def test_nac_14_chain_applies_then_stops_for_human_remainder(tmp_path):
         "applied": [{"issue_id": "i1"}], "skipped": [{"issue_id": "i2", "reason": "period_mismatch"}],
         "achieved": False, "human_accepted": False,
     }
-    with patch.object(nac, "build_readiness", return_value=ready("confirm_allocation", "human_fact", False)), \
+    readiness_with_permission = ready("confirm_allocation", "human_fact", False)
+    readiness_with_permission["allowed_actions"]["apply_prior_answers"] = {"allowed": True, "reason": ""}
+    with patch.object(nac, "build_readiness", return_value=readiness_with_permission), \
             patch.object(nac, "read_goal_state", state), \
             patch.object(nac, "_prior_answers_available", answers):
         row = nac.run_chain(m, "p", "prior-chain")
