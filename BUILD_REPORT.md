@@ -1697,3 +1697,16 @@ Validation:
 - Proxy settings are baked into a local image so a network-drive bind mount is not required. Runtime token/denial checks and healthcheck passed.
 - 48G end-to-end sending remains unverified; current source-IP ACL is unrestricted and HTTP has no TLS. See docs/CHANGELOG_2026-10-03_p5_lan_proxy.md.
 - Public checkout full pytest: 1051 passed, 2 skipped, 1 warning (84.94 s). Focused P4/P5 check: 4 passed, 1 skipped.
+
+
+## 2026-10-06 PJライフサイクル L1〜L5 反映
+
+## 検証
+
+- 隔離コピーの関連9テスト群: 283 passed / 2 failed（旧API拒否に伴う旧期待値）。期待値修正後の2件: 2 passed。合計285件の関連ケースは通過。
+- 本番Webイメージの再ビルド: 成功。Web起動後Docker healthはhealthy、`/api/health` はHTTP 200。新APIとJS3点の配信を確認。
+- Windows仮想環境の広域テスト: 1280 passed / 19 failed / 3 skipped。主な失敗はWindows仮想環境に`openpyxl`/`pypdf`がないこと。1件はWindowsコードページのsubprocessデコード失敗。全体の失敗0は未確認。
+- `scripts/healthcheck.ps1`: WebとOllama等はPASS。全体は11項目FAIL。以前から停止中のOpen WebUI、Computer、Google Publisher、LAN proxyとそのポートに由来する。
+- 実Gemini/外部AI通信、実PJの削除・復元、利用者によるUI受入は未実施。
+
+詳細: `docs/CHANGELOG_2026-10-06_PJ_LIFECYCLE_L1-L5.md`。検証後はWeb停止へ復帰。

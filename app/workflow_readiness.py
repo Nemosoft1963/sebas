@@ -734,6 +734,18 @@ def build_readiness(manager, pid: str) -> dict:
     except Exception:
         resolution_summary_view = {"total": None, "open_count": None, "by_cause": {}, "by_state": {}}
 
+    generation = {
+        'generation': 0, 'mode': '', 'mode_label': '', 'state': '',
+        'backup_id': '', 'input_version': '', 'started': False,
+        'start_state': '世代切替はまだありません',
+        'previous_backup_id': '', 'restore_hint': '',
+    }
+    try:
+        from app.project_generation import generation_overview
+        generation = generation_overview(manager.memory.path, pid) or generation
+    except Exception:
+        generation = dict(generation)
+
     return {
         'project_id': pid,
         'goal': mission.get('goal') or '',
@@ -779,5 +791,6 @@ def build_readiness(manager, pid: str) -> dict:
         'pending_ledger': pending_items,
         'pending_summary': pending_summary,
         'resolution_summary': resolution_summary_view,
+        'generation': generation,
         'revision_token': _token(signature, mission.get('plan_version'), vehicle.get('controls'), plan.get('status')),
     }

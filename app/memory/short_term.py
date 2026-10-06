@@ -322,6 +322,29 @@ class ShortTermMemory:
                 FROM projects p
                 ORDER BY CASE WHEN p.id='default' THEN 0 ELSE 1 END,p.created_at,p.name
             """).fetchall()
+        items = [dict(row) for row in rows]
+        # L3: 論理削除中のPJは通常一覧から除外する (データは残す)。
+        # 除外は読み取り専用のサイドカー参照のみ。失敗時は安全側で全件返す。
+        try:
+            from app.project_delete import is_deleted as _l3_is_deleted
+            items = [it for it in items
+                     if not _l3_is_deleted(self.path, str(it.get("id") or ""))]
+        except Exception:
+            pass
+        return items
+
+    def list_projects_including_deleted(self) -> list[dict]:
+        """管理・監査用: 論理削除中も含めた全件 (L3削除済み一覧と併用)。"""
+        with self._connect() as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute("""
+                SELECT p.id,p.name,p.context_text,p.workspace_path,p.created_at,p.updated_at,
+                       (SELECT COUNT(1) FROM turns t WHERE t.project_id=p.id) AS turn_count,
+                       (SELECT COUNT(1) FROM project_context_files f WHERE f.project_id=p.id) AS context_file_count,
+                       (SELECT COALESCE(SUM(LENGTH(f.content)),0) FROM project_context_files f WHERE f.project_id=p.id) AS context_file_chars
+                FROM projects p
+                ORDER BY CASE WHEN p.id='default' THEN 0 ELSE 1 END,p.created_at,p.name
+            """).fetchall()
         return [dict(row) for row in rows]
 
     def get_project(self, project_id: str = DEFAULT_PROJECT_ID) -> dict | None:

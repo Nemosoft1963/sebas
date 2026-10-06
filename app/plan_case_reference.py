@@ -179,6 +179,42 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
     plan_version = int(plan_version or 0)
     plan_signature = str(plan_signature or "").strip()
     extra = dict(extra_context or {})
+    # L3: 論理削除中のPJは計画・RAG参照から除外する。
+    try:
+        from app.project_delete import is_deleted as _l3_is_deleted
+        _mem = None
+        try:
+            _store = getattr(exp_memory, "store", None)
+            _root = getattr(getattr(_store, "path", None), "parent", None)
+            # experience.sqlite3 の親(experience_memory)の親が DATA_DIR 相当。
+            # memory.path は DATA_DIR/memory/conversations.db の規則。
+            if _root is not None:
+                from pathlib import Path as _Path
+                _mem = _Path(str(_root)).parent / "memory" / "conversations.db"
+        except Exception:
+            _mem = None
+        if _mem is not None:
+            try:
+                if _l3_is_deleted(_mem, project):
+                    result_none: dict = {
+                        "project": project,
+                        "plan_version": plan_version,
+                        "plan_signature": plan_signature,
+                        "input_version": input_version,
+                        "note": "参考（達成証拠ではない）。" + REFERENCE_DISCLAIMER,
+                        "criteria": [],
+                    }
+                    for entry in items:
+                        result_none["criteria"].append({
+                            "criterion_id": entry["criterion_id"], "statement": entry["statement"],
+                            "status": STATUS_UNAVAILABLE, "references": [],
+                            "reason": "論理削除中のため参照不可",
+                        })
+                    return result_none
+            except Exception:
+                pass
+    except Exception:
+        pass
     result: dict = {
         "project": project,
         "plan_version": plan_version,

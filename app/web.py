@@ -417,6 +417,23 @@ def require_project(project_id: str) -> dict:
     project = memory.get_project(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    # L3: 論理削除中のPJは通常の読出し対象から外す (データは残す)。
+    try:
+        from app.project_delete import is_deleted as _l3_is_deleted
+        if _l3_is_deleted(memory.path, project_id):
+            raise HTTPException(410, "このPJは論理削除されています(削除済み一覧から復元できます)")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return project
+
+
+def require_project_including_deleted(project_id: str) -> dict:
+    """L3削除系API用: 論理削除中も存在確認できる。"""
+    project = memory.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
     return project
 
 
@@ -2032,14 +2049,267 @@ async def delete_project_context_file(project_id: str, file_id: str):
 
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
-    await orchestrator.pause(project_id, cancelled=True)
+    # Legacy immediate deletion bypasses backup, restore, and cross-store cleanup.
+    # Refuse it; the lifecycle endpoints require an explicit preview and confirmation.
+    raise HTTPException(
+        409,
+        "従来の即時削除は無効です。プロジェクト管理の削除プレビューから"
+        "退避・復元可能な削除を実行してください。",
+    )
+
+
+def _lifecycle_backup_root() -> Path:
+    return DATA_DIR / "project_lifecycle_backups"
+
+
+class LifecycleBackupPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.get("/api/projects/{project_id}/lifecycle/delete-preview")
+async def lifecycle_delete_preview(project_id: str):
+    require_project(project_id)
+    from app.project_lifecycle_registry import build_delete_preview
+    return build_delete_preview(memory.path, project_id, WORKSPACE_ROOT, executions)
+
+
+@app.post("/api/projects/{project_id}/lifecycle/backup")
+async def lifecycle_backup(project_id: str, payload: LifecycleBackupPayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, "actor is required")
+    from app.project_lifecycle_backup import create_backup
+    from app.project_lifecycle_registry import has_running_jobs
+    jobs = has_running_jobs(memory.path, project_id, executions)
+    if jobs["has_running"]:
+        raise HTTPException(409, "実行中ジョブがあるため退避を拒否します。停止/取消後に再実行してください")
+    result = create_backup(memory.path, project_id, _lifecycle_backup_root(),
+                           workspace_root=WORKSPACE_ROOT, actor=actor)
+    if not result.get("ok"):
+        raise HTTPException(409, str(result.get("reason") or "backup failed"))
+    memory.add_event(
+        project_id, "lifecycle_backup_created",
+        f"PJ退避を作成: {result['backup_id']}",
+        detail=json.dumps({"backup_id": result["backup_id"],
+                           "total_rows": result["total_rows"]}, ensure_ascii=False),
+    )
+    return result
+
+
+@app.get("/api/projects/{project_id}/lifecycle/backups")
+async def lifecycle_backups(project_id: str):
+    require_project(project_id)
+    from app.project_lifecycle_backup import list_backups
+    return {"project_id": project_id,
+            "backups": list_backups(_lifecycle_backup_root(), project_id)}
+
+
+@app.post("/api/projects/{project_id}/lifecycle/backups/{backup_id}/verify")
+async def lifecycle_backup_verify(project_id: str, backup_id: str):
+    require_project(project_id)
+    safe = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in backup_id)[:128]
+    if not safe or safe != backup_id:
+        raise HTTPException(400, "invalid backup_id")
+    manifest_path = _lifecycle_backup_root() / backup_id / "manifest.json"
+    if not manifest_path.is_file():
+        raise HTTPException(404, "backup not found")
+    from app.project_lifecycle_backup import verify_backup
+    result = verify_backup(manifest_path)
+    if str(result.get("project_id") or "") != project_id:
+        raise HTTPException(409, "backup belongs to another project")
+    return result
+
+
+class LifecycleInitPayload(BaseModel):
+    mode: str = Field(pattern="^(replan|rerun|fresh)$")
+    preview_token: str = Field(min_length=1, max_length=256)
+    project_name: str = Field(min_length=1, max_length=120)
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(default="", max_length=2000)
+    idempotency_key: str = Field(default="", max_length=128)
+
+
+class LifecycleDeleteRequestPayload(BaseModel):
+    preview_token: str = Field(min_length=1, max_length=256)
+    project_name: str = Field(min_length=1, max_length=120)
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(default="", max_length=2000)
+    idempotency_key: str = Field(default="", max_length=128)
+    retention_days: int | None = Field(default=None, ge=0, le=365)
+
+
+class LifecycleDeleteRestorePayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    idempotency_key: str = Field(default="", max_length=128)
+
+
+class LifecyclePurgePayload(BaseModel):
+    purge_token: str = Field(min_length=1, max_length=256)
+    project_name: str = Field(min_length=1, max_length=120)
+    actor: str = Field(min_length=1, max_length=100)
+    idempotency_key: str = Field(default="", max_length=128)
+
+
+@app.get("/api/projects/{project_id}/lifecycle/delete-request-preview")
+async def lifecycle_delete_request_preview(project_id: str):
+    require_project_including_deleted(project_id)
+    from app.project_delete import build_delete_request_preview
+    return build_delete_request_preview(memory.path, project_id, WORKSPACE_ROOT,
+                                        executions)
+
+
+@app.post("/api/projects/{project_id}/lifecycle/delete-request")
+async def lifecycle_delete_request(project_id: str, payload: LifecycleDeleteRequestPayload):
+    require_project_including_deleted(project_id)
+    if not payload.actor.strip():
+        raise HTTPException(422, "actor is required")
+    from app.project_delete import request_delete
+    result = request_delete(
+        memory.path, project_id, preview_token=payload.preview_token,
+        project_name=payload.project_name.strip(), actor=payload.actor.strip(),
+        reason=payload.reason.strip(),
+        idempotency_key=payload.idempotency_key.strip(),
+        workspace_root=WORKSPACE_ROOT, backup_root=_lifecycle_backup_root(),
+        executions=executions, retention_days=payload.retention_days)
+    if not result.get("ok"):
+        code = result.get("code") or ""
+        if code in ("LEASE_BUSY",):
+            raise HTTPException(409, str(result.get("reason") or "busy"))
+        raise HTTPException(409, str(result.get("reason") or "delete-request failed"))
+    return result
+
+
+@app.post("/api/projects/{project_id}/lifecycle/delete-restore")
+async def lifecycle_delete_restore(project_id: str, payload: LifecycleDeleteRestorePayload):
+    require_project_including_deleted(project_id)
+    if not payload.actor.strip():
+        raise HTTPException(422, "actor is required")
+    from app.project_delete import restore_deleted
+    result = restore_deleted(
+        memory.path, project_id, actor=payload.actor.strip(),
+        idempotency_key=payload.idempotency_key.strip(),
+        workspace_root=WORKSPACE_ROOT, backup_root=_lifecycle_backup_root())
+    if not result.get("ok"):
+        raise HTTPException(409, str(result.get("reason") or "restore failed"))
+    return result
+
+
+@app.get("/api/projects/{project_id}/lifecycle/purge-preview")
+async def lifecycle_purge_preview(project_id: str):
+    require_project_including_deleted(project_id)
+    from app.project_delete import build_purge_preview
+    return build_purge_preview(memory.path, project_id, WORKSPACE_ROOT)
+
+
+@app.post("/api/projects/{project_id}/lifecycle/purge")
+async def lifecycle_purge(project_id: str, payload: LifecyclePurgePayload):
+    require_project_including_deleted(project_id)
+    if not payload.actor.strip():
+        raise HTTPException(422, "actor is required")
+    from app.project_delete import purge_deleted
+    result = purge_deleted(
+        memory.path, project_id, purge_token=payload.purge_token,
+        project_name=payload.project_name.strip(), actor=payload.actor.strip(),
+        idempotency_key=payload.idempotency_key.strip(),
+        workspace_root=WORKSPACE_ROOT, backup_root=_lifecycle_backup_root())
+    if not result.get("ok"):
+        raise HTTPException(409, str(result.get("reason") or "purge failed"))
+    return result
+
+
+@app.get("/api/projects/deleted/list")
+async def lifecycle_deleted_list():
+    from app.project_delete import list_deleted
+    states = list_deleted(memory.path)
     try:
-        deleted_turns = memory.delete_project(project_id)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(404, "Project not found") from exc
-    return {"project_id": project_id, "deleted_turns": deleted_turns}
+        projects = memory.list_projects_including_deleted()
+    except Exception:
+        projects = memory.list_projects()
+    names = {p["id"]: p.get("name", "") for p in projects}
+    for st in states:
+        st["project_name"] = names.get(st.get("project_id", ""), "")
+    return {"deleted": states}
+
+
+class LifecycleRestorePayload(BaseModel):
+    backup_id: str = Field(min_length=1, max_length=128)
+    actor: str = Field(min_length=1, max_length=100)
+    idempotency_key: str = Field(default="", max_length=128)
+
+
+@app.get("/api/projects/{project_id}/lifecycle/reset-preview")
+async def lifecycle_reset_preview(project_id: str, mode: str = "replan"):
+    require_project(project_id)
+    if mode not in ("replan", "rerun", "fresh"):
+        raise HTTPException(400, "unknown mode")
+    from app.project_generation import build_reset_preview
+    preview = build_reset_preview(memory.path, project_id, mode, WORKSPACE_ROOT,
+                                  executions)
+    # 秘密値は返さない: トークン自体は確定に必要だが、ログには残さない。
+    return preview
+
+
+@app.post("/api/projects/{project_id}/lifecycle/initialize")
+async def lifecycle_initialize(project_id: str, payload: LifecycleInitPayload):
+    require_project(project_id)
+    if not payload.actor.strip():
+        raise HTTPException(422, "actor is required")
+    from app.project_generation import initialize_project
+    result = initialize_project(
+        memory.path, project_id, payload.mode,
+        preview_token=payload.preview_token,
+        project_name=payload.project_name.strip(),
+        actor=payload.actor.strip(), reason=payload.reason.strip(),
+        idempotency_key=payload.idempotency_key.strip(),
+        workspace_root=WORKSPACE_ROOT, backup_root=_lifecycle_backup_root(),
+        executions=executions)
+    if not result.get("ok"):
+        code = result.get("code") or ""
+        if code in ("LEASE_BUSY",):
+            raise HTTPException(409, str(result.get("reason") or "busy"))
+        if "preview token" in str(result.get("reason") or "") or "PJ名" in str(result.get("reason") or ""):
+            raise HTTPException(409, str(result.get("reason")))
+        if "既定PJ" in str(result.get("reason") or ""):
+            raise HTTPException(409, str(result.get("reason")))
+        if "実行中" in str(result.get("reason") or "") or "未確定" in str(result.get("reason") or "") or "送信待ち" in str(result.get("reason") or ""):
+            raise HTTPException(409, str(result.get("reason")))
+        raise HTTPException(409, str(result.get("reason") or "initialize failed"))
+    return result
+
+
+@app.post("/api/projects/{project_id}/lifecycle/restore-generation")
+async def lifecycle_restore_generation(project_id: str, payload: LifecycleRestorePayload):
+    require_project(project_id)
+    if not payload.actor.strip():
+        raise HTTPException(422, "actor is required")
+    from app.project_generation import restore_generation
+    result = restore_generation(
+        memory.path, project_id, payload.backup_id.strip(),
+        actor=payload.actor.strip(),
+        idempotency_key=payload.idempotency_key.strip(),
+        workspace_root=WORKSPACE_ROOT, backup_root=_lifecycle_backup_root())
+    if not result.get("ok"):
+        raise HTTPException(409, str(result.get("reason") or "restore failed"))
+    return result
+
+
+@app.get("/api/projects/{project_id}/lifecycle/generations")
+async def lifecycle_generations(project_id: str):
+    require_project(project_id)
+    from app.project_generation import list_generations
+    return {"project_id": project_id,
+            "generations": list_generations(memory.path, project_id)}
+
+
+@app.get("/static/project_reset.js")
+async def project_reset_js():
+    return FileResponse(ROOT / "app" / "static" / "project_reset.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/static/project_delete.js")
+async def project_delete_js():
+    return FileResponse(ROOT / "app" / "static" / "project_delete.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
 
 async def local_model_catalog() -> list[dict]:
@@ -4203,6 +4473,84 @@ async def advance_project_resolution(project_id: str, resolution_id: str,
 @app.get("/static/resolution_cards.js")
 async def resolution_cards_js():
     return FileResponse(ROOT / "app" / "static" / "resolution_cards.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/static/plan_review_loop.js")
+async def plan_review_loop_js():
+    return FileResponse(ROOT / "app" / "static" / "plan_review_loop.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
+
+class AutoLoopPreviewPayload(BaseModel):
+    providers: list[str] = Field(default_factory=list, max_length=5)
+
+
+class AutoLoopStartPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    providers: list[str] = Field(min_length=1, max_length=5)
+    public_summary: str = Field(default="", max_length=12000)
+    idempotency_key: str = Field(default="", max_length=128)
+
+
+class AutoLoopCancelPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.post('/api/projects/{project_id}/goal-review/auto-loop/preview')
+async def preview_auto_loop(project_id: str, payload: AutoLoopPreviewPayload):
+    require_project(project_id)
+    from app.plan_review_loop import preview_run
+    try:
+        return preview_run(orchestrator, project_id, payload.providers)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/auto-loop/start')
+async def start_auto_loop(project_id: str, payload: AutoLoopStartPayload):
+    require_project(project_id)
+    from app.plan_review_loop import start_run
+    try:
+        return start_run(orchestrator, project_id, payload.actor, payload.providers,
+                         payload.public_summary, payload.idempotency_key)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/auto-loop/{run_id}/run')
+async def run_auto_loop(project_id: str, run_id: str):
+    require_project(project_id)
+    from app.plan_review_loop import run_loop
+    try:
+        return await run_loop(orchestrator, project_id, run_id)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/projects/{project_id}/goal-review/auto-loop/runs')
+async def list_auto_loop_runs(project_id: str):
+    require_project(project_id)
+    from app.plan_review_loop import list_runs, public_view
+    return {'runs': [public_view(x) for x in list_runs(orchestrator, project_id)]}
+
+
+@app.get('/api/projects/{project_id}/goal-review/auto-loop/{run_id}')
+async def get_auto_loop_run(project_id: str, run_id: str):
+    require_project(project_id)
+    from app.plan_review_loop import get_run, public_view
+    try:
+        return public_view(get_run(orchestrator, project_id, run_id))
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/auto-loop/{run_id}/cancel')
+async def cancel_auto_loop(project_id: str, run_id: str, payload: AutoLoopCancelPayload):
+    require_project(project_id)
+    from app.plan_review_loop import cancel_run
+    try:
+        return cancel_run(orchestrator, project_id, run_id, payload.actor.strip())
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')

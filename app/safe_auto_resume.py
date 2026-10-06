@@ -568,6 +568,17 @@ def _post_completion_reevaluation(manager, project_id: str, task_key: str, run_r
 
 
 async def resume(manager, project_id: str, executor=None, retry_limit: int = MAX_RETRIES) -> dict:
+    """Run only trusted local document steps; all other steps wait for a human.
+
+    L3: 論理削除中のPJは自動再開の起動対象から除外する。
+    """
+    try:
+        from app.project_delete import is_deleted as _l3_is_deleted
+        if _l3_is_deleted(manager.memory.path, project_id):
+            return {"status": "excluded", "reason": "論理削除中のため自動再開しません",
+                    "executed": [], "waiting_human": [], "failed": []}
+    except Exception:
+        pass
     """Run only trusted local document steps; all other steps wait for a human."""
     if os.environ.get("LOCALSAPORTER_AUTO_RESUME_AVAILABLE") != "1":
         return {"status": "disabled", "reason": "server feature flag is off", "executed": [], "waiting_human": [], "failed": []}
