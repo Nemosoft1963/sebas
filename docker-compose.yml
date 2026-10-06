@@ -32,6 +32,7 @@ services:
       XAI_MODEL: ${XAI_MODEL:-grok-4.6}
       LLAMA_API_KEY: ${LLAMA_API_KEY:-}
       META_MODEL: ${META_MODEL:-}
+      META_API_URL: ${META_API_URL:-}
       EXTERNAL_AI_TIMEOUT: ${EXTERNAL_AI_TIMEOUT:-180}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -52,9 +53,9 @@ services:
       CANVA_API_BASE: ${CANVA_API_BASE:-https://api.canva.com/rest/v1}
       CANVA_API_TIMEOUT: ${CANVA_API_TIMEOUT:-30}
       CANVA_API_MAX_ATTEMPTS: ${CANVA_API_MAX_ATTEMPTS:-4}
-      PUBLIC_OPERATOR_NAME: ${PUBLIC_OPERATOR_NAME:-Example Operator}
-      PUBLIC_OPERATOR_URL: ${PUBLIC_OPERATOR_URL:-https://example.com/}
-      PUBLIC_OPERATOR_ADDRESS: ${PUBLIC_OPERATOR_ADDRESS:-Example address}
+      PUBLIC_OPERATOR_NAME: ${PUBLIC_OPERATOR_NAME:-弘和運輸有限会社}
+      PUBLIC_OPERATOR_URL: ${PUBLIC_OPERATOR_URL:-https://kouwatrsp.com/}
+      PUBLIC_OPERATOR_ADDRESS: ${PUBLIC_OPERATOR_ADDRESS:-〒123-0864 東京都足立区鹿浜4-9-8 2階}
       GOOGLE_BROWSER_INTERNAL_URL: http://google-publisher-browser:8000
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -62,7 +63,7 @@ services:
       - "127.0.0.1:8099:8000"
     volumes:
       - app_data:/data
-      - "${WORKSPACE_PATH:-C:/Users/example/LocalCowork/workspace}:/workspace"
+      - "${WORKSPACE_PATH:-C:/Users/kanto/LocalCowork/workspace}:/workspace"
     networks:
       - local-cowork-net
     restart: unless-stopped
@@ -102,7 +103,7 @@ services:
       - "127.0.0.1:${CPTR_PORT:-8000}:8000"
     volumes:
       - cptr_data:/data
-      - "${WORKSPACE_PATH:-C:/Users/example/LocalCowork/workspace}:/workspace"
+      - "${WORKSPACE_PATH:-C:/Users/kanto/LocalCowork/workspace}:/workspace"
     working_dir: /workspace
     networks:
       - local-cowork-net

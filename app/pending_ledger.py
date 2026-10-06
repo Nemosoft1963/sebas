@@ -395,6 +395,17 @@ def build(manager, pid: str, allowed_actions: dict | None = None) -> dict:
 
     # 台帳は状態の参照専用。人間の確認・承認を実行可能と表示しない。
     open_items = [x for x in items if str(x.get("state") or "") not in {"approved", "executed", "resolved"}]
+    try:
+        from app.plan_repair_loop import repair_gate_summary
+        repair_gate = repair_gate_summary(manager, pid)
+    except Exception:
+        repair_gate = {"blocking": False, "reason": "", "open_runs": []}
+    try:
+        from app.resolution_coordinator import summary as resolution_summary
+
+        resolution = resolution_summary(manager, pid) or {}
+    except Exception:
+        resolution = {"total": None, "open_count": None, "by_cause": {}, "by_state": {}}
     summary = {
         "project_id": pid,
         "plan_signature": signature,
@@ -410,6 +421,14 @@ def build(manager, pid: str, allowed_actions: dict | None = None) -> dict:
         "external_waiting_zero": None if actions_unavailable else pending_external == 0,
         "result_state": result_state,
         "result_approved": result_state == "approved",
+        "repair_blocking": bool(repair_gate.get("blocking")),
+        "repair_reason": str(repair_gate.get("reason") or ""),
+        "repair_open_runs": list(repair_gate.get("open_runs") or []),
+        # P2: 残件の件数と主な原因別内訳(読み取り専用・判定は変えない)。
+        "resolution_total": resolution.get("total"),
+        "resolution_open_count": resolution.get("open_count"),
+        "resolution_by_cause": dict(resolution.get("by_cause") or {}),
+        "resolution_by_state": dict(resolution.get("by_state") or {}),
     }
     return {"items": items, "summary": summary}
 

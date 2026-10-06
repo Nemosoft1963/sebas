@@ -268,3 +268,7 @@ def test_ui_separates_provider_outcomes_and_connection_errors():
     assert 'connection_failed' in py
     assert '接続設定の問題' in py
     assert wr.count('innerHTML') == 0
+    assert "planDetails.open=true" in js
+    assert "box.querySelectorAll('button').forEach(x=>x.disabled=false)" in js
+    assert "el('goalPlanSend').disabled=!state.send_allowed" in js
+    assert "finally{el('goalReviewRefresh').disabled=false;}" in js

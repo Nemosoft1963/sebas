@@ -1003,6 +1003,31 @@ class ProjectOrchestrator:
     async def _generate_structured_plan(self, project_id: str, criteria: list[str]) -> dict:
         mission = self.memory.get_mission(project_id)
         project = self.memory.get_project(project_id)
+        # P1-B: 両経路で同じ統一IFから事例参照を取得する(定型/アンカー側)。
+        # 必須工程・検証条件は事例で上書きしない(参考記録のみ)。失敗しても続行する。
+        try:
+            from app.plan_case_reference import collect_for_current_plan as _collect_cases
+            from app.plan_case_reference import format_for_prompt as _format_hints
+            _case_ref_result = _collect_cases(self, project_id, criteria_input=criteria)
+            _case_hints = _format_hints(_case_ref_result)
+        except Exception:
+            _case_ref_result = {'criteria': []}
+            _case_hints = {}
+        try:
+            self.memory.add_event(
+                project_id, 'plan_case_reference',
+                '計画生成前に事例参照を照合(参考・達成証拠ではない)',
+                detail=__import__('json').dumps(
+                    {'criteria': [{'criterion_id': c.get('criterion_id'),
+                                   'status': c.get('status'),
+                                   'used': [r.get('case_id') for r in c.get('references', [])
+                                            if r.get('used_or_rejected') == 'used'],
+                                   'rejected': [r.get('case_id') for r in c.get('references', [])
+                                                if r.get('used_or_rejected') == 'rejected']}
+                                  for c in _case_ref_result.get('criteria', [])]},
+                    ensure_ascii=False)[:6000])
+        except Exception:
+            pass
         if len(criteria) > MAX_CRITERIA:
             raise ValueError("達成条件が18件を超えています。条件を捨てずに複数計画へ分割してください")
         _, files = self.static_context(project)
@@ -1032,6 +1057,7 @@ class ProjectOrchestrator:
                     + '\n原本は参考資料です。原本の題名に引きずられず、今回の達成条件に固有の題名・見出しを作成し、先行タスクと同じ題名を繰り返さないでください。'
                     + '\n登録原本（ローカルのみ）:\n' + source_context
                     + '\n前回の形式エラー: ' + errors
+                    + ('\n\n' + _case_hints.get(f'SC{index:02d}', '') if _case_hints.get(f'SC{index:02d}', '') else '')
                 )
                 try:
                     from app.planning_rollout import enabled, outcome_proposal
@@ -1273,6 +1299,27 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
 5タスク以上の計画は、最後に result/final_verification.md を作る「最終検証」タスクを必ず置いてください。
 先行タスクが生成せずWorkspaceにも存在しない result/ ファイルを入力として参照しないでください。Excel数式や並べ替え機能を要求しないでください。
 外部AI許可: {'あり' if mission['allow_external_ai'] else 'なし'}"""
+        # P1-B: 自由計画(LLM)経路も同じ統一IFから事例参照を取得する。
+        # 事例は「工程候補の参考」として最小限に渡す。事例0件の挙動は変えない。
+        try:
+            from app.plan_case_reference import collect_for_current_plan as _collect_free
+            from app.plan_case_reference import format_for_prompt as _format_free
+            _free_ref = _collect_free(self, project_id)
+            _free_hints = [text for text in _format_free(_free_ref).values() if text]
+            if _free_hints:
+                prompt += "\n\n" + "\n\n".join(_free_hints[:8])
+            try:
+                self.memory.add_event(
+                    project_id, 'plan_case_reference',
+                    '計画生成前に事例参照を照合(参考・達成証拠ではない)',
+                    detail=__import__('json').dumps(
+                        {'criteria': [{'criterion_id': c.get('criterion_id'),
+                                       'status': c.get('status')} for c in
+                                      _free_ref.get('criteria', [])]}, ensure_ascii=False)[:4000])
+            except Exception:
+                pass
+        except Exception:
+            pass
         response = await self._local_complete(PLANNER_SYSTEM_PROMPT, prompt)
         plan = await self._parse_plan_with_repair(
             project_id, response, mission["allow_external_ai"], "draft",
@@ -1473,6 +1520,8 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         if project_id in self.planning_projects:
             raise ValueError('計画生成中は承認できません')
         mission = self.memory.get_mission(project_id)
+        from app.plan_repair_loop import approval_gate
+        approval_gate(self, project_id)
         from app.goal_review import development_blockers
         if development_blockers(self, project_id):
             raise ValueError("未解決・追加開発・業務事実の指摘が残る計画は承認できません")
@@ -1500,6 +1549,8 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
     async def start(self, project_id: str) -> dict:
         from app.goal_review import require_review
         require_review(self, project_id)
+        from app.plan_repair_loop import approval_gate
+        approval_gate(self, project_id)
         if project_id in self.planning_projects:
             raise ValueError('計画生成中は実行を開始できません')
         existing = self.workers.get(project_id)
@@ -4210,4 +4261,3 @@ Python/pandas等、許可されていない実行を実施済みと記載して�
             )
             report = f"# {project['name']} 未完了報告\n\n## 目標\n{mission['goal']}\n\n## タスク成果\n\n{results}"
             return report, "failed", ["最終目標評価を生成できませんでした"]
-

@@ -591,6 +591,14 @@ def revoke_result(manager,pid,signature,reviewer,notes):
         recipe=dict(recipe);recipe['status']='revoked'
         store.put(pid,'executable_recipe',signature,recipe)
     ExperienceStore(Path(manager.memory.path).parent/'experience_memory'/'experience.sqlite3').review(pid,row['experience_id'],'revoked',reviewer,notes,0)
+    # P1-A: 撤回時は正本で即時不採用とし索引から削除する。検索結果の再照合は維持される。
+    try:
+        from app.experience_memory import configured_memory
+        setting=configured_memory(manager.memory.path,pid)
+        if setting:
+            setting[0].remove_from_index(pid,row['experience_id'],reviewer,notes)
+    except Exception:
+        pass
     return row
 
 
@@ -626,10 +634,14 @@ def all_reviews_history(manager, pid):
 
 def execution_gate(manager,pid):
     try:
+        from app.plan_repair_loop import approval_gate
+        approval_gate(manager, pid)
         require_review(manager,pid)
         return {'blocked':False,'reason':''}
     except ValueError as exc:
         text=str(exc)
+        if '修復ループ' in text:
+            return {'blocked':True,'reason':text}
         if '追加開発' in text or '業務事実' in text:
             return {'blocked':True,'reason':text}
         if '接続設定' in text or '接続に失敗' in text:

@@ -27,11 +27,11 @@ def test_auto_resume_api_disabled_enable_run_and_actor_validation(tmp_path, monk
         mocked.assert_awaited_once_with(manager, "p")
 
     assert client.post("/api/projects/p/auto-resume/enable", json={"enabled": True}).status_code == 422
-    assert client.post("/api/projects/p/auto-resume/enable",
-                       json={"enabled": True, "actor": "operator"}).json()["enabled"] is True
-    with patch("app.safe_auto_resume.resume", AsyncMock(return_value={"status": "completed", "executed": ["safe"]})):
-        response = client.post("/api/projects/p/auto-resume/run")
-    assert response.status_code == 200 and response.json()["executed"] == ["safe"]
+    # 計画本体を持たない案件は運用フラグがONでも有効化できない。
+    denied = client.post("/api/projects/p/auto-resume/enable",
+                         json={"enabled": True, "actor": "operator"})
+    assert denied.status_code == 409
+    assert client.get("/api/projects/p/auto-resume").json()["enabled"] is False
 
 
 def test_auto_resume_api_server_flag_off_is_read_only(tmp_path, monkeypatch):

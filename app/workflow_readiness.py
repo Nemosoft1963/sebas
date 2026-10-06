@@ -455,9 +455,19 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
     failure = classify_replan_failure(revision) or {}
     blocker_label = failure.get('label') or '未解決の指摘'
     draft_ok = revision.get('status') == 'draft' and not blockers and revision.get('changes')
+    try:
+        from app.plan_repair_loop import repair_gate_summary
+        repair = repair_gate_summary(manager, pid) or {}
+        repair_blocking = bool(repair.get('blocking'))
+        repair_reason = str(repair.get('reason') or '')
+    except Exception:
+        repair_blocking = True
+        repair_reason = '修復ループ状態を確認できません'
     start_reason = ''
     if running:
         start_reason = busy
+    elif repair_blocking:
+        start_reason = repair_reason or '修復ループ未完了のため実行を開始できません'
     elif blockers:
         start_reason = blocker_label + 'があるため実行を開始できません'
     elif gate.get('blocked'):
@@ -480,8 +490,8 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
             busy or ('外部AIの許可・接続が揃っていません' if not send_allowed(manager, pid) else ''),
         ),
         'approve_plan': _action(
-            mission.get('status') == 'planning' and not running and not blockers,
-            busy or (blocker_label + 'を解消してから計画を承認してください' if blockers else '承認できる計画がありません'),
+            mission.get('status') == 'planning' and not running and not blockers and not repair_blocking,
+            busy or (repair_reason if repair_blocking else blocker_label + 'を解消してから計画を承認してください' if blockers else '承認できる計画がありません'),
         ),
         'start': _action(not start_reason, start_reason),
         'cancel_queue': _action(
@@ -716,6 +726,13 @@ def build_readiness(manager, pid: str) -> dict:
                            'external_pending_count': None, 'plan_status': 'unknown',
                            'plan_approval_blocked': True, 'result_state': 'unknown',
                            'result_approved': False, 'error': type(exc).__name__}
+    # P2: 残件の件数と主な原因別内訳(読み取り専用・判定は変えない)。
+    try:
+        from app.resolution_coordinator import summary as resolution_summary
+
+        resolution_summary_view = resolution_summary(manager, pid) or {}
+    except Exception:
+        resolution_summary_view = {"total": None, "open_count": None, "by_cause": {}, "by_state": {}}
 
     return {
         'project_id': pid,
@@ -761,5 +778,6 @@ def build_readiness(manager, pid: str) -> dict:
         'triz': _triz_view(manager, pid),
         'pending_ledger': pending_items,
         'pending_summary': pending_summary,
+        'resolution_summary': resolution_summary_view,
         'revision_token': _token(signature, mission.get('plan_version'), vehicle.get('controls'), plan.get('status')),
     }

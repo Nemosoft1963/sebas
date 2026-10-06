@@ -42,10 +42,10 @@ def test_google_sites_copy_and_manifest_include_required_public_content():
     assert item["call_to_action"] in copy
     assert item["google_form_url"] in copy
     assert "情報の取扱い" in copy
-    assert manifest['operator']['name'] == 'Example Operator'
-    assert manifest['operator']['url'] == 'https://example.com/'
+    assert manifest['operator']['name'] == '弘和運輸有限会社'
+    assert manifest['operator']['url'] == 'https://kouwatrsp.com/'
     assert '運営会社' in copy
-    assert manifest['operator']['url'] in copy
+    assert 'https://kouwatrsp.com/' in copy
 
 
 def test_google_sites_automation_payload_requires_manual_publish():

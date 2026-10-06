@@ -135,8 +135,10 @@ async def test_provider_http_integration(tmp_path,monkeypatch):
     assert len(calls)==1
 
 
-def test_local_vector_index_persistence_and_filter(tmp_path,monkeypatch):
-    class LocalEmbedding:
+def test_real_chroma_persistence_and_filter(tmp_path,monkeypatch):
+    pytest.importorskip('langchain_chroma')
+    from langchain_core.embeddings import Embeddings
+    class LocalEmbedding(Embeddings):
         def embed_documents(self,texts):return [self.embed_query(t) for t in texts]
         def embed_query(self,t):return [float('cap' in t),float('quote' in t),0.1]
     config={'embedding_model':'deterministic-test-v1'}
@@ -304,16 +306,16 @@ async def test_import_success_cases_api_and_rag(tmp_path):
         assert data_mixed['failed'][0]['index'] == 1
         assert 'error' in data_mixed['failed'][0]
 
-        # (j) 登録された行が既存の経験RAG参照系 (reindex や プロンプト補強) から見えること
+        # (j) 新規取込は候補であり、人間承認と原本再照合までRAGへ渡らない。
         from app.experience_memory import configured_memory
         exp_mem, mode = configured_memory(db_path, p_enforce)
-        verified_rows = exp_mem.store.list(p_enforce, verified_only=True)
-        assert len(verified_rows) == 2
-        exp_mem.index = Index([r['id'] for r in verified_rows])
+        assert exp_mem.store.list(p_enforce, verified_only=True) == []
+        candidate_rows = exp_mem.store.list_candidates(p_enforce)
+        assert len(candidate_rows) == 2
+        exp_mem.index = Index([r['id'] for r in candidate_rows])
         with memory_scope(exp_mem, p_enforce, 'v1', mode='enforce'):
             augmented = await augment_local_prompt('ライン停止の対策')
-            assert '過去の経験' in augmented
-            assert any(r['content'] in augmented for r in verified_rows)
+            assert all(r['id'] not in augmented for r in candidate_rows)
     finally:
         web_module.memory = orig_memory
         web_module.DB_PATH = orig_db_path

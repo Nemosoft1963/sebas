@@ -1,4 +1,4 @@
-import asyncio,numpy as np,sounddevice as sd
+﻿import asyncio,numpy as np,sounddevice as sd
 class VAD:
  def __init__(self,t):self.t=t
  def speech(self,x):return bool(x.size and np.sqrt(np.mean(np.square(x.astype(np.float32))))>=self.t)

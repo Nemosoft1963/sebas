@@ -47,6 +47,6 @@ async def build_status(llm, model: str, open_webui_url: str, computer_url: str) 
         "security": {
             "localhost_only": True,
             "docker_socket": False,
-            "host_mount": "C:/Users/example/LocalCowork/workspace",
+            "host_mount": "C:/Users/kanto/LocalCowork/workspace",
         },
     }

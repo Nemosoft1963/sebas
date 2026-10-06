@@ -19,7 +19,78 @@ function init(){
 
  const desc=document.createElement('p');
  desc.className='experience-import-desc';
- desc.textContent='収集エージェントが集めた成功事例を、内容を確認したうえで経験RAGへ登録します。登録は取り消せません。人が中身を見て確認した場合だけ、次に進めます。';
+ desc.textContent='収集エージェントが集めた成功事例は、まず候補(candidate)として受領されます。RAG検索・計画・TRIZには反映されません。原本参照・適用条件・確認記録を満たしたものだけ、人が承認できます。確認者名は本人確認を保証しません。';
+
+ const candidateSection=document.createElement('div');
+ candidateSection.id='experienceCandidateSection';
+ candidateSection.className='experience-candidate-section';
+ const candidateHeading=document.createElement('h3');
+ candidateHeading.textContent='承認待ち候補(candidate)';
+ const candidateNote=document.createElement('p');
+ candidateNote.className='experience-candidate-note';
+ candidateNote.textContent='候補は検索・RAG参照・計画・TRIZへ渡りません。確認者名は本人確認を保証しません(認証は未実装)。';
+ const candidateStatus=document.createElement('p');
+ candidateStatus.id='experienceCandidateStatus';
+ candidateStatus.className='experience-status-line';
+ const candidateList=document.createElement('ul');
+ candidateList.id='experienceCandidateList';
+ candidateList.className='experience-candidate-list';
+ const reviewerRow=document.createElement('div');
+ reviewerRow.className='experience-field-row'; const reviewerLabel=document.createElement('label');
+ reviewerLabel.textContent='確認者名(承認・却下・差戻しの必須入力): ';
+ const reviewerInput=document.createElement('input');
+ reviewerInput.type='text';
+ reviewerInput.id='experienceReviewer';
+ reviewerInput.maxLength=100;
+ reviewerLabel.append(reviewerInput);
+ const reasonLabel=document.createElement('label');
+ reasonLabel.textContent='理由(必須): ';
+ const reasonInput=document.createElement('input');
+ reasonInput.type='text';
+ reasonInput.id='experienceReviewReason';
+ reasonInput.maxLength=4000;
+ reasonLabel.append(reasonInput);
+ const versionLabel=document.createElement('label');
+ versionLabel.textContent='適用する案件入力版(承認時のみ必須): ';
+ const versionInput=document.createElement('input');
+ versionInput.type='text';
+ versionInput.id='experienceInputVersion';
+ versionInput.maxLength=64;
+ versionInput.placeholder='例: v3';
+ versionLabel.append(versionInput);
+ const versionNote=document.createElement('p');
+ versionNote.className='experience-input-version-note';
+ versionNote.textContent='この事例を適用する案件入力版を指定してください。収集エージェントは入力版を保証しません。';
+ const reloadBtn=document.createElement('button');
+ reloadBtn.type='button';
+ reloadBtn.id='experienceCandidateReloadBtn';
+ reloadBtn.textContent='候補一覧を更新';
+ reviewerRow.append(reviewerLabel,reasonLabel,versionLabel,reloadBtn);
+ candidateSection.append(candidateHeading,candidateNote,reviewerRow,versionNote,candidateStatus,candidateList);
+
+ const indexSection=document.createElement('div');
+ indexSection.id='experienceIndexSection';
+ indexSection.className='experience-index-section';
+ const indexHeading=document.createElement('h3');
+ indexHeading.textContent='索引状態(verified事例の索引: pending/indexed/failed)';
+ const indexNote=document.createElement('p');
+ indexNote.className='experience-index-note';
+ indexNote.textContent='verifiedのままでもfailedは「検索可能」と表示しません。索引は再生成可能なキャッシュであり正本の承認状態より強い権限を持ちません。';
+ const indexStatus=document.createElement('p');
+ indexStatus.id='experienceIndexStatus';
+ indexStatus.className='experience-status-line';
+ const indexList=document.createElement('ul');
+ indexList.id='experienceIndexList';
+ indexList.className='experience-index-list';
+ const reindexRow=document.createElement('div');
+ reindexRow.className='experience-field-row';
+ const reindexBtn=document.createElement('button');
+ reindexBtn.type='button';
+ reindexBtn.id='experienceReindexBtn';
+ reindexBtn.textContent='失敗分のみ再索引';
+ reindexBtn.addEventListener('click',()=>{reindexFailures();});
+ reindexRow.append(reindexBtn);
+ indexSection.append(indexHeading,indexNote,indexStatus,indexList,reindexRow);
 
  const statusLine=document.createElement('p');
  statusLine.id='experienceImportStatus';
@@ -88,7 +159,7 @@ function init(){
  actionResult.className='experience-action-result';
  actionResult.setAttribute('role','status');
 
- panel.append(heading,desc,statusLine,fileRow,previewBox,formRow,actionError,actionResult);
+ panel.append(heading,desc,statusLine,fileRow,previewBox,formRow,actionError,actionResult,candidateSection,indexSection);
 
  const el=id=>document.getElementById(id);
  let project='';
@@ -220,11 +291,14 @@ function init(){
    const reg=data.registered!=null?data.registered:0;
    const skip=data.skipped_duplicate!=null?data.skipped_duplicate:0;
    const failCount=Array.isArray(data.failed)?data.failed.length:0;
+   const accepted=data.accepted_status||'candidate';
 
-   actionResult.textContent='登録完了: '+reg+'件登録 / '+skip+'件重複スキップ / '+failCount+'件失敗';
+   actionResult.textContent='受領完了('+accepted+'): '+reg+'件受領 / '+skip+'件重複スキップ / '+failCount+'件失敗。候補はRAG検索・計画・TRIZへ渡りません。確認者名は本人確認を保証しません。';
 
    // 送信後、チェックボックスは自動でオフに戻す
    el('experienceRagConfirm').checked=false;
+   await refreshCandidates();
+   await refreshIndexStatus();
   }catch(err){
    actionError.textContent=err.message||String(err);
   }finally{
@@ -236,6 +310,201 @@ function init(){
  actorInput.addEventListener('input',updateButtonState);
  confirmBox.addEventListener('change',updateButtonState);
  submitBtn.addEventListener('click',submitImport);
+ reloadBtn.addEventListener('click',()=>{refreshCandidates();});
+
+ async function apiFetch(path,options){
+  project=selectedProject();
+  const response=await fetch('/api/projects/'+encodeURIComponent(project)+path,options);
+  const data=await response.json().catch(()=>({}));
+  return {response,data};
+ }
+
+ async function refreshCandidates(){
+  candidateStatus.textContent='候補一覧を読み込み中…';
+  candidateList.replaceChildren();
+  try{
+   const {response,data}=await apiFetch('/experience/candidates');
+   if(!response.ok){
+    const msg=(data&&data.detail)||'候補一覧の取得に失敗しました';
+    throw Error(typeof msg==='string'?msg:JSON.stringify(msg));
+   }
+   const items=Array.isArray(data.candidates)?data.candidates:[];
+   if(!items.length){
+    candidateStatus.textContent='承認待ち候補はありません';
+    return;
+   }
+   candidateStatus.textContent='承認待ち候補: '+items.length+'件(候補はRAG検索・計画・TRIZへ渡りません)';
+   items.forEach(item=>{
+    const li=document.createElement('li');
+    li.className='experience-candidate-item';
+    const missing=Array.isArray(item.missing)&&item.missing.length?('欠落: '+item.missing.join(', ')):'欠落なし';
+    const blocked=Array.isArray(item.blocked)&&item.blocked.length?(' / 拒否条件: '+item.blocked.join(', ')):'';
+    const approvable=item.approvable?'承認可':'承認不可';
+    const claimed='出所申告: '+(item.claimed&&(item.claimed.actor||item.claimed.proof)?((item.claimed.actor||'')+' / '+(item.claimed.proof||'')):'-');
+    const head=document.createElement('div');
+    head.textContent='#'+String(item.id).slice(0,8)+'… ['+item.status+'] ['+approvable+'] '+missing+blocked+' | '+claimed;
+    const preview=document.createElement('div');
+    preview.textContent=item.lesson_preview||'';
+    const btnRow=document.createElement('div');
+    btnRow.className='experience-candidate-actions';
+    const detailBtn=document.createElement('button');
+    detailBtn.type='button';
+    detailBtn.textContent='詳細';
+    detailBtn.addEventListener('click',()=>{showCandidateDetail(item.id);});
+    const approveBtn=document.createElement('button');
+    approveBtn.type='button';
+    approveBtn.textContent='承認';
+    approveBtn.disabled=!item.approvable;
+    const applicability=item.applicability||{};
+    const presetInputVersion=typeof applicability.input_version==='string'?applicability.input_version:'';
+    approveBtn.addEventListener('click',()=>{reviewCandidate(item.id,'approve',presetInputVersion);});
+    const rejectBtn=document.createElement('button');
+    rejectBtn.type='button';
+    rejectBtn.textContent='却下';
+    rejectBtn.addEventListener('click',()=>{reviewCandidate(item.id,'reject');});
+    const returnBtn=document.createElement('button');
+    returnBtn.type='button';
+    returnBtn.textContent='差戻し';
+    returnBtn.addEventListener('click',()=>{reviewCandidate(item.id,'return');});
+    btnRow.append(detailBtn,approveBtn,rejectBtn,returnBtn);
+    li.append(head,preview,btnRow);
+    candidateList.append(li);
+   });
+  }catch(err){
+   candidateStatus.textContent='';
+   actionError.textContent=err.message||String(err);
+  }
+ }
+
+ async function showCandidateDetail(cid){
+  actionError.textContent='';
+  actionResult.textContent='';
+  try{
+   const {response,data}=await apiFetch('/experience/candidates/'+encodeURIComponent(cid));
+   if(!response.ok){
+    const msg=(data&&data.detail)||'候補詳細の取得に失敗しました';
+    throw Error(typeof msg==='string'?msg:JSON.stringify(msg));
+   }
+   const lines=[
+    '候補ID: '+data.id,
+    '状態: '+data.status,
+    '承認可否: '+(data.approvable?'承認可':'承認不可'),
+    '承認時指定: '+(((data.needs_at_approval||[]).join(', '))||'なし'),
+    '欠落: '+((data.missing||[]).join(', ')||'なし'),
+    '拒否条件: '+((data.blocked||[]).join(', ')||'なし'),
+    '原本参照: '+(data.source_ref||'(なし)'),
+    '原本SHA-256: '+(data.source_hash||'(なし)'),
+    '取得日時: '+(data.fetched_at||'(なし)'),
+    '抽出/要約方法: '+(data.extraction_method||'(なし)'),
+    '適用条件: '+JSON.stringify(data.applicability||{}),
+    '禁止条件: '+JSON.stringify(data.prohibitions||[]),
+    '内容ハッシュ: '+(data.content_sha256||'(なし)'),
+    '要約: '+(data.content||'')
+   ];
+   actionResult.textContent=lines.join('\n');
+  }catch(err){
+   actionError.textContent=err.message||String(err);
+  }
+ }
+
+ async function reviewCandidate(cid,action,presetInputVersion){
+  actionError.textContent='';
+  actionResult.textContent='';
+  const reviewer=(el('experienceReviewer').value||'').trim();
+  const reason=(el('experienceReviewReason').value||'').trim();
+  const versionField=el('experienceInputVersion');
+  let inputVersion=(versionField?versionField.value:'')||'';
+  if(action==='approve'&&!inputVersion.trim()&&typeof presetInputVersion==='string'&&presetInputVersion.trim()){
+   inputVersion=presetInputVersion;
+  }
+  if(!reviewer||!reason){
+   actionError.textContent='確認者名と理由の入力が必要です(確認者名は本人確認を保証しません)';
+   return;
+  }
+  if(action==='approve'&&!inputVersion.trim()){
+   actionError.textContent='承認時は適用する案件入力版の指定が必要です';
+   return;
+  }
+  try{
+   const body={reviewer:reviewer,reason:reason};
+   if(action==='approve'){body.input_version=inputVersion.trim();}
+   const {response,data}=await apiFetch('/experience/candidates/'+encodeURIComponent(cid)+'/'+action,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+   });
+   if(response.status===409){
+    const detail=data&&data.detail;
+    const msg=(detail&&(detail.message||detail))||'承認できませんでした';
+    throw Error(typeof msg==='string'?msg:JSON.stringify(msg));
+   }
+   if(!response.ok){
+    const msg=(data&&data.detail)||'操作に失敗しました';
+    throw Error(typeof msg==='string'?msg:JSON.stringify(msg));
+   }
+   actionResult.textContent='候補操作が完了しました: '+action+' (索引更新: '+(data.reindexed!=null?data.reindexed:'-')+')';
+   await refreshCandidates();
+   await refreshIndexStatus();
+  }catch(err){
+   actionError.textContent=err.message||String(err);
+  }
+ }
+
+ async function refreshIndexStatus(){
+  indexStatus.textContent='索引状態を読み込み中…';
+  indexList.replaceChildren();
+  try{
+   const {response,data}=await apiFetch('/experience/index-status');
+   if(!response.ok){
+    const msg=(data&&data.detail)||'索引状態の取得に失敗しました';
+    throw Error(typeof msg==='string'?msg:JSON.stringify(msg));
+   }
+   const counts=data.counts||{};
+   const items=Array.isArray(data.items)?data.items:[];
+   const searchable=items.filter(it=>it.searchable).length;
+   indexStatus.textContent='索引: indexed '+counts.indexed+'件 / pending '+counts.pending+'件 / failed '+counts.failed+'件(検索可能: '+searchable+'件。failedは検索可能と表示しません)';
+   items.forEach(item=>{
+    const li=document.createElement('li');
+    const label=item.searchable?'検索可能':'検索不可';
+    li.textContent='#'+String(item.id).slice(0,8)+'… ['+item.status+'] ['+label+']'+(item.fail_reason?(' 理由: '+item.fail_reason):'');
+    indexList.append(li);
+   });
+  }catch(err){
+   indexStatus.textContent='';
+   actionError.textContent=err.message||String(err);
+  }
+ }
+
+ async function reindexFailures(){
+  actionError.textContent='';
+  actionResult.textContent='';
+  const reviewer=(el('experienceReviewer').value||'').trim();
+  if(!reviewer){
+   actionError.textContent='確認者名の入力が必要です(確認者名は本人確認を保証しません)';
+   return;
+  }
+  try{
+   const {response,data}=await apiFetch('/experience/reindex',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({reviewer:reviewer,actor:reviewer,reason:'画面からの失敗分再索引'})
+   });
+   if(response.status===422){
+    throw Error('確認者名の入力が必要です');
+   }
+   if(!response.ok){
+    const msg=(data&&data.detail)||'再索引に失敗しました';
+    throw Error(typeof msg==='string'?msg:JSON.stringify(msg));
+   }
+   actionResult.textContent='再索引が完了しました: 再試行 '+(data.retried!=null?data.retried:0)+'件';
+   await refreshIndexStatus();
+  }catch(err){
+   actionError.textContent=err.message||String(err);
+  }
+ }
+
+ refreshCandidates();
+ refreshIndexStatus();
 
  const projectSelect=document.getElementById('projectSelect');
  if(projectSelect){
@@ -243,6 +512,8 @@ function init(){
    project=selectedProject();
    actionError.textContent='';
    actionResult.textContent='';
+   refreshCandidates();
+   refreshIndexStatus();
   });
  }
 }

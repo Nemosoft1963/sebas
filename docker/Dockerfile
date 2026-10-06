@@ -15,6 +15,7 @@ ARG INSTALL_EXPERIENCE_RAG=0
 RUN python -m pip uninstall -y pip setuptools \
     && rm -rf /usr/local/lib/python3.12/site-packages/pip* /usr/local/lib/python3.12/site-packages/setuptools*
 COPY app ./app
+COPY scripts/quarantine_external_imports.py ./scripts/quarantine_external_imports.py
 RUN mkdir -p /data/memory /data/logs
 EXPOSE 8000
 CMD ["uvicorn","app.web:app","--host","0.0.0.0","--port","8000"]

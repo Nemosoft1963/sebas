@@ -18,9 +18,9 @@ DISCLAIMER = (
     "対象業務と安全要件を確認した上で個別に提案します。"
 )
 
-DEFAULT_OPERATOR_NAME = 'Example Operator'
-DEFAULT_OPERATOR_URL = 'https://example.com/'
-DEFAULT_OPERATOR_ADDRESS = 'Example address'
+DEFAULT_OPERATOR_NAME = '弘和運輸有限会社'
+DEFAULT_OPERATOR_URL = 'https://kouwatrsp.com/'
+DEFAULT_OPERATOR_ADDRESS = '〒123-0864 東京都足立区鹿浜4-9-8 2階'
 
 
 def _required(campaign: dict[str, Any], key: str) -> str:

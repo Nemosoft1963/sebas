@@ -59,3 +59,12 @@ def test_experience_import_index_html_integration():
 
     assert '<script src="/static/experience_import.js"' in html_text or "<script src='/static/experience_import.js'" in html_text
     assert 'id="experienceImportPanel"' in html_text or "id='experienceImportPanel'" in html_text
+
+
+def test_experience_import_approval_input_version_field():
+    """承認操作に input_version 入力欄があり、安全DOMのみで送信される。"""
+    code = JS_FILE.read_text(encoding="utf-8")
+    assert "experienceInputVersion" in code
+    assert "この事例を適用する案件入力版を指定してください。収集エージェントは入力版を保証しません" in code
+    assert "input_version" in code
+    assert JS_FILE.read_text(encoding="utf-8").count("innerHTML") == 0

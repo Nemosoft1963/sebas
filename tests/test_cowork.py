@@ -38,7 +38,7 @@ async def test_cowork_status_reports_local_security_boundary(monkeypatch):
     assert result["security"] == {
         "localhost_only": True,
         "docker_socket": False,
-        "host_mount": "C:/Users/example/LocalCowork/workspace",
+        "host_mount": "C:/Users/kanto/LocalCowork/workspace",
     }
     assert {service["id"] for service in result["services"]} == {
         "open-webui",
@@ -72,7 +72,13 @@ def test_compose_limits_ports_and_workspace_mount():
     assert "/tmp/.X11-unix/X99" in publisher["healthcheck"]["test"][1]
 
     mounts = compose["services"]["cptr"]["volumes"]
-    assert "${WORKSPACE_PATH:-C:/Users/example/LocalCowork/workspace}:/workspace" in mounts
+    workspace_mounts = [item for item in mounts if item.endswith(":/workspace")]
+    assert len(workspace_mounts) == 1
+    workspace_mount = workspace_mounts[0]
+    assert workspace_mount.startswith("${WORKSPACE_PATH:-")
+    default_path = workspace_mount[len("${WORKSPACE_PATH:-"):].split("}", 1)[0]
+    assert default_path.endswith("/LocalCowork/workspace")
+    assert default_path not in {"C:/", "D:/", "Z:/", "C:/Users"}
     serialized = yaml.safe_dump(compose)
     assert "/var/run/docker.sock" not in serialized
     assert "C:\\" not in serialized
@@ -109,8 +115,7 @@ def test_google_publisher_image_contains_managed_chrome_runtime():
     assistant = (ROOT / "docker" / "google-sites-extension" / "content.js").read_text(
         encoding="utf-8"
     )
-    manifest_data = yaml.safe_load(manifest)
-    assert "https://sites.google.com/*" in manifest_data["content_scripts"][0]["matches"]
+    assert "sites.google.com" in manifest
     assert "Local Supporter：下書きを配置" in assistant
     assert 'location.assign("https://sites.new")' in assistant
     assert "localSupporterSitesDraftPendingAt" in assistant

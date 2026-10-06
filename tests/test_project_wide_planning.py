@@ -93,7 +93,7 @@ def test_namespaced_plan_validation_rejects_path_escape():
 @pytest.mark.asyncio
 async def test_project_wide_generation_keeps_outcomes_and_serial_dependencies(tmp_path):
     memory=ShortTermMemory(tmp_path/'memory.db');p=memory.create_project('経営計画');pid=p['id']
-    memory.save_mission(pid,'運送業向けAIを構築する\n　点呼支援システム\n　年休管理システム','補助金で使える提案書\nサンプル運輸の経営計画書','',False,[])
+    memory.save_mission(pid,'運送業向けAIを構築する\n　点呼支援システム\n　年休管理システム','補助金で使える提案書\n弘和運輸の経営計画書','',False,[])
     memory.add_mission_instruction(pid,'現行公募要領をWeb検索して収集する')
     (tmp_path/'capability_upgrade.json').write_text(json.dumps({'projects':{pid:'enforce'},'planning_projects':{pid:'two-stage-v1'}}))
     manager=ProjectOrchestrator(memory,NeverLlm(),lambda _:('',[]),None,lambda:[],workspace=WorkspaceSandbox(tmp_path/'workspace'))

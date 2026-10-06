@@ -276,6 +276,7 @@ document.addEventListener("DOMContentLoaded",function(){
       populateFields(!!forceFields);
       renderMission();
       loadExternalActions();
+      loadCaseReferences(target);
       if(forceFields||!el("premarketingList")||el("premarketingList").dataset.renderProject!==target)loadPremarketing();
     }catch(error){
       el("missionMessage").textContent="目標・計画の取得エラー: "+error.message;
@@ -307,6 +308,37 @@ document.addEventListener("DOMContentLoaded",function(){
       await loadMission(false);
       throw error;
     }finally{missionBusy=false;renderMission()}
+  }
+  async function loadCaseReferences(target){
+    var box=el("missionCaseReferenceList");if(!box||target!==currentProject)return;
+    try{
+      var data=await jsonRequest("/api/projects/"+encodeURIComponent(target)+"/plan/case-references");
+      if(target!==currentProject)return;
+      renderCaseReferences(data);
+    }catch(error){box.replaceChildren();var errLine=document.createElement("span");errLine.className="error";errLine.textContent="事例参照の取得エラー: "+(error&&error.message?error.message:String(error&&error.message||""));box.appendChild(errLine)}
+  }
+  function caseSafeText(value){return value==null?"":String(value)}
+  function appendCaseLine(parent,tag,text,className){var node=document.createElement(tag);if(className)node.className=className;node.textContent=text;parent.appendChild(node);return node}
+  function renderCaseReferences(data){
+    var box=el("missionCaseReferenceList");if(!box)return;
+    var items=(data&&data.criteria)||[];
+    box.replaceChildren();
+    if(!items.length){appendCaseLine(box,"span","参考にした事例はまだありません。計画生成時に照合されます。","mission-empty");return}
+    items.forEach(function(criterion){
+      var refs=criterion.references||[];
+      var used=refs.filter(function(r){return r.used_or_rejected==="used"});
+      var rejected=refs.filter(function(r){return r.used_or_rejected==="rejected"});
+      var article=document.createElement("article");article.className="mission-event";
+      appendCaseLine(article,"h4",caseSafeText(criterion.criterion_id||"条件")+" — "+caseSafeText(criterion.status||""));
+      appendCaseLine(article,"p","参考にした事例");
+      if(used.length){var usedList=document.createElement("ul");used.forEach(function(r){var li=document.createElement("li");li.textContent="参照ID "+caseSafeText(r.case_id)+"（一致: "+caseSafeText(r.applicability_verdict||"")+"）";li.appendChild(document.createElement("br"));li.appendChild(document.createTextNode(caseSafeText(r.excerpt||"").slice(0,400)));usedList.appendChild(li)});article.appendChild(usedList)}
+      else{appendCaseLine(article,"p","参考にした事例はありません。")}
+      appendCaseLine(article,"p","採用しなかった理由");
+      if(rejected.length){var rejectedList=document.createElement("ul");rejected.forEach(function(r){appendCaseLine(rejectedList,"li",caseSafeText(r.case_id)+" — "+caseSafeText(r.reason||r.applicability_verdict||"不採用"))});article.appendChild(rejectedList)}
+      else{appendCaseLine(article,"p","採用しなかった候補はありません。")}
+      box.appendChild(article);
+    });
+    appendCaseLine(box,"p","事例本文は最小限であり、達成証拠として表示しません。RAGによる品質改善は主張しません。","mission-note");
   }
   async function loadWorkspace(){
     var box=el("projectWorkspaceList"),target=currentProject;if(!box)return;
@@ -429,6 +461,7 @@ document.addEventListener("DOMContentLoaded",function(){
   var externalBox=document.querySelector(".mission-external");
   if(externalBox){var externalLabel=externalBox.querySelector("label");if(externalLabel)externalLabel.lastChild.textContent=" 外部AIを計画評価・実現手段検討・調査タスクで利用する（明示許可）";var parallel=document.createElement("label");parallel.innerHTML='最大同時実行 <select id="missionMaxParallel"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option></select>（PC負荷に合わせて設定）';externalBox.appendChild(parallel)}
   var summary=el("missionPlanSummary");if(summary){var reviewBox=document.createElement("div");reviewBox.id="missionPlanReviews";reviewBox.className="mission-list";summary.insertAdjacentElement("afterend",reviewBox)}
+  if(summary){var caseBox=document.createElement("section");caseBox.className="mission-list";caseBox.id="missionCaseReferences";var caseTitle=document.createElement("h3");caseTitle.textContent="参考にした事例・採用しなかった理由";caseBox.appendChild(caseTitle);var caseDesc=document.createElement("p");caseDesc.textContent="事例は工程候補の参考であり、達成証拠として表示しません。RAGによる品質改善は主張しません。事例本文は最小限のみ表示します。";caseBox.appendChild(caseDesc);var caseList=document.createElement("div");caseList.id="missionCaseReferenceList";var caseLoading=document.createElement("span");caseLoading.className="mission-empty";caseLoading.textContent="読込中";caseList.appendChild(caseLoading);caseBox.appendChild(caseList);reviewBox.insertAdjacentElement("afterend",caseBox)}
   if(summary){var actionBox=document.createElement("section");actionBox.className="mission-list";actionBox.innerHTML='<h3>承認付き外部実行</h3><p>計画だけで終わらせず、対象と内容を登録して承認後に実行します。emailはSMTP設定時に自動送信でき、その他は実施証拠を登録します。</p><div><select id="externalActionKind"><option value="email">メール送信</option><option value="proposal">提案</option><option value="meeting">商談</option><option value="poc">PoC</option><option value="contract">契約</option><option value="manual">その他</option></select><input id="externalActionTarget" placeholder="送信先メールまたは実行対象"><textarea id="externalActionContent" placeholder="emailは1行目を件名、2行目以降を本文として送信"></textarea><button id="externalActionCreate" type="button">承認待ちへ登録</button></div><div id="externalActionList"><span class="mission-empty">読込中</span></div>';reviewBox.insertAdjacentElement("afterend",actionBox);el("externalActionCreate").onclick=async function(){var target=el("externalActionTarget").value.trim(),content=el("externalActionContent").value.trim();if(!target||!content){el("missionMessage").textContent="実行対象と内容を入力してください";return}await jsonRequest("/api/projects/"+encodeURIComponent(currentProject)+"/actions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind:el("externalActionKind").value,target:target,content:content})});el("externalActionTarget").value="";el("externalActionContent").value="";await loadExternalActions()}}
   if(summary){var pre=document.createElement("section");pre.className="mission-list";pre.innerHTML='<h3>プレマーケティング・リード獲得</h3><p>キャンペーン資材と同意フォームを生成し、回答を自動評価して有望リードを承認待ちメールへ送ります。</p><input id="premarketingTitle" placeholder="キャンペーン名"><textarea id="premarketingAudience" placeholder="対象顧客・課題"></textarea><textarea id="premarketingOffer" placeholder="提供価値・オファー"></textarea><input id="premarketingCta" placeholder="CTA（例: 30分の無料相談）"><button id="premarketingCreate" type="button">キャンペーン生成</button><div id="premarketingList"><span class="mission-empty">読込中</span></div>';actionBox.insertAdjacentElement("afterend",pre);el("premarketingCreate").onclick=async function(){var payload={title:el("premarketingTitle").value.trim(),audience:el("premarketingAudience").value.trim(),offer:el("premarketingOffer").value.trim(),call_to_action:el("premarketingCta").value.trim()};if(!payload.title||!payload.audience||!payload.offer||!payload.call_to_action){el("missionMessage").textContent="キャンペーン名・対象・オファー・CTAを入力してください";return}await jsonRequest("/api/projects/"+encodeURIComponent(currentProject)+"/premarketing/campaigns",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});await loadPremarketing()}}
   window.setInterval(function(){if(el("premarketingList")&&!document.hidden)loadPremarketing()},15000);

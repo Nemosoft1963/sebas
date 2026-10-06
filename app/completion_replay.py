@@ -27,7 +27,7 @@ def _unavailable(project_id: str, signature: str, reason: str) -> dict:
             "plan_repair", "plan_approval", "external_operation", "final_decision"})
                    for name in STAGES],
         "completion_gate": {"achieved": False, "reason_code": "EVIDENCE_UNAVAILABLE"},
-        "pending_summary": {}, "would_achieve": False,
+        "pending_summary": {}, "would_achieve": False, "repair_blocking": True,
         "notice": reason,
     }
 
@@ -91,10 +91,12 @@ def preview(manager, project_id: str) -> dict:
         ledger = pending_build(manager, project_id)
         gate = evaluate(manager, project_id, persist=False)
         summary = ledger.get("summary") or {}
+        repair_blocking = bool(summary.get("repair_blocking"))
+        repair_reason = str(summary.get("repair_reason") or "修復ループ未完了です")
         plan_status = str(summary.get("plan_status") or "unknown")
         no_issues = summary.get("issue_count") == 0 and summary.get("unresolved_count") == 0
         verified = plan.get("status") == "passed" and no_issues
-        approved = verified and plan_status == "approved"
+        approved = verified and plan_status == "approved" and not repair_blocking
         safe_patch = any(x.get("classification") == "safe_plan_patch" for x in patches.get("candidates") or [])
         server_auto = os.environ.get("LOCALSAPORTER_AUTO_RESUME_AVAILABLE") == "1"
         project_auto = auto_enabled(manager, project_id)
@@ -109,8 +111,8 @@ def preview(manager, project_id: str) -> dict:
         _stage("plan_repair", safe_patch, "安全な局所修復候補はありません。未解決指摘は人間が確認します", True,
                execution_start_allowed=False),
         _stage("external_validation", verified, "同一署名の外部検証または指摘解消が未完了です", False),
-        _stage("plan_approval", approved, "現行計画の人間承認が必要です", True),
-        _stage("local_execution", local_ready, "P2のサーバー・案件設定と計画承認が必要です", False,
+        _stage("plan_approval", approved, repair_reason if repair_blocking else "現行計画の人間承認が必要です", True),
+        _stage("local_execution", local_ready, repair_reason if repair_blocking else "P2のサーバー・案件設定と計画承認が必要です", False,
                execution_guaranteed=False),
         _stage("local_evidence", bool(local_runs), "現行工程に結び付く実成果物の検証済みP2記録がありません", False,
                verified_runs=local_runs),
@@ -122,5 +124,5 @@ def preview(manager, project_id: str) -> dict:
         "project_id": project_id, "plan_signature": signature,
         "read_only": True, "crossed_approval_boundary": False,
         "stages": stages, "completion_gate": gate,
-        "pending_summary": summary, "would_achieve": final_pass,
+        "pending_summary": summary, "would_achieve": final_pass, "repair_blocking": repair_blocking,
     }

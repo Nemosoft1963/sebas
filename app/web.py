@@ -3165,6 +3165,11 @@ async def goal_review_js():
     return FileResponse(ROOT/'app'/'static'/'goal_review.js',media_type='text/javascript',headers={'Cache-Control':'no-store'})
 
 
+@app.get('/static/plan_repair_cards.js')
+async def plan_repair_cards_js():
+    return FileResponse(ROOT/'app'/'static'/'plan_repair_cards.js',media_type='text/javascript',headers={'Cache-Control':'no-store'})
+
+
 @app.get('/static/ocr_review.js')
 async def ocr_review_js():
     return FileResponse(ROOT/'app'/'static'/'ocr_review.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
@@ -3605,6 +3610,322 @@ async def publish_ocr_run_api(project_id: str, run_id: str):
         raise _ocr_http_error(exc) from exc
 
 
+class CandidateReviewPayload(BaseModel):
+    reviewer: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=4000)
+    expires: float | None = None
+    input_version: str | None = Field(default=None, max_length=200)
+
+
+class ExperienceReindexPayload(BaseModel):
+    reviewer: str = Field(min_length=1, max_length=100)
+    actor: str = Field(default='', max_length=100)
+    reason: str = Field(default='', max_length=4000)
+
+
+def _experience_setting_or_409(project_id: str):
+    from app.experience_memory import configured_memory
+    setting = configured_memory(DB_PATH, project_id)
+    if setting is None:
+        raise HTTPException(409, detail={"code": "EXPERIENCE_OFF", "message": "このプロジェクトのRAGが無効です"})
+    return setting
+
+
+def _registered_original_hash(project_id: str, source_ref: str) -> str:
+    import hashlib
+    ref = str(source_ref or '').strip()
+    if not ref:
+        return ''
+    try:
+        from app.experience_memory import source_original_filename
+        resolved = source_original_filename(ref)
+    except Exception:
+        resolved = ''
+    for summary in memory.list_context_files(project_id):
+        if summary.get('source') == 'memo':
+            continue
+        item = memory.get_context_file(project_id, summary['id'])
+        if not item:
+            continue
+        # 既存の挙動(同名ファイルでの照合)を保ち、URL形式のsource_refは
+        # 取込時と同じ決定的な安全名でも解決できるようにする。
+        if ref not in (str(item.get('filename') or ''), str(summary.get('id') or ''), str(item.get('id') or '')) \
+                and (not resolved or str(item.get('filename') or '') != resolved):
+            continue
+        original = item.get('original_data')
+        if original is None and item.get('content') is not None:
+            original = str(item.get('content') or '').encode('utf-8')
+        # 同名ファイルが複数ある場合はSHA-256一致のものを優先せず、
+        # 最初に見つかった原本のハッシュを返す(既存の挙動を変えない)。
+        # 取込時に同名異内容の上書きを禁止しているため、通常は一意である。
+        return hashlib.sha256(original).hexdigest() if original else ''
+    return ''
+
+
+def _candidate_source_view(project_id: str, item: dict) -> dict:
+    expected = str(item.get('source_hash') or '').strip().lower()
+    matched = bool(expected and _registered_original_hash(project_id, item.get('source_ref')) == expected)
+    item['source_verified'] = matched
+    if not matched:
+        item['approvable'] = False
+        item['blocked'] = list(item.get('blocked') or []) + ['registered_original_unavailable_or_hash_mismatch']
+    return item
+
+
+@app.get('/api/projects/{project_id}/experience/candidates')
+async def list_experience_candidates(project_id: str):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    return {
+        'candidates': [_candidate_source_view(project_id, item) for item in memory_service.store.list_candidates(project_id)],
+        'note': '確認者名は本人確認を保証しません(認証は未実装)。候補はRAG検索・計画・TRIZへ渡りません。',
+    }
+
+
+@app.get('/api/projects/{project_id}/experience/candidates/{candidate_id}')
+async def get_experience_candidate(project_id: str, candidate_id: str):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    detail = memory_service.store.get_candidate(project_id, candidate_id)
+    if detail is None:
+        raise HTTPException(404, '候補が見つかりません')
+    detail = _candidate_source_view(project_id, detail)
+    detail['note'] = '確認者名は本人確認を保証しません(認証は未実装)。原本参照と要約の比較に必要な情報を表示します。'
+    return detail
+
+
+@app.post('/api/projects/{project_id}/experience/candidates/{candidate_id}/approve')
+async def approve_experience_candidate(project_id: str, candidate_id: str, payload: CandidateReviewPayload):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    if not payload.reviewer.strip() or not payload.reason.strip():
+        raise HTTPException(422, 'reviewer and reason are required')
+    from app.experience_store import CandidateNotApprovable, InputVersionConflict, InputVersionError, InputVersionRequired
+    detail = memory_service.store.get_candidate(project_id, candidate_id)
+    if detail is None:
+        raise HTTPException(404, '候補が見つかりません')
+    if not detail.get('approvable'):
+        raise HTTPException(409, detail={
+            'code': 'CANDIDATE_NOT_APPROVABLE',
+            'message': '候補の証拠または適用条件が不足しています。',
+            'missing': detail.get('missing') or [],
+            'blocked': detail.get('blocked') or [],
+            'needs_at_approval': detail.get('needs_at_approval') or [],
+        })
+    if not _candidate_source_view(project_id, detail).get('source_verified'):
+        raise HTTPException(409, detail={
+            'code': 'SOURCE_RECHECK_REQUIRED',
+            'message': '登録原本を再取得できないか、SHA-256が不一致です。原本を案件へ登録して再確認してください。',
+        })
+    try:
+        result = memory_service.store.approve_candidate(
+            project_id, candidate_id, payload.reviewer, payload.reason, payload.expires,
+            payload.input_version,
+        )
+    except (InputVersionRequired, InputVersionError) as exc:
+        raise HTTPException(409, detail={
+            'code': getattr(exc, 'code', 'INPUT_VERSION_INVALID'),
+            'message': str(exc),
+            'needs_at_approval': ['input_version'],
+        }) from exc
+    except InputVersionConflict as exc:
+        raise HTTPException(409, detail={
+            'code': exc.code,
+            'message': str(exc),
+            'existing_input_version': exc.existing,
+            'requested_input_version': exc.requested,
+        }) from exc
+    except CandidateNotApprovable as exc:
+        raise HTTPException(409, detail={
+            'code': 'CANDIDATE_NOT_APPROVABLE', 'message': str(exc),
+            'missing': exc.missing, 'blocked': exc.blocked,
+        }) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    # 承認後(verified化)は対象案件の索引更新を冪等ジョブで実行する(P1-A)。
+    # 既存の reindex 呼び出しは壊さない。失敗しても承認自体は維持し failed として返す。
+    # 索引失敗時は「検索可能」と表示しない。
+    index_result = {'indexed': False, 'index_status': 'pending', 'reindexed': None, 'reindex_error': ''}
+    try:
+        memory_service.store.set_index_state(project_id, candidate_id, 'pending')
+        index_result = await asyncio.to_thread(
+            memory_service.reindex_verified_case, project_id, candidate_id)
+        state = memory_service.store.get_index_state(project_id, candidate_id) or {}
+        status = state.get('status') or ('indexed' if index_result.get('indexed') else 'pending')
+        index_result = {**index_result, 'index_status': status,
+                        'index_identity': state.get('index_identity', ''),
+                        'fail_reason': state.get('fail_reason', '')}
+        result['reindexed'] = 1 if index_result.get('indexed') else 0
+        result['reindex_error'] = '' if index_result.get('indexed') else state.get('fail_reason', '')
+    except Exception as exc:
+        state = memory_service.store.get_index_state(project_id, candidate_id) or {}
+        result['reindexed'] = None
+        result['reindex_error'] = state.get('fail_reason') or (type(exc).__name__ + ': ' + str(exc)[:300])
+        index_result = {'indexed': False, 'index_status': state.get('status') or 'failed',
+                        'fail_reason': result['reindex_error'],
+                        'index_identity': state.get('index_identity', '')}
+    result['index'] = index_result
+    result['index_status'] = index_result.get('index_status', 'pending')
+    result['searchable'] = bool(index_result.get('index_status') == 'indexed')
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    return result
+
+
+@app.post('/api/projects/{project_id}/experience/candidates/{candidate_id}/reject')
+async def reject_experience_candidate(project_id: str, candidate_id: str, payload: CandidateReviewPayload):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    if not payload.reviewer.strip() or not payload.reason.strip():
+        raise HTTPException(422, 'reviewer and reason are required')
+    try:
+        result = memory_service.store.reject_candidate(
+            project_id, candidate_id, payload.reviewer, payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    return result
+
+
+@app.post('/api/projects/{project_id}/experience/candidates/{candidate_id}/return')
+async def return_experience_candidate(project_id: str, candidate_id: str, payload: CandidateReviewPayload):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    if not payload.reviewer.strip() or not payload.reason.strip():
+        raise HTTPException(422, 'reviewer and reason are required')
+    try:
+        result = memory_service.store.return_candidate(
+            project_id, candidate_id, payload.reviewer, payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    return result
+
+
+@app.get('/api/projects/{project_id}/experience/index-status')
+async def get_experience_index_status(project_id: str):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    view = memory_service.index_status_view(project_id)
+    view['note'] = ('verified のままでも failed は検索可能と表示しない。'
+                    '索引は再生成可能なキャッシュであり正本の承認状態より強い権限を持たない。')
+    return view
+
+
+@app.post('/api/projects/{project_id}/experience/reindex')
+async def reindex_experience_failures(project_id: str, payload: ExperienceReindexPayload):
+    """失敗分のみ再試行する安全な冪等操作。reviewer/actor 必須。管理経路のみ(48G許可リストには追加しない)。"""
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    reviewer = payload.reviewer.strip()
+    actor = (payload.actor or reviewer).strip()
+    if not reviewer or not actor:
+        raise HTTPException(422, 'reviewer and actor are required')
+    view = memory_service.index_status_view(project_id)
+    targets = [item['id'] for item in view['items'] if item['status'] == 'failed']
+    # pending で記録が無い verified も対象にする(冪等: 何度実行しても同じ結果)。
+    recorded = {item['id'] for item in view['items']}
+    for row in memory_service.store.list(project_id, True):
+        if row['id'] not in recorded:
+            targets.append(row['id'])
+    targets = list(dict.fromkeys(targets))
+    results = []
+    for rid in targets:
+        try:
+            outcome = await asyncio.to_thread(
+                memory_service.reindex_verified_case, project_id, rid)
+            results.append({'id': rid, 'indexed': bool(outcome.get('indexed')), 'error': ''})
+        except Exception as exc:
+            state = memory_service.store.get_index_state(project_id, rid) or {}
+            results.append({'id': rid, 'indexed': False,
+                            'error': state.get('fail_reason') or type(exc).__name__})
+    if targets:
+        memory_service.store.log_candidate_event(
+            project_id, targets[0], 'recheck_requested', reviewer,
+            '索引の再試行を実行(対象=%d件)。%s' % (len(targets), (payload.reason or '').strip() or '失敗分の再試行'))
+    return {'retried': len(targets), 'results': results,
+            'status': memory_service.index_status_view(project_id),
+            'auth_note': '確認者名は本人確認を保証しません(認証は未実装)。'}
+
+
+class NeedsReviewRecheckPayload(BaseModel):
+    reviewer: str = Field(min_length=1, max_length=100)
+    source_ref: str = Field(default='', max_length=2000)
+    observed_source_hash: str = Field(default='', max_length=128)
+
+
+@app.get('/api/projects/{project_id}/experience/needs-review')
+async def list_experience_needs_review(project_id: str):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    items = memory_service.store.list_needs_review(project_id)
+    return {
+        'count': len(items),
+        'records': items,
+        'note': '確認者名は本人確認を保証しません(認証は未実装)。needs_reviewはRAG検索・計画・TRIZへ渡りません。',
+    }
+
+
+@app.get('/api/projects/{project_id}/experience/needs-review/{record_id}')
+async def get_experience_needs_review(project_id: str, record_id: str):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    detail = memory_service.store.get_needs_review(project_id, record_id)
+    if detail is None:
+        raise HTTPException(404, '再審査待ちの事例が見つかりません')
+    detail['note'] = '確認者名は本人確認を保証しません(認証は未実装)。原本再取得のSHA-256一致でのみcandidateへ進めます。'
+    return detail
+
+
+@app.post('/api/projects/{project_id}/experience/needs-review/{record_id}/recheck')
+async def recheck_experience_needs_review(
+    project_id: str, record_id: str, payload: NeedsReviewRecheckPayload,
+):
+    require_project(project_id)
+    memory_service, _mode = _experience_setting_or_409(project_id)
+    if not payload.reviewer.strip():
+        raise HTTPException(422, 'reviewer is required')
+    if not payload.source_ref.strip() or not payload.observed_source_hash.strip():
+        raise HTTPException(422, 'source_ref and observed_source_hash are required')
+    # P0-B: 保存済みsource_hashが無い旧取込は自動で再承認しない。原本の再取得
+    # (ここでは登録済みコンテキスト原本の再読込)による新しいsource_hashを記録し、
+    # candidateに進めるだけ。承認はP0-AのレビューAPI経由で行う。
+    # 取込時の決定的な安全名(source-*.md)でも解決できるようにする。
+    def _fetch_source(source_ref: str):
+        try:
+            from app.experience_memory import source_original_filename
+            resolved_names = {source_ref, source_original_filename(source_ref)}
+        except Exception:
+            resolved_names = {source_ref}
+        for summary in memory.list_context_files(project_id):
+            if summary.get('source') == 'memo':
+                continue
+            item = memory.get_context_file(project_id, summary['id'])
+            if not item:
+                continue
+            name = str(item.get('filename') or '')
+            if source_ref in (name, summary.get('id'), str(item.get('id') or '')) or name in resolved_names:
+                data = item.get('original_data')
+                if data is None and item.get('content') is not None:
+                    data = str(item.get('content') or '').encode('utf-8')
+                return data or b''
+        raise ValueError('原本を再取得できませんでした: ' + source_ref[:200])
+
+    try:
+        result = memory_service.store.recheck_needs_review(
+            project_id, record_id, payload.reviewer.strip(),
+            {'source_ref': payload.source_ref.strip(),
+             'observed_source_hash': payload.observed_source_hash.strip()},
+            fetch_source=_fetch_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    result['approval_note'] = 'candidate化のみであり承認ではありません。承認はP0-AのレビューAPI経由です。'
+    return result
+
+
 class ImportSuccessCasesPayload(BaseModel):
     items: list[dict] = Field(min_length=1, max_length=200)
     proof: str = Field(default="成功事例収集エージェントでの人手レビュー済み")
@@ -3704,6 +4025,184 @@ async def post_plan_recovery_apply(project_id: str, payload: RecoveryApplyPayloa
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/projects/{project_id}/plan/case-references')
+async def get_plan_case_references(project_id: str):
+    require_project(project_id)
+    from app.plan_case_reference import current_view
+    mission = memory.get_mission(project_id)
+    return current_view(memory.path, project_id, mission.get('plan_version') or 0)
+
+
+class RepairRunStartPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class RepairRunAdvancePayload(BaseModel):
+    next_state: str = Field(min_length=1, max_length=40)
+    actor: str = Field(min_length=1, max_length=100)
+    payload: dict = Field(default_factory=dict)
+
+
+@app.get('/api/projects/{project_id}/plan/repair-runs')
+async def list_plan_repair_runs(project_id: str):
+    require_project(project_id)
+    from app.plan_repair_loop import list_runs, public_view
+    return {'runs': [public_view(x) for x in list_runs(orchestrator, project_id)]}
+
+
+@app.get('/api/projects/{project_id}/plan/repair-runs/cards')
+async def get_plan_repair_cards(project_id: str):
+    require_project(project_id)
+    from app.plan_repair_loop import repair_cards
+    return repair_cards(orchestrator, project_id)
+
+
+class RepairRunAnswerPayload(BaseModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    issue_id: str = Field(min_length=1, max_length=128)
+    answer: str = Field(min_length=1, max_length=2000)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.post('/api/projects/{project_id}/plan/repair-runs/answer')
+async def answer_plan_repair_fact(project_id: str, body: RepairRunAnswerPayload):
+    require_project(project_id)
+    actor = body.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app.plan_repair_loop import answer_business_fact
+    try:
+        return answer_business_fact(orchestrator, project_id, body.run_id,
+                                    body.issue_id, body.answer, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/plan/repair-runs/start')
+async def start_plan_repair_run(project_id: str, body: RepairRunStartPayload):
+    require_project(project_id)
+    actor = body.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app.plan_repair_loop import start
+    try:
+        return start(orchestrator, project_id, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/plan/repair-runs/{run_id}/advance')
+async def advance_plan_repair_run(project_id: str, run_id: str, body: RepairRunAdvancePayload):
+    require_project(project_id)
+    actor = body.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app.plan_repair_loop import advance
+    import asyncio as _asyncio
+
+    try:
+        result = advance(orchestrator, project_id, run_id, body.next_state, actor, body.payload or {})
+        if _asyncio.iscoroutine(result):
+            result = await result
+        return result
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class ResolutionDetectPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class ResolutionAdvancePayload(BaseModel):
+    next_state: str = Field(min_length=1, max_length=40)
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(default="", max_length=2000)
+    evidence: dict = Field(default_factory=dict)
+
+
+@app.get("/api/projects/{project_id}/resolutions")
+async def list_project_resolutions(project_id: str):
+    require_project(project_id)
+    from app.resolution_coordinator import list_resolutions, resolution_cards, summary
+    return {
+        "resolutions": list_resolutions(orchestrator, project_id),
+        "cards": resolution_cards(orchestrator, project_id)["cards"],
+        "summary": summary(orchestrator, project_id),
+    }
+
+
+@app.post("/api/projects/{project_id}/resolutions/detect")
+async def detect_project_resolutions(project_id: str, body: ResolutionDetectPayload):
+    require_project(project_id)
+    actor = body.actor.strip()
+    if not actor:
+        raise HTTPException(422, "actor is required")
+    from app.resolution_coordinator import detect
+    try:
+        return detect(orchestrator, project_id, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/resolutions/{resolution_id}")
+async def get_project_resolution(project_id: str, resolution_id: str):
+    require_project(project_id)
+    from app.resolution_coordinator import get
+    try:
+        return get(orchestrator, project_id, resolution_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/resolutions/{resolution_id}/candidates")
+async def get_project_resolution_candidates(project_id: str, resolution_id: str):
+    require_project(project_id)
+    from app.resolution_coordinator import get as get_resolution
+    from app.resolution_p3_context import attach_p3_context, collect_p3_context
+    try:
+        stored = get_resolution(orchestrator, project_id, resolution_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    try:
+        context = collect_p3_context(orchestrator, project_id, stored)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    view = attach_p3_context(stored, context)
+    return {
+        "id": stored.get("id"),
+        "project_id": stored.get("project_id"),
+        "criterion_id": stored.get("criterion_id"),
+        "task_key": stored.get("task_key"),
+        "cause": stored.get("cause"),
+        "cause_ja": stored.get("cause_ja"),
+        "state": stored.get("state"),
+        "state_ja": stored.get("state_ja"),
+        "rag_references": view.get("rag_references") or {},
+        "triz_candidates": view.get("triz_candidates") or {},
+        "business_note_ja": "候補・試験は業務達成ではない。業務達成は条件PASSと人間確認で別に判定する",
+    }
+
+
+@app.post("/api/projects/{project_id}/resolutions/{resolution_id}/advance")
+async def advance_project_resolution(project_id: str, resolution_id: str,
+                                     body: ResolutionAdvancePayload):
+    require_project(project_id)
+    actor = body.actor.strip()
+    if not actor:
+        raise HTTPException(422, "actor is required")
+    from app.resolution_coordinator import advance
+    try:
+        return advance(orchestrator, project_id, resolution_id, body.next_state,
+                       actor, body.reason, body.evidence or {})
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/static/resolution_cards.js")
+async def resolution_cards_js():
+    return FileResponse(ROOT / "app" / "static" / "resolution_cards.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
 
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')
