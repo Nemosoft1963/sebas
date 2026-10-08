@@ -398,12 +398,27 @@ def approved_packet(store, pid, signature, packet):
     return bool(approval.get('approved') and approval.get('packet_hash') == fingerprint(packet))
 
 
-async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None,idempotency_key=None):
+async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None,idempotency_key=None,providers_override=None):
     if not safe_to_send or not 20<=len(public_summary.strip())<=12000:raise ValueError('秘密・個人情報を含まない公開用の目標・達成条件・工程説明を確認してください')
     detail=selected_detail(manager,pid,tid);snapshot,current=plan_snapshot(manager,pid,detail)
     if current!=signature:raise ValueError('計画が変わりました。再読込してください')
     mission=manager.memory.get_mission(pid)
-    providers=list(dict.fromkeys(mission.get('external_providers',[])))
+    allowed_providers=list(dict.fromkeys(mission.get('external_providers',[])))
+    providers=(list(dict.fromkeys(providers_override)) if providers_override is not None else allowed_providers)
+    if providers_override is not None:
+        if not providers or not set(providers) <= set(allowed_providers):
+            raise ValueError('検証AIはプロジェクトで許可済みのAIから選択してください')
+        policy_config=load_review_policy(manager)
+        section=_policy_section(policy_config,pid)
+        required=section.get('required_providers',policy_config.get('required_providers') or [])
+        if isinstance(required,str):required=[required]
+        if not set(required or []) <= set(providers):
+            raise ValueError('必須の検証AIを外せません')
+        raw_min=section.get('min_success_count',policy_config.get('min_success_count'))
+        try:minimum=int(raw_min) if raw_min is not None else None
+        except (TypeError,ValueError):minimum=None
+        if minimum is not None and len(providers)<minimum:
+            raise ValueError('検証AIの数が最低合格数を下回ります')
     configured={x['id'] for x in manager.provider_statuses() if x.get('configured')}
     if not mission.get('allow_external_ai') or not providers or not set(providers)<=configured or not manager.plan_review_runner:
         raise ValueError('選択した外部AIの許可・接続が揃っていません。未検証のまま実行できません')
@@ -428,7 +443,7 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
                'task_id':tid,'next_at':budget.get('reset_at',time.time()+3600),'expires':time.time()+7*86400,'attempts':0,
                'packet_hash':fingerprint(packet)}
         store.put(pid,'plan_queue',signature,queue)
-        result={'status':'waiting_budget','packet':packet,'reviews':retained,'pending_providers':pending,'required_calls':len(pending),'resume_at':queue['next_at'],'job_id':job['id']}
+        result={'status':'waiting_budget','packet':packet,'reviews':retained,'pending_providers':pending,'required_calls':len(pending),'resume_at':queue['next_at'],'job_id':job['id'],'called_providers':[],'reused_providers':[r.get('provider') for r in retained]}
         store.put(pid,'plan',signature,result)
         finish_job(store,pid,job['id'],'succeeded',last_completed_stage='external_review')
         save_orchestration(store,pid,last_completed_stage='external_review',plan_signature=signature,resume_from='external_review')
@@ -471,6 +486,7 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
             'error':((x.get('connection_error') or {}).get('error') or (x.get('response') or {}).get('error') or '')[:2000],
         } for x in parsed if x.get('status')=='connection_error']
         result={'status':judged['status'],'reviews':parsed,'packet':packet,'finished':time.time(),
+                'called_providers':list(pending),'reused_providers':[r.get('provider') for r in retained],
                 'pending_providers':[x['provider'] for x in parsed if x['status'] in {'unverified','connection_error'}],
                 'job_id':job['id'] if job else '','provider_outcomes':provider_review_outcomes(parsed,providers),
                 'connection_errors':connection_errors,'pass_policy':policy,

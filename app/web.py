@@ -2311,6 +2311,10 @@ async def project_reset_js():
 async def project_delete_js():
     return FileResponse(ROOT / "app" / "static" / "project_delete.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
+@app.get("/static/project_management.js")
+async def project_management_js():
+    return FileResponse(ROOT / "app" / "static" / "project_management.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
 
 async def local_model_catalog() -> list[dict]:
     async with httpx.AsyncClient(timeout=20) as client:
@@ -4489,10 +4493,23 @@ class AutoLoopStartPayload(BaseModel):
     providers: list[str] = Field(min_length=1, max_length=5)
     public_summary: str = Field(default="", max_length=12000)
     idempotency_key: str = Field(default="", max_length=128)
+    expected_packet_hash: str = Field(default="", max_length=64)
 
 
 class AutoLoopCancelPayload(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
+
+
+class AutoLoopRemapPayload(BaseModel):
+    actor: str = Field(default="", max_length=100)
+    idempotency_key: str = Field(default="", max_length=128)
+
+
+class AutoLoopBindingConfirmPayload(BaseModel):
+    issue_id: str = Field(min_length=1, max_length=128)
+    actor: str = Field(min_length=1, max_length=100)
+    task_key: str = Field(min_length=1, max_length=100)
+    criterion_id: str = Field(default="", max_length=100)
 
 
 @app.post('/api/projects/{project_id}/goal-review/auto-loop/preview')
@@ -4511,7 +4528,8 @@ async def start_auto_loop(project_id: str, payload: AutoLoopStartPayload):
     from app.plan_review_loop import start_run
     try:
         return start_run(orchestrator, project_id, payload.actor, payload.providers,
-                         payload.public_summary, payload.idempotency_key)
+                         payload.public_summary, payload.idempotency_key,
+                         expected_packet_hash=payload.expected_packet_hash)
     except (ValueError, KeyError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -4551,6 +4569,51 @@ async def cancel_auto_loop(project_id: str, run_id: str, payload: AutoLoopCancel
         return cancel_run(orchestrator, project_id, run_id, payload.actor.strip())
     except (ValueError, KeyError) as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/projects/{project_id}/goal-review/auto-loop/{run_id}/remap-preview')
+async def preview_auto_loop_remap(project_id: str, run_id: str):
+    require_project(project_id)
+    from app.plan_review_loop import remap_preview
+    try:
+        return remap_preview(orchestrator, project_id, run_id)
+    except (ValueError, KeyError) as exc:
+        text = str(exc)
+        if text.startswith("409:"):
+            raise HTTPException(409, text[4:].strip()) from exc
+        if "見つかりません" in text or "not found" in text:
+            raise HTTPException(404, text) from exc
+        raise HTTPException(409, text) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/auto-loop/{run_id}/binding-confirm')
+async def confirm_auto_loop_binding(project_id: str, run_id: str,
+                                    payload: AutoLoopBindingConfirmPayload):
+    require_project(project_id)
+    from app.plan_review_loop import confirm_binding
+    try:
+        return await confirm_binding(
+            orchestrator, project_id, run_id, payload.issue_id,
+            actor=payload.actor.strip(),
+            task_key=payload.task_key.strip(),
+            criterion_id=payload.criterion_id.strip(),
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/goal-review/auto-loop/{run_id}/remap')
+async def remap_auto_loop(project_id: str, run_id: str, payload: AutoLoopRemapPayload):
+    require_project(project_id)
+    from app.plan_review_loop import remap_run
+    try:
+        return await remap_run(orchestrator, project_id, run_id,
+                               payload.actor.strip(), payload.idempotency_key.strip())
+    except (ValueError, KeyError) as exc:
+        text = str(exc)
+        if text.startswith("409:"):
+            raise HTTPException(409, text[4:].strip()) from exc
+        raise HTTPException(409, text) from exc
 
 
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')

@@ -28,6 +28,16 @@ function renderPreview(host,view){
  const blocked=document.createElement('ul');
  for(const r of (view.blocked_reasons||[])){addText(blocked,'li',r);}
  if((view.blocked_reasons||[]).length)host.append(blocked);
+ const pending=((view.stops||{}).pending_external)||[];
+ if(pending.length){
+  addText(host,'h5','未完了の外部操作');
+  const list=document.createElement('ul');
+  for(const item of pending){
+   addText(list,'li',String(item.store||'')+' / '+String(item.ref||'')+' / '+String(item.status||item.kind||''));
+  }
+  host.append(list);
+  addText(host,'p','外部で投稿・送信済みかを確認し、承認状態を整理してから再プレビューしてください。初期化は公開物を取り消しません。');
+ }
 }
 async function loadGenerations(host){
  const pid=currentPid();if(!host||!pid)return;
@@ -64,7 +74,7 @@ async function loadGenerations(host){
 }
 function mount(){
  function init(){
-  const anchor=document.getElementById('workflow-goal_plan')||document.getElementById('workflow-overview');
+  const anchor=document.getElementById('workflow-manage');
   if(!anchor){setTimeout(init,300);return;}
   if(document.getElementById('resetPreviewHost'))return;
   const box=document.createElement('section');box.className='mission-list';
@@ -83,17 +93,17 @@ function mount(){
   const status=document.createElement('p');status.id='resetStatus';box.append(status);
   const previewBtn=document.createElement('button');previewBtn.type='button';previewBtn.textContent='プレビューを表示（変更なし）';
   const execBtn=document.createElement('button');execBtn.type='button';execBtn.textContent='初期化を実行';execBtn.disabled=true;
-  let token='';
+  let token='';let canInitialize=false;
   previewBtn.onclick=async()=>{
-   status.textContent='確認中…';execBtn.disabled=true;token='';
+   status.textContent='確認中…';execBtn.disabled=true;token='';canInitialize=false;
    try{
     const view=await api('/reset-preview?mode='+encodeURIComponent(sel.value));
     renderPreview(previewHost,view);
-    token=view.preview_token||'';
+    token=view.preview_token||'';canInitialize=!!view.can_initialize;
     status.textContent=view.can_initialize?'プレビューを表示しました。PJ名を入力すると確定できます。':'初期化できません: '+((view.blocked_reasons||[]).join(' / '));
    }catch(e){status.textContent=e.message||'確認できませんでした';}
   };
-  name.addEventListener('input',()=>{execBtn.disabled=!(token&&name.value.trim());});
+  name.addEventListener('input',()=>{execBtn.disabled=!(canInitialize&&token&&name.value.trim());});
   sel.addEventListener('change',()=>{execBtn.disabled=true;token='';});
   execBtn.onclick=async()=>{
    status.textContent='実行中…';execBtn.disabled=true;

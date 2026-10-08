@@ -485,7 +485,7 @@ document.addEventListener("DOMContentLoaded",function(){
   el("missionArtifactsDownload").addEventListener("click",function(){downloadSavedResult("/api/projects/"+encodeURIComponent(currentProject)+"/mission/artifacts/download")});
   var originalRenderProject=renderProject,lastRenderedProject='';
   renderProject=function(){originalRenderProject();var selected=projects.find(function(p){return p.id===currentProject});if(el("projectTargetName"))el("projectTargetName").textContent=selected&&selected.name||"未選択";if(el("projectWorkspace"))el("projectWorkspace").value=selected&&selected.workspace_path||"";var switched=lastRenderedProject!==currentProject;lastRenderedProject=currentProject;if(switched)clearUnsentDrafts();missionProject="";applyProjectTabMemory();loadMission(true);loadWorkspace()};
-  var WORKFLOW_TAB_KEYS=['overview','goal_plan','execute','artifacts','history'];
+  var WORKFLOW_TAB_KEYS=['overview','goal_plan','execute','artifacts','history','manage'];
   var WORKFLOW_TAB_ALIASES={requirements:'goal_plan',plan:'goal_plan',flow:'goal_plan',monitor:'execute',examples:'history'};
   function workflowTabStorageKey(pid){return 'localWorkflowTab:'+String(pid||'')}
   function canonicalWorkflowTab(key){if(WORKFLOW_TAB_ALIASES[key])key=WORKFLOW_TAB_ALIASES[key];if(WORKFLOW_TAB_KEYS.indexOf(key)<0)key='overview';return key}
@@ -502,8 +502,8 @@ document.addEventListener("DOMContentLoaded",function(){
   function updateWorkflowEmptyState(){
     var guide=el('workflowEmptyGuide'),has=!!currentProject;
     if(guide)guide.hidden=has;
-    document.querySelectorAll('#workflow [role=tab]').forEach(function(button){button.disabled=!has});
-    if(!has){document.querySelectorAll('#workflow [role=tabpanel]').forEach(function(panel){panel.hidden=true});var status=document.querySelector('#workflow .workflow-status');if(status)status.textContent='プロジェクトが未選択です。作業対象から選択または新規作成してください。';}
+    document.querySelectorAll('#workflow [role=tab]').forEach(function(button){button.disabled=!has&&button.dataset.view!=='manage'});
+    if(!has){selectWorkflowTab('manage');var status=document.querySelector('#workflow .workflow-status');if(status)status.textContent='プロジェクトが未選択です。PJ管理から新規作成してください。';}
   }
   function applyProjectTabMemory(){
     updateWorkflowEmptyState();
@@ -512,7 +512,7 @@ document.addEventListener("DOMContentLoaded",function(){
   function setupWorkflowTabs(){
     var main=document.querySelector('body>main'),host=document.createElement('section');
     host.id='workflow';host.className='card workflow';
-    host.innerHTML='<nav class="workflow-tabs" role="tablist" aria-label="プロジェクト作業"><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="overview">概要</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="goal_plan">目標と計画</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="execute">実行と確認</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="artifacts">成果物</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="history">履歴</button></nav><div class="workflow-status" role="status" aria-live="polite" aria-atomic="true"></div><div id="workflowEmptyGuide" class="workflow-empty-guide" hidden><h2>プロジェクトを選択してください</h2><p>作業を始めるには、上の「作業対象」からプロジェクトを選ぶか、「新規作成」してください。未選択のままでは、前のプロジェクトの入力内容は使いません。</p></div>';
+    host.innerHTML='<nav class="workflow-tabs" role="tablist" aria-label="プロジェクト作業"><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="overview">概要</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="goal_plan">目標と計画</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="execute">実行と確認</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="artifacts">成果物</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="history">履歴</button><button type="button" role="tab" aria-selected="false" tabindex="-1" data-view="manage">PJ管理</button></nav><div class="workflow-status" role="status" aria-live="polite" aria-atomic="true"></div><div id="workflowEmptyGuide" class="workflow-empty-guide" hidden><h2>プロジェクトを選択してください</h2><p>作業を始めるには、上の「作業対象」からプロジェクトを選ぶか、「PJ管理」タブで新規作成してください。未選択のままでは、前のプロジェクトの入力内容は使いません。</p></div>';
     var targetBar=el('projectTargetBar'),settingsPanel=el('projectSettingsPanel'),settingsToggle=el('projectSettingsToggle');
     targetBar.insertAdjacentElement('afterend',host);
     var projectCard=document.querySelector('.card.project');
@@ -554,7 +554,7 @@ document.addEventListener("DOMContentLoaded",function(){
     host.querySelectorAll('[role=tab]').forEach(function(button,index){
       button.id='workflow-tab-'+button.dataset.view;button.setAttribute('aria-controls','workflow-'+button.dataset.view);
       button.onclick=function(){selectWorkflowTab(button.dataset.view)};
-      button.onkeydown=function(event){var tabs=Array.from(host.querySelectorAll('[role=tab]')),next=event.key==='ArrowRight'?(index+1)%5:event.key==='ArrowLeft'?(index+4)%5:event.key==='Home'?0:event.key==='End'?4:-1;if(event.key==='Enter'||event.key===' '){event.preventDefault();selectWorkflowTab(button.dataset.view);return;}if(next>=0){event.preventDefault();tabs[next].click();tabs[next].focus()}};
+      button.onkeydown=function(event){var tabs=Array.from(host.querySelectorAll('[role=tab]')),count=tabs.length,next=event.key==='ArrowRight'?(index+1)%count:event.key==='ArrowLeft'?(index+count-1)%count:event.key==='Home'?0:event.key==='End'?count-1:-1;if(event.key==='Enter'||event.key===' '){event.preventDefault();selectWorkflowTab(button.dataset.view);return;}if(next>=0){event.preventDefault();tabs[next].click();tabs[next].focus()}};
     });
     applyProjectTabMemory();
   }

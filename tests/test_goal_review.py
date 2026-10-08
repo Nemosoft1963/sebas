@@ -207,3 +207,23 @@ async def test_fenced_external_review_json_is_evaluated(tmp_path):
     )
     assert result['status']=='passed'
     assert result['success_count']==2
+
+@pytest.mark.asyncio
+async def test_review_reuse_reports_only_actual_provider_calls(tmp_path):
+    manager, pid, _task = setup(tmp_path)
+    calls = []
+    async def runner(_text, providers):
+        calls.append(list(providers))
+        return [{'id': x, 'ok': True,
+                 'review': json.dumps({'verdict': 'pass', 'issues': []})}
+                for x in providers]
+    manager.plan_review_runner = runner
+    sig = plan_snapshot(manager, pid)[1]
+    summary = '一般的な工程を評価するための公開用説明文です。'
+    first = await review_plan(manager, pid, sig, summary, True)
+    assert first['called_providers'] == ['a', 'b']
+    assert first['reused_providers'] == []
+    second = await review_plan(manager, pid, sig, summary, True)
+    assert second['called_providers'] == []
+    assert second['reused_providers'] == ['a', 'b']
+    assert calls == [['a', 'b']]

@@ -181,6 +181,8 @@ def resolve_pipeline_stage(mission: dict, plan: dict, revision: dict, issues: li
         return 'proposal_ready', ('resolve_development' if failure.get('code') == 'development_required' else 'review_feedback')
     if mission_status in {'ready', 'paused'} and not gate.get('blocked'):
         return 'execution_start', 'start'
+    if mission_status in {'ready', 'paused'} and gate.get('blocked') and plan_status != 'passed':
+        return 'external_review', 'external_review'
     if mission_status == 'ready':
         return 'approved', 'start'
     if mission_status == 'planning' and (plan_status == 'passed' or not gate.get('blocked')):
@@ -776,7 +778,7 @@ def build_readiness(manager, pid: str) -> dict:
         'active_job': job,
         'resume_from': (job or {}).get('resume_from') or orch.get('resume_from') or '',
         'last_completed_stage': orch.get('last_completed_stage') or (job or {}).get('last_completed_stage') or '',
-        'blocking_error': orch.get('blocking_error') or (job or {}).get('blocking_error') or '',
+        'blocking_error': ((orch.get('blocking_error') or '') if not orch.get('plan_signature') or orch.get('plan_signature') == signature else '') or (job or {}).get('blocking_error') or '',
         'send_allowed': send_allowed(manager, pid),
         'artifact_class': artifact,
         'vehicle': {

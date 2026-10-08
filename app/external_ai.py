@@ -444,9 +444,11 @@ async def run_plan_reviews(plan_text: str, provider_ids: list[str]) -> list[dict
     )
     if plan_text.startswith('GOAL_GATE_V1\n'):
         system += (' 今回はJSONのみ返す。形式は {"verdict":"pass|conditional|fail|unverifiable","issues":[{"severity":"blocking|warning","step":"工程番号","unmet_goal":"不足する目標","reason":"理由","remedy":"修正案"}]}。'
+                   '各指摘にはcriterion_ids(現行達成条件IDの配列)とstep(工程番号・範囲)を必ず含める。'
                    '原本から最終成果までの工程欠落、利用者への作業転嫁、親子計画の不一致、未実装能力への依存、形式検査だけの完了を確認する。'
                    '必要情報が不足する場合はunverifiableとし、無条件passにしない。問題がない場合だけpassかつissues空配列にする。'
-                   'issuesは最も重要なものを最大6件、各フィールドは簡潔にし、JSONの前後へ説明やコードフェンスを付けない。')
+                   'issuesは最も重要なものを最大6件、各フィールドは簡潔にし、JSONの前後へ説明やコードフェンスを付けない。'
+                   'ただし受信側はモデル出力への依存だけで成立させず、step解析・達成条件照合を常に行う。')
     prompt = (
         "以下はローカル統制AIが作成した計画草案です。資料原本は送信されていません。\n\n"
         + plan_text[:50000]

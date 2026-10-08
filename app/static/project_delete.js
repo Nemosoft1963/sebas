@@ -79,12 +79,12 @@ function mount(){
  function init(){
   const legacyDelete=document.getElementById('projectDelete');
   if(legacyDelete)legacyDelete.hidden=true;
-  const anchor=document.querySelector('.card.project');
+  const anchor=document.getElementById('workflow-manage');
   if(!anchor){setTimeout(init,300);return;}
   if(document.getElementById('deletePreviewHost'))return;
   const box=document.createElement('section');box.className='mission-list';
   addText(box,'h3','PJ削除（安全な手順）');
-  addText(box,'p','削除は「プレビュー → 退避して削除（復元可能） → 完全削除」の段階です。既存の「削除」ボタンは新フローを経ない即時削除（従来動作・他ストアに残存あり）です。外部に公開済みの成果物（Google公開・メール等）は消せません・取り消されません。');
+  addText(box,'p','削除は「プレビュー → 退避して削除（復元可能） → 完全削除」の段階です。従来の即時削除ボタンは無効化しました。外部に公開済みの成果物（Google公開・メール等）は消せません・取り消されません。');
   const actor=document.createElement('input');actor.id='deleteActor';actor.placeholder='担当者名（必須）';actor.maxLength=100;box.append(actor);
   const name=document.createElement('input');name.id='deleteName';name.placeholder='PJ名を再入力（確定に必須）';name.maxLength=120;box.append(name);
   const previewHost=document.createElement('div');previewHost.id='deletePreviewHost';box.append(previewHost);
@@ -95,19 +95,19 @@ function mount(){
   const execBtn=document.createElement('button');execBtn.type='button';execBtn.textContent='退避して削除（復元可能）';execBtn.disabled=true;
   const purgePrevBtn=document.createElement('button');purgePrevBtn.type='button';purgePrevBtn.textContent='完全削除プレビュー';
   const purgeBtn=document.createElement('button');purgeBtn.type='button';purgeBtn.textContent='完全削除する';purgeBtn.disabled=true;
-  let token='';
+  let token='';let canDelete=false;
   let purgeToken='';
   previewBtn.onclick=async()=>{
-   status.textContent='確認中…';execBtn.disabled=true;token='';
+   status.textContent='確認中…';execBtn.disabled=true;token='';canDelete=false;
    try{
     const view=await apiGet('/delete-request-preview');
     renderPreview(previewHost,view);
-    token=view.preview_token||'';
+    token=view.preview_token||'';canDelete=!!view.can_delete;
     status.textContent=view.can_delete?'プレビューを表示しました。PJ名を入力すると確定できます。':'削除できません: '+((view.blocked_reasons||[]).join(' / '));
     execBtn.disabled=!(view.can_delete&&token);
    }catch(e){status.textContent=e.message||'確認できませんでした';}
   };
-  name.addEventListener('input',()=>{execBtn.disabled=!(token&&name.value.trim());purgeBtn.disabled=!(purgeToken&&name.value.trim());});
+  name.addEventListener('input',()=>{execBtn.disabled=!(canDelete&&token&&name.value.trim());purgeBtn.disabled=!(purgeToken&&name.value.trim());});
   execBtn.onclick=async()=>{
    status.textContent='退避して削除中…';execBtn.disabled=true;
    try{

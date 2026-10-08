@@ -31,6 +31,44 @@ def current(manager, pid, signature, tid=None):
     return mission, snapshot, detail
 
 
+def attach_issue_bindings(issues: list, bindings: list[dict]) -> list:
+    """同一指摘IDで対応表を issues_for の行へ付与する。順序・件数を変えない。"""
+    by_id = {}
+    for binding in bindings or []:
+        if isinstance(binding, dict) and binding.get('issue_id'):
+            by_id.setdefault(str(binding['issue_id']), binding)
+    out = []
+    for item in issues or []:
+        row = dict(item) if isinstance(item, dict) else item
+        if isinstance(row, dict):
+            binding = by_id.get(str(row.get('id') or ''))
+            if binding:
+                row = dict(row)
+                row['binding'] = {
+                    'state': str(binding.get('state') or ''),
+                    'steps': list(binding.get('steps') or []),
+                    'candidate_task_keys': list(binding.get('candidate_task_keys') or []),
+                    'candidate_criterion_ids': list(binding.get('candidate_criterion_ids') or []),
+                    'basis': str(binding.get('basis') or ''),
+                }
+        out.append(row)
+    return out
+
+
+def binding_disposition(binding: dict | None) -> str:
+    """対応表から修正案の既存種別への接続を決める。単一結び付きはamend、複数はrebuild_generic。"""
+    if not isinstance(binding, dict):
+        return ''
+    state = str(binding.get('state') or '')
+    tasks = [x for x in (binding.get('candidate_task_keys') or []) if str(x)]
+    criteria = [x for x in (binding.get('candidate_criterion_ids') or []) if str(x)]
+    if state == 'resolved' and len(tasks) == 1 and len(criteria) == 1:
+        return 'amend'
+    if state == 'multiple_targets' and tasks and criteria:
+        return 'rebuild_generic'
+    return ''
+
+
 def normalize_issue_text(text: str) -> str:
     """テキストを正規化（空白類の連続を単一空白に縮約・トリム）。"""
     return " ".join(str(text or "").split())
@@ -58,7 +96,7 @@ PLANNING_ISSUE_SCHEMA = {
     },
     'required': list(PLANNING_ISSUE_FIELDS),
 }
-_CRITERION_ID_RE = re.compile(r'\b(?:SC|C)\d{2}\b', re.I)
+_CRITERION_ID_RE = re.compile(r'(?<![A-Za-z0-9_])(?:SC|C)\d{2}(?![A-Za-z0-9_])', re.I)
 _EVAL_ISSUE_RE = re.compile(r'計画草案の評価と改善提案|計画(?:案|草案)の評価|計画の評価と改善提案')
 _CATEGORY_RULES = (
     ('verification', r'検証|照合|判定|verification'),
@@ -67,6 +105,20 @@ _CATEGORY_RULES = (
     ('coverage', r'達成条件|漏れ|被覆|未割当'),
     ('safety', r'秘密|個人情報|認証|削除|権限'),
 )
+
+# P7 issue-binding: issues_for が保持する指摘項目の長さ制限。
+# plan_review_loop 側の制限と一致させる(循環importを避けるため値を複写)。
+ISSUE_FIELD_LIMITS = {
+    'step': 200,
+    'unmet_goal': 2000,
+    'reason': 4000,
+    'remedy': 4000,
+    'severity': 40,
+}
+
+
+def _bounded_issue_field(value: object, limit: int) -> str:
+    return str(value or "")[:max(0, int(limit))]
 
 
 def _issue_category(text: str, criterion: str = '') -> str:
@@ -82,6 +134,12 @@ def _issue_category(text: str, criterion: str = '') -> str:
 def _criterion_ids_of(issue: dict) -> list:
     raw = str(issue.get('criterion') or '')
     found = [match.group(0).upper() for match in _CRITERION_ID_RE.finditer(raw)]
+    binding = issue.get('binding') if isinstance(issue.get('binding'), dict) else None
+    if binding:
+        for cid in (binding.get('candidate_criterion_ids') or []):
+            text = str(cid or '').upper()
+            if _CRITERION_ID_RE.fullmatch(text) and text not in found:
+                found.append(text)
     return list(dict.fromkeys(found))[:8]
 
 
@@ -115,6 +173,23 @@ def normalize_planning_issue(issue: dict, source_signature: str) -> dict:
         row['origin'] = issue['origin']
     if issue.get('provider'):
         row['provider'] = str(issue.get('provider') or '')[:100]
+    for key, limit in (('step', 200), ('unmet_goal', 2000), ('reason', 4000),
+                       ('remedy', 4000), ('severity', 40)):
+        value = issue.get(key)
+        if isinstance(value, str) and value:
+            row[key] = value[:limit]
+    binding = issue.get('binding') if isinstance(issue.get('binding'), dict) else None
+    if binding:
+        row['binding'] = {
+            'state': str(binding.get('state') or '')[:32],
+            'steps': [int(x) for x in (binding.get('steps') or [])
+                      if isinstance(x, int)][:16],
+            'candidate_task_keys': [str(x)[:80] for x in (binding.get('candidate_task_keys') or [])
+                                    if str(x)][:16],
+            'candidate_criterion_ids': [str(x)[:16] for x in (binding.get('candidate_criterion_ids') or [])
+                                        if str(x)][:8],
+            'basis': str(binding.get('basis') or '')[:500],
+        }
     return row
 
 
@@ -159,9 +234,19 @@ def issues_for(manager, pid, signature):
             provider = str(response.get('provider') or response.get('id') or 'api')
             for index, issue in enumerate(response.get('issues', [])):
                 criterion = ''
+                step = ''
+                unmet_goal = ''
+                reason = ''
+                remedy = ''
+                severity = ''
                 if isinstance(issue, dict):
                     text = str(issue.get('text') or issue.get('issue') or issue.get('reason') or canonical(issue))
                     criterion = str(issue.get('criterion') or issue.get('target') or '')
+                    step = _bounded_issue_field(issue.get('step'), ISSUE_FIELD_LIMITS['step'])
+                    unmet_goal = _bounded_issue_field(issue.get('unmet_goal'), ISSUE_FIELD_LIMITS['unmet_goal'])
+                    reason = _bounded_issue_field(issue.get('reason'), ISSUE_FIELD_LIMITS['reason'])
+                    remedy = _bounded_issue_field(issue.get('remedy'), ISSUE_FIELD_LIMITS['remedy'])
+                    severity = _bounded_issue_field(issue.get('severity'), ISSUE_FIELD_LIMITS['severity'])
                 else:
                     text = str(issue)
                 norm_text = text.strip()
@@ -171,6 +256,11 @@ def issues_for(manager, pid, signature):
                         'provider': provider,
                         'text': norm_text[:6000],
                         'criterion': criterion,
+                        'step': step,
+                        'unmet_goal': unmet_goal,
+                        'reason': reason,
+                        'remedy': remedy,
+                        'severity': severity,
                         'origin': 'api',
                     })
 
@@ -422,11 +512,16 @@ def validate_candidate(body, issues, snapshot, detail, *, preserve_unresolved=Fa
     return normalized
 
 
-async def propose(manager,pid,signature,tid=None,*,_generation=False,idempotency_key=None):
+async def propose(manager,pid,signature,tid=None,*,_generation=False,idempotency_key=None,
+                  _issues_override=None):
     from app.core import Ollama
     if not isinstance(manager.llm,Ollama):raise ValueError('修正案生成にはローカルOllamaが必要です')
     mission,snapshot,detail=current(manager,pid,signature,tid)
-    issues=issues_for(manager,pid,signature)
+    issues=list(_issues_override) if _issues_override is not None else issues_for(manager,pid,signature)
+    if _issues_override is not None:
+        expected=issues_for(manager,pid,signature)
+        if [x.get('id') for x in issues]!=[x.get('id') for x in expected]:
+            raise ValueError('指摘の順序・件数・IDが保存済みレビューと一致しません')
     if not issues:raise ValueError('反映する指摘がありません。API未接続・予算不足は計画への指摘ではありません。外部AIの回答を貼り付けて取り込むこともできます')
     if len(canonical(issues))+len(canonical(snapshot))>100000:raise ValueError('修正対象が大きすぎます。詳細計画単位で修正してください')
     if pid in manager.planning_projects and not _generation:raise ValueError('計画を生成中です')

@@ -123,8 +123,21 @@
     }
   }
 
+  async function syncSelectedModel() {
+    if (document.hidden || refresh.disabled || select.disabled || document.activeElement === select) return;
+    try {
+      const response = await fetch("/api/local-models", { cache: "no-store" });
+      if (!response.ok) return;
+      const body = await response.json();
+      if ((body.selected || "") !== selected) await loadModels();
+    } catch (_) {
+      // The regular refresh control remains available during transient API errors.
+    }
+  }
   select.addEventListener("change", renderDetails);
   apply.addEventListener("click", switchModel);
   refresh.addEventListener("click", loadModels);
+  document.addEventListener("visibilitychange", syncSelectedModel);
+  setInterval(syncSelectedModel, 10000);
   loadModels();
 })();
