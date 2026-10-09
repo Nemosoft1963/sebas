@@ -2311,6 +2311,11 @@ async def project_reset_js():
 async def project_delete_js():
     return FileResponse(ROOT / "app" / "static" / "project_delete.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
+
+@app.get("/static/capability_gap.js")
+async def capability_gap_js():
+    return FileResponse(ROOT / "app" / "static" / "capability_gap.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
 @app.get("/static/project_management.js")
 async def project_management_js():
     return FileResponse(ROOT / "app" / "static" / "project_management.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
@@ -3103,6 +3108,27 @@ async def get_workflow_readiness(project_id: str):
     require_project(project_id)
     from app.workflow_readiness import build_readiness
     return build_readiness(orchestrator, project_id)
+
+
+@app.get('/api/projects/{project_id}/stop-class')
+async def get_stop_class(project_id: str):
+    require_project(project_id)
+    from app.stop_classifier import classify_stop
+    from app.workflow_readiness import build_readiness, build_stop_class
+    # 読み取り専用・副作用なし: build_readiness は読むだけ、履歴は書かない。
+    built = build_readiness(orchestrator, project_id)
+    record = build_stop_class(orchestrator, project_id, built)
+    # 防衛: classify 出力の形を保証する (既存キーは触らない)。
+    if not isinstance(record, dict) or not record.get("stop_class"):
+        record = classify_stop({})
+    return {
+        "project_id": project_id,
+        "plan_signature": built.get("plan_signature"),
+        "phase": built.get("phase"),
+        "stop_class": record,
+        "external_sends": int(record.get("external_sends") or 0),
+        "read_only": True,
+    }
 
 
 @app.get('/api/projects/{project_id}/goal-metrics')
@@ -4614,6 +4640,248 @@ async def remap_auto_loop(project_id: str, run_id: str, payload: AutoLoopRemapPa
         if text.startswith("409:"):
             raise HTTPException(409, text[4:].strip()) from exc
         raise HTTPException(409, text) from exc
+
+
+class CapabilityGapProposePayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class CapabilityGapReviewPayload(BaseModel):
+    reviewer: str = Field(default='', max_length=100)
+    actor: str = Field(default='', max_length=100)
+    reason: str = Field(default='', max_length=2000)
+
+
+class CapabilityGapExportPayload(BaseModel):
+    actor: str = Field(default='', max_length=100)
+
+
+class CapabilityGapSubmittedPayload(BaseModel):
+    actor: str = Field(default='', max_length=100)
+    memo: str = Field(default='', max_length=2000)
+
+
+class CapabilityGapDeliveryPayload(BaseModel):
+    actor: str = Field(default='', max_length=100)
+    delivery: dict = Field(default_factory=dict)
+
+
+class CapabilityGapVerifyPayload(BaseModel):
+    actor: str = Field(default='', max_length=100)
+
+
+def _capability_gap_proposal_id_or_400(proposal_id: str) -> str:
+    from app.capability_export import is_safe_proposal_id as _is_safe
+    text = str(proposal_id or '')
+    if not _is_safe(text):
+        raise HTTPException(400, 'proposal_id が不正です')
+    return text
+
+
+@app.get('/api/projects/{project_id}/capability-gaps')
+async def get_capability_gaps(project_id: str):
+    require_project(project_id)
+    from app import capability_gap as _gap
+    # 読み取り専用: 事前照合と一覧のみ。DB・ファイルを変更しない。
+    preflight = _gap.capability_preflight(orchestrator, project_id)
+    proposals = _gap.list_proposals(orchestrator, project_id)
+    return {'project_id': project_id, 'preflight': preflight,
+            'proposals': proposals, 'read_only': True,
+            'external_sends': 0}
+
+
+@app.post('/api/projects/{project_id}/capability-gaps/propose')
+async def propose_capability_gaps(project_id: str, payload: CapabilityGapProposePayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import capability_gap as _gap
+    # ローカルで事前照合し提案を生成。外部送信なし。冪等。
+    preflight = _gap.capability_preflight(orchestrator, project_id)
+    try:
+        result = _gap.generate_proposals(orchestrator, project_id, preflight, actor=actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result['external_sends'] = 0
+    # 確認者名は本人確認を保証しない (認証は未実装)。
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    return result
+
+
+@app.get('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}')
+async def get_capability_gap_proposal(project_id: str, proposal_id: str):
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    from app import capability_gap as _gap
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    return row
+
+
+@app.post('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/review')
+async def review_capability_gap_proposal(project_id: str, proposal_id: str,
+                                         payload: CapabilityGapReviewPayload):
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    # 確認者名は本人確認を保証しない (認証は未実装)。作業記録用の表示名である。
+    actor = (payload.reviewer or payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'reviewer is required')
+    reason = (payload.reason or '').strip()
+    if not reason:
+        raise HTTPException(422, 'reason is required')
+    from app import capability_gap as _gap
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    try:
+        updated = _gap.set_proposal_status(orchestrator, project_id, safe_id,
+                                           'reviewed', actor=actor, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    updated = dict(updated)
+    updated['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    return updated
+
+
+@app.post('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/export')
+async def export_capability_gap_proposal(project_id: str, proposal_id: str,
+                                         payload: CapabilityGapExportPayload):
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    # 確認者名は本人確認を保証しない (認証は未実装)。作業記録用の表示名である。
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import capability_gap as _gap
+    from app import capability_export as _export
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    try:
+        base_ref = _export.get_base_ref()
+    except Exception:
+        base_ref = 'unknown'
+    try:
+        result = await asyncio.to_thread(_export.export_proposal, orchestrator,
+                                         project_id, safe_id, actor=actor,
+                                         base_ref=base_ref)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not result.get('ok'):
+        raise HTTPException(409, str(result.get('reason') or 'export failed'))
+    # 応答にファイルの中身そのものは含めない (相対名とSHA-256のみ)。
+    out = {k: result.get(k) for k in (
+        'proposal_id', 'project_id', 'status', 'content_hash', 'base_ref',
+        'package_rel', 'instruction_sha256', 'request_sha256',
+        'manifest_sha256', 'idempotent', 'superseded')}
+    out['ok'] = True
+    out['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    out['note'] = '承認前のローカル保存のみであり、送信はしません。'
+    return out
+
+
+@app.post('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/submitted')
+async def submit_capability_gap_proposal(project_id: str, proposal_id: str,
+                                         payload: CapabilityGapSubmittedPayload):
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    # 人がパッケージをJenkinsへ渡したことの記録。実際には何も送信しない。
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import capability_gap as _gap
+    from app import capability_delivery as _delivery
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    try:
+        result = await asyncio.to_thread(_delivery.record_submitted, orchestrator,
+                                         project_id, safe_id, actor=actor,
+                                         memo=payload.memo or '')
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result = dict(result)
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    result['note'] = '人がパッケージを渡したことの記録であり、実際には何も送信していません。'
+    return result
+
+
+@app.post('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/delivery')
+async def deliver_capability_gap_proposal(project_id: str, proposal_id: str,
+                                          payload: CapabilityGapDeliveryPayload):
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import capability_gap as _gap
+    from app import capability_delivery as _delivery
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    if not isinstance(payload.delivery, dict) or not payload.delivery:
+        raise HTTPException(422, 'delivery is required')
+    try:
+        result = await asyncio.to_thread(_delivery.record_delivery, orchestrator,
+                                         project_id, safe_id, payload.delivery,
+                                         actor=actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result = dict(result)
+    if not result.get('ok'):
+        raise HTTPException(409, str(result.get('reason') or 'delivery rejected'))
+    # 応答に失敗ログ全文・差分全文は含めない (短い理由と状態のみ)。
+    out = {k: result.get(k) for k in (
+        'proposal_id', 'project_id', 'status', 'verdict', 'delivery_id',
+        'reason', 'idempotent')}
+    out['ok'] = True
+    out['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    if out.get('verdict') == 'delivered':
+        out['note'] = '実装が納品されました。まだ能力は有効ではありません。'
+    return out
+
+
+@app.post('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/verify')
+async def verify_capability_gap_proposal(project_id: str, proposal_id: str,
+                                         payload: CapabilityGapVerifyPayload):
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import capability_gap as _gap
+    from app import capability_delivery as _delivery
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    try:
+        result = await asyncio.to_thread(_delivery.verify_proposal, orchestrator,
+                                         project_id, safe_id, actor=actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result = dict(result)
+    # 残件の全文は返さない (短い形に整える)。
+    remaining = []
+    for item in (result.get('remaining') or []):
+        if isinstance(item, dict):
+            remaining.append({
+                'criterion_id': str(item.get('criterion_id') or ''),
+                'gap_code': str(item.get('gap_code') or ''),
+                'required_capability_id': str(item.get('required_capability_id') or ''),
+                'unmet_states': [str(x) for x in (item.get('unmet_states') or [])][:8],
+            })
+    result['remaining'] = remaining
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    if result.get('verified'):
+        result['note'] = '元の停止が再判定で解消しました。'
+    elif result.get('stale'):
+        result['note'] = '計画が更新されたためこの提案は古い版です。'
+    elif not result.get('verified'):
+        result['note'] = '元の停止が残っています。'
+    return result
 
 
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')

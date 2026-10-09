@@ -77,7 +77,7 @@ function mount(){
   const anchor=document.getElementById('workflow-manage');
   if(!anchor){setTimeout(init,300);return;}
   if(document.getElementById('resetPreviewHost'))return;
-  const box=document.createElement('section');box.className='mission-list';
+  const box=document.createElement('section');box.className='mission-list';box.id='projectResetSection';
   addText(box,'h3','PJ初期化（世代切替）');
   addText(box,'p','IDと名前を保ったまま作業状態を新世代へ切り替えます。操作前は退避し、送信済みメール・公開・契約は取り消しません。同じ外部アクションは自動再実行しません。');
   const modeRow=document.createElement('div');
@@ -85,37 +85,74 @@ function mount(){
   const sel=document.createElement('select');sel.id='resetMode';
   for(const m of MODES){const o=document.createElement('option');o.value=m[0];o.textContent=m[1];sel.append(o);}
   modeRow.append(sel);box.append(modeRow);
-  const actor=document.createElement('input');actor.id='resetActor';actor.placeholder='担当者名（必須）';actor.maxLength=100;box.append(actor);
-  const reason=document.createElement('input');reason.id='resetReason';reason.placeholder='理由（任意）';reason.maxLength=2000;box.append(reason);
-  const name=document.createElement('input');name.id='resetName';name.placeholder='PJ名を再入力（確定に必須）';name.maxLength=120;box.append(name);
+  const actorLabel=addText(box,'label','担当者名（必須）');actorLabel.htmlFor='resetActor';
+  const actor=document.createElement('input');actor.id='resetActor';actor.placeholder='操作する人の名前';actor.maxLength=100;box.append(actor);
+  const reasonLabel=addText(box,'label','初期化の理由（任意）');reasonLabel.htmlFor='resetReason';
+  const reason=document.createElement('input');reason.id='resetReason';reason.placeholder='例：計画を作り直すため';reason.maxLength=2000;box.append(reason);
+  const nameLabel=addText(box,'label','PJ名を正確に再入力（必須）');nameLabel.htmlFor='resetName';
+  const name=document.createElement('input');name.id='resetName';name.placeholder='選択中のPJ名を入力';name.maxLength=120;box.append(name);
   const previewHost=document.createElement('div');previewHost.id='resetPreviewHost';box.append(previewHost);
   const gensHost=document.createElement('div');gensHost.id='resetGenerationsHost';box.append(gensHost);
   const status=document.createElement('p');status.id='resetStatus';box.append(status);
   const previewBtn=document.createElement('button');previewBtn.type='button';previewBtn.textContent='プレビューを表示（変更なし）';
-  const execBtn=document.createElement('button');execBtn.type='button';execBtn.textContent='初期化を実行';execBtn.disabled=true;
-  let token='';let canInitialize=false;
+  const execBtn=document.createElement('button');execBtn.type='button';execBtn.id='resetExecute';execBtn.textContent='初期化を実行';execBtn.disabled=true;
+  let token='';let canInitialize=false;let previewName='';let previewPid='';
+  function updateExecute(){
+   execBtn.disabled=!(canInitialize&&token&&previewPid===currentPid()&&
+    name.value.trim()===previewName&&actor.value.trim());
+  }
+  function clearPreview(){
+   token='';canInitialize=false;previewName='';previewPid='';
+   nameLabel.textContent='PJ名を正確に再入力（必須）';
+   execBtn.disabled=true;previewHost.replaceChildren();
+  }
   previewBtn.onclick=async()=>{
-   status.textContent='確認中…';execBtn.disabled=true;token='';canInitialize=false;
+   status.textContent='確認中…';clearPreview();
+   const requestedPid=currentPid();
    try{
     const view=await api('/reset-preview?mode='+encodeURIComponent(sel.value));
+    if(requestedPid!==currentPid())return;
     renderPreview(previewHost,view);
     token=view.preview_token||'';canInitialize=!!view.can_initialize;
-    status.textContent=view.can_initialize?'プレビューを表示しました。PJ名を入力すると確定できます。':'初期化できません: '+((view.blocked_reasons||[]).join(' / '));
+    previewName=String(view.project_name||'');previewPid=requestedPid;
+    nameLabel.textContent='PJ名「'+previewName+'」を正確に再入力（必須）';
+    status.textContent=view.can_initialize?
+     'プレビュー済み。上の「担当者名」と「PJ名」の欄を入力してください。':
+     '初期化できません: '+((view.blocked_reasons||[]).join(' / '));
+    updateExecute();
+    if(view.can_initialize){if(!actor.value.trim())actor.focus();else if(name.value.trim()!==previewName)name.focus();}
    }catch(e){status.textContent=e.message||'確認できませんでした';}
   };
-  name.addEventListener('input',()=>{execBtn.disabled=!(canInitialize&&token&&name.value.trim());});
-  sel.addEventListener('change',()=>{execBtn.disabled=true;token='';});
+  name.addEventListener('input',updateExecute);
+  actor.addEventListener('input',updateExecute);
+  sel.addEventListener('change',()=>{clearPreview();status.textContent='モードを変更しました。再プレビューしてください。';});
+  document.getElementById('projectSelect').addEventListener('change',()=>{
+   clearPreview();name.value='';status.textContent='対象PJを変更しました。再プレビューしてください。';
+  });
   execBtn.onclick=async()=>{
+   updateExecute();if(execBtn.disabled)return;
    status.textContent='実行中…';execBtn.disabled=true;
    try{
-    const out=await api('/initialize',{mode:sel.value,preview_token:token,project_name:name.value.trim(),actor:(document.getElementById('resetActor')||{}).value||'',reason:(document.getElementById('resetReason')||{}).value||'',idempotency_key:token.slice(0,64)});
+    const out=await api('/initialize',{mode:sel.value,preview_token:token,project_name:name.value.trim(),actor:actor.value.trim(),reason:reason.value||'',idempotency_key:token.slice(0,64)});
     status.textContent='新世代 '+String(out.generation)+' を開始しました。旧世代は退避 '+String(out.backup_id||'').slice(0,40)+' から復元できます。';
-    token='';
+    clearPreview();
     await loadGenerations(gensHost);
-   }catch(e){status.textContent=e.message||'実行できませんでした';execBtn.disabled=false;}
+   }catch(e){status.textContent=e.message||'実行できませんでした';updateExecute();}
   };
   box.append(previewBtn,execBtn,status,previewHost,gensHost);
   anchor.append(box);
+  const toolbar=document.querySelector('#projectTargetBar .project-target-main');
+  if(toolbar&&!document.getElementById('projectResetShortcut')){
+   const shortcut=document.createElement('button');shortcut.type='button';
+   shortcut.id='projectResetShortcut';shortcut.className='secondary';
+   shortcut.textContent='PJ初期化へ';
+   shortcut.onclick=()=>{
+    if(typeof window.selectWorkflowTab==='function')window.selectWorkflowTab('manage');
+    box.scrollIntoView({behavior:'smooth',block:'start'});
+    previewBtn.focus({preventScroll:true});
+   };
+   toolbar.append(shortcut);
+  }
   loadGenerations(gensHost);
  }
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();

@@ -167,6 +167,12 @@ def build_registry() -> list[RegistryEntry]:
         may_contain_external=True, external_kind="external_review_packet",
         description="ReviewStore(reviews: project,kind,signature,payload)。plan/auto-loop/repair_run を含む",
     ))
+    entries.append(RegistryEntry(
+        name="goal_reviews:proposal_keys", kind="sqlite_table", db_label="goal_reviews",
+        table="proposal_keys", project_column="project",
+        shared_with_other_projects=True,
+        description="ReviewStoreの冪等キー(proposal_keys: project,proposal_key,signature,candidate_id)",
+    ))
     # GoalCompletionStore。
     for t in ["goal_contracts", "plan_coverage", "goal_facts", "goal_states",
               "goal_state_events", "completion_evaluations", "human_acceptances",
@@ -240,6 +246,66 @@ def build_registry() -> list[RegistryEntry]:
         shared_with_other_projects=False,
         description="resolution_coordinator の resolutions(*.resolution.sqlite3)",
     ))
+    # Stage1: 停止分類の空転ガード履歴 (サイドカーSQLite: *.stop.sqlite3 の stop_history)。
+    # kind は世代管理と同様 "other" とし、件数テスト (全エントリ1件以上) の対象外にする。
+    # 網羅性検証 (audit_registry_completeness) では table 名で登録扱いになる。
+    entries.append(RegistryEntry(
+        name="stop:stop_history", kind="other", db_label="stop",
+        table="stop_history", project_column="project_id",
+        shared_with_other_projects=False,
+        description="stop_classifier の stop_history(*.stop.sqlite3)。"
+                    "同一(署名,クラス,コード)2連続の空転ガード用。追記のみ",
+        backup_method="stop-sidecar-preserved",
+        delete_method_declared="S1-stop-history (append-only, no physical delete)",
+    ))
+    # Stage 2-A: 機能提案 (サイドカーSQLite: *.gap.sqlite3 の function_proposals /
+    # proposal_events)。kind は stop/generation と同様 "other" とし、件数テスト
+    # (全エントリ1件以上) の対象外にする。網羅性検証 (audit_registry_completeness)
+    # では table 名で登録扱いになる。退避(L1 create_backup)は directory/other を
+    # 複写対象外のため、世代切替では stale 化で扱い (plan_signature 変更で旧提案は
+    # stale。削除しない)、完全削除では purge_project_proposals で当該PJ行を消す。
+    for _t in ("function_proposals", "proposal_events"):
+        entries.append(RegistryEntry(
+            name=f"gap:{_t}", kind="other", db_label="gap",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="capability_gap の FunctionProposal と監査イベント(*.gap.sqlite3)。"
+                        "同一(案件,計画署名,条件,能力,原因)は一意制約で集約",
+            backup_method="gap-sidecar-preserved",
+            delete_method_declared="S2A-gap-purge (purge_project_proposals)",
+        ))
+    # Stage 2-B: Jenkins指示パッケージの出力記録 (サイドカーSQLite: *.gap.sqlite3 の
+    # export_packages / export_history。gap と同居し、kind は "other" として件数
+    # テストの対象外にする。網羅性検証では table 名で登録扱いになる。退避は
+    # gap と同様に sidecar-preserved (行複写対象外)、完全削除では
+    # purge_export_packages で当該PJ行を消す。指示パッケージの実ファイルは
+    # PJ専用Workspace配下 development_instructions/ に置き、workspace エントリで
+    # 退避・削除の対象になる (他PJのスコープには触れない)。
+    for _t in ("export_packages", "export_history"):
+        entries.append(RegistryEntry(
+            name=f"gap:{_t}", kind="other", db_label="gap",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="capability_export の指示パッケージ出力記録と旧版履歴(*.gap.sqlite3)。"
+                        "実ファイルはPJ専用Workspaceの development_instructions/ 配下",
+            backup_method="gap-sidecar-preserved",
+            delete_method_declared="S2B-export-purge (purge_export_packages)",
+        ))
+    # Stage 2-D: 開発結果の取込みと再判定 (サイドカーSQLite: *.gap.sqlite3 の
+    # gap_deliveries / gap_verifications。gap と同居し、kind は "other" として
+    # 件数テストの対象外にする。網羅性検証では table 名で登録扱いになる。
+    # 退避は gap と同様に sidecar-preserved (行複写対象外)、完全削除では
+    # purge_delivery_records で当該PJ行を消す。Jenkinsへの接続・送信は持たない)。
+    for _t in ("gap_deliveries", "gap_verifications"):
+        entries.append(RegistryEntry(
+            name=f"gap:{_t}", kind="other", db_label="gap",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="capability_delivery の納品履歴と再判定記録(*.gap.sqlite3)。"
+                        "追記のみ。能力レジストリは書き換えない",
+            backup_method="gap-sidecar-preserved",
+            delete_method_declared="S2D-delivery-purge (purge_delivery_records)",
+        ))
     # Workspace。
     entries.append(RegistryEntry(
         name="workspace:project_dir", kind="directory", db_label="workspace",
@@ -321,6 +387,10 @@ def resolve_db_path(memory_path: str | Path, db_label: str) -> Path | None:
         return mem.with_name(mem.name + ".auto_resume.sqlite3")
     if db_label == "resolution":
         return mem.with_name(mem.name + ".resolution.sqlite3")
+    if db_label == "stop":
+        return mem.with_name(mem.name + ".stop.sqlite3")
+    if db_label == "gap":
+        return mem.with_name(mem.name + ".gap.sqlite3")
     return None
 
 

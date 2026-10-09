@@ -144,13 +144,35 @@ function mount(){
    prov.append(lab);
   }
   box.append(prov);
+  let providerEpoch=0,providerTouched=false;
+  async function selectProjectDefault(pid){
+   const ticket=++providerEpoch;
+   if(!pid)return;
+   try{
+    const [missionResponse,catalogResponse]=await Promise.all([
+     fetch('/api/projects/'+encodeURIComponent(pid)+'/mission'),
+     fetch('/api/research/providers')
+    ]);
+    if(!missionResponse.ok||!catalogResponse.ok)throw Error('外部AI設定を取得できません');
+    const [mission,catalog]=await Promise.all([missionResponse.json(),catalogResponse.json()]);
+    if(ticket!==providerEpoch||pid!==currentPid()||providerTouched)return;
+    const allowed=new Set(mission.allow_external_ai?(mission.external_providers||[]):[]);
+    const configured=new Set((Array.isArray(catalog)?catalog:[]).filter(x=>x.configured).map(x=>x.id));
+    const preferred=['chatgpt','claude','grok','meta'].find(id=>allowed.has(id)&&configured.has(id))||'';
+    for(const [id] of PROVIDERS)document.getElementById('autoLoopProv-'+id).checked=id===preferred;
+    latestPreview=null;startBtn.disabled=true;previewHost.replaceChildren();
+    status.textContent=preferred?
+     '検証AI「'+PROVIDERS.find(x=>x[0]===preferred)[1]+'」を初期選択しました。送信範囲を確認してから開始してください。':
+     'このPJで許可済み・接続済みの検証AIがありません。目標と計画の外部AI設定を確認してください。';
+   }catch(e){if(ticket===providerEpoch)status.textContent=e.message||'外部AIの初期設定を確認できませんでした';}
+  }
   const previewHost=document.createElement('div');previewHost.id='autoLoopPreview';
   const status=document.createElement('p');status.id='autoLoopStatus';
   const previewBtn=document.createElement('button');previewBtn.type='button';previewBtn.textContent='送信範囲を確認（外部送信なし）';
   const startBtn=document.createElement('button');startBtn.type='button';startBtn.textContent='許可して自動評価を開始';startBtn.disabled=true;
   actor.addEventListener('input',()=>{startBtn.disabled=!(latestPreview&&latestPreview.can_start&&actor.value.trim());});
-  prov.addEventListener('change',()=>{latestPreview=null;startBtn.disabled=true;previewHost.replaceChildren();status.textContent='検証AIを変更したため、送信範囲を再確認してください。';});
-  document.getElementById('projectSelect').addEventListener('change',()=>{latestPreview=null;startBtn.disabled=true;previewHost.replaceChildren();status.textContent='PJを変更したため、送信範囲を再確認してください。';});
+  prov.addEventListener('change',()=>{providerTouched=true;latestPreview=null;startBtn.disabled=true;previewHost.replaceChildren();status.textContent='検証AIを変更したため、送信範囲を再確認してください。';});
+  document.getElementById('projectSelect').addEventListener('change',()=>{providerTouched=false;latestPreview=null;startBtn.disabled=true;previewHost.replaceChildren();status.textContent='PJを変更したため、送信範囲を再確認してください。';selectProjectDefault(currentPid());});
   const cancelBtn=document.createElement('button');cancelBtn.type='button';cancelBtn.textContent='実行中を取消';
   previewBtn.onclick=async()=>{
    status.textContent='確認中…';
@@ -183,6 +205,12 @@ function mount(){
   box.append(previewBtn,startBtn,cancelBtn,status,previewHost);
   const host=document.createElement('div');host.id='autoLoopCards';box.append(host);
   anchor.append(box);
+  (function waitForInitialProject(remaining){
+   const pid=currentPid();
+   if(pid){selectProjectDefault(pid);return;}
+   if(remaining>0)setTimeout(()=>waitForInitialProject(remaining-1),500);
+   else status.textContent='PJ一覧を取得できません。画面を再読み込みしてください。';
+  })(30);
  }
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 }

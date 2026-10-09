@@ -653,6 +653,16 @@ def execution_gate(manager,pid):
         from app.plan_repair_loop import approval_gate
         approval_gate(manager, pid)
         require_review(manager,pid)
+        # Stage 2-A (追加のみ): missing_capability が残る計画は実行承認不可。
+        # 既存のゲートを弱めない (不可にしかしない)。
+        try:
+            from app.capability_gap import blocks_execution_approval as _gap_gate
+            _gap = _gap_gate(manager, pid)
+            if isinstance(_gap, dict) and _gap.get("blocked"):
+                return {"blocked": True,
+                        "reason": _gap.get("reason") or "不足機能の提案が残っているため実行承認できません"}
+        except Exception:
+            pass
         return {'blocked':False,'reason':''}
     except ValueError as exc:
         text=str(exc)

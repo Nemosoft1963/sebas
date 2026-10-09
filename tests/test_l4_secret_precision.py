@@ -151,3 +151,55 @@ def test_generated_plan_has_no_false_positive(tmp_path):
             f"工程 {hx1} と工程 {hx2} を対象とし 20261006 を版とし build 123456789012345 で固定する\n"
             "SC01〜SC18の達成条件を満たし 2026年10月6日 に実施する")
     assert _loop().contains_secret(blob) == ""
+
+
+def test_hashes_and_uuids_are_never_flagged_as_card_numbers():
+    """機械が作る識別子(sha256・UUID)は、数字の連なりが偶然 Luhn に通ってもカード番号と誤検出しない。
+
+    以前は約0.2〜0.7%/識別子で誤検出し、識別子を多く含む文書(指示パッケージ等)が
+    実行ごとに不安定に拒否されていた。乱数は固定シードで決定的にする。
+    """
+    import hashlib
+    import random
+    import uuid
+
+    rng = random.Random(20261009)
+    samples = []
+    for _ in range(20000):
+        raw = rng.getrandbits(256).to_bytes(32, "big")
+        samples.append(hashlib.sha256(raw).hexdigest())
+        samples.append(uuid.UUID(int=rng.getrandbits(128), version=4).hex)
+        samples.append(str(uuid.UUID(int=rng.getrandbits(128), version=4)))
+    hits = [x for x in samples if _loop().contains_secret(x) != ""]
+    assert hits == [], hits[:3]
+    blob = " ".join(samples[:300])
+    assert _loop().contains_secret(blob) == ""
+
+
+@pytest.mark.parametrize("text", [
+    "カード番号は 4111 1111 1111 1111 です",
+    "カード番号は 4111-1111-1111-1111 です",
+    "番号:4111111111111111。確認",
+    "(4111111111111111)",
+    "支払い 4111 1111 1111 1111",
+])
+def test_real_card_numbers_still_detected_after_precision_fix(text):
+    assert _loop().contains_secret(text) == "カード番号様"
+
+
+@pytest.mark.parametrize("text", [
+    "ab7f7a00-0752-4127-9873-cebf86005d4e",
+    "6b3ec0d0-28e1-4bdc-88cd-299404382297",
+    "proposal_id: 4ffe71ea405e2fb3c8991371560790f8",
+    "plan_signature 01dbf18e17c08a68bf15a088bbd5c0fae8bb64cb371f038e1e0a5a9c944c8e96",
+])
+def test_machine_ids_are_not_phone_or_mynumber_lookalikes(text):
+    """UUIDの数字だけのグループ(電話番号様・12桁個人番号様に見える)を誤検出しない。"""
+    assert _loop().contains_secret(text) == ""
+
+
+def test_real_numbers_next_to_machine_ids_are_still_detected():
+    """識別子のマスクが、同じ文中の本物の電話番号・個人番号の検出を妨げない。"""
+    uid = "ab7f7a00-0752-4127-9873-cebf86005d4e"
+    assert _loop().contains_secret(f"{uid} 連絡先は 03-1234-5678 です") != ""
+    assert _loop().contains_secret(f"{uid} 個人番号: 1234 5678 9012") != ""

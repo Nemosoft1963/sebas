@@ -881,6 +881,25 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
         except (OSError, ValueError):
             _ws_rel = ""
         removed = _purge_all_data(memory_path, pid, workspace_root, _ws_rel)
+        # Stage 2-B (追加のみ): export_packages/history は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        # 実ファイルは _purge_all_data のWorkspace削除で当該PJスコープごと消える。
+        try:
+            from app.capability_export import purge_export_packages as _purge_exports
+            _expurged = _purge_exports(memory_path, pid, workspace_root=None)
+            removed["gap:export_packages"] = int((_expurged or {}).get("export_packages") or 0)
+            removed["gap:export_history"] = int((_expurged or {}).get("export_history") or 0)
+        except Exception:
+            pass
+        # Stage 2-D (追加のみ): gap_deliveries/verifications は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        try:
+            from app.capability_delivery import purge_delivery_records as _purge_deliveries
+            _dpurged = _purge_deliveries(memory_path, pid)
+            removed["gap:gap_deliveries"] = int((_dpurged or {}).get("gap_deliveries") or 0)
+            removed["gap:gap_verifications"] = int((_dpurged or {}).get("gap_verifications") or 0)
+        except Exception:
+            pass
         orphans = list_orphans_after_legacy_delete(memory_path, pid, workspace_root)
         if orphans.get("orphan_count"):
             _record_op(memory_path, pid, "purge", key, "failed", "orphans remain")

@@ -111,6 +111,10 @@ def _fill_all_stores(env) -> None:
     # goal_reviews.
     from app.goal_review import ReviewStore
     ReviewStore(mem).put(pid, "plan", "架空sig", {"ok": True})
+    from app.plan_feedback import _ensure_proposal_key_table, _remember_proposal_key
+    _rs = ReviewStore(mem)
+    _ensure_proposal_key_table(_rs)
+    _remember_proposal_key(_rs, pid, "架空proposal-key1", "架空sig", "架空candidate1")
     # goal_completion.
     from app.goal_completion_store import GoalCompletionStore
     gcs = GoalCompletionStore(mem)

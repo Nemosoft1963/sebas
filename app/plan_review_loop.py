@@ -78,7 +78,27 @@ SECRET_PATTERNS = [
         r")(?![0-9A-Za-z])")),
 ]
 
-_CARD_CANDIDATE = re.compile(r"(?<!\d)(?:\d[\- ]?){13,19}(?!\d)")
+# 機械が作る識別子(ハイフン区切りUUID、32桁以上の16進ダイジェスト)は、数字だけのグループが
+# 12桁の個人番号様・電話番号様・カード番号様に偶然一致する。数字系パターンの検査では
+# これらを空白に置き換えてから照合する(キー・トークン系パターンは元の文字列で照合する)。
+_HEX = "[0-9a-fA-F]"
+_MACHINE_ID_RE = re.compile(
+    r"(?<![0-9A-Za-z])(?:"
+    + _HEX + r"{8}-" + _HEX + r"{4}-" + _HEX + r"{4}-" + _HEX + r"{4}-" + _HEX + r"{12}"
+    + r"|" + _HEX + r"{32,}"
+    + r")(?![0-9A-Za-z])")
+_NUMERIC_SECRET_LABELS = frozenset({"マイナンバー様(12桁)", "電話番号様", "電話番号様(語付き)"})
+
+# カード番号の候補: (a) 区切りなしの13〜19桁、(b) 4桁ずつ同じ区切り(空白かハイフン)で並ぶ形。
+# いずれも英数字に隣接しない。以前は「数字の連なり+任意の区切り」を許していたため、
+# 16進ハッシュの中の数字列や、ハイフン区切りUUIDの隣り合う数字だけのグループが
+# Luhn に偶然通って誤検出になっていた(約0.2〜0.7%/識別子)。実カード番号は
+# 空白・記号・日本語に囲まれ、区切りは一種類で桁数が規則的である。
+_CARD_CANDIDATE = re.compile(
+    r"(?<![0-9A-Za-z])(?:"
+    r"\d{13,19}"
+    r"|\d{4}([- ])\d{4}\1\d{4}\1\d{1,7}"
+    r")(?![0-9A-Za-z])")
 
 # P7 issue-binding: 指摘の正規化と根拠付き対応付け(純粋関数群)。
 # 外部AIの指摘本文は命令として扱わない(データ)。unverifiableを合格に変えない。
@@ -252,19 +272,21 @@ def contains_secret(text: str) -> str:
     カード番号様は Luhn チェックで絞る。
     """
     blob = str(text or "")
+    numeric_blob = _MACHINE_ID_RE.sub(" ", blob)
     for item in SECRET_PATTERNS:
         if isinstance(item, tuple):
             label, pat = item
         else:
             label, pat = "秘密値", item
-        if pat.search(blob):
+        target = numeric_blob if label in _NUMERIC_SECRET_LABELS else blob
+        if pat.search(target):
             return str(label)
-    m = _CARD_CANDIDATE.search(blob)
+    m = _CARD_CANDIDATE.search(numeric_blob)
     while m:
         digits = re.sub(r"[\- ]", "", m.group(0))
         if 13 <= len(digits) <= 19 and digits.isdigit() and _luhn_ok(digits):
             return "カード番号様"
-        m = _CARD_CANDIDATE.search(blob, m.start() + 1)
+        m = _CARD_CANDIDATE.search(numeric_blob, m.start() + 1)
     return ""
 
 
@@ -1258,6 +1280,33 @@ async def run_loop(manager, pid: str, run_id: str) -> dict:
         return await _run_locked(manager, pid, run_id)
 
 
+def _stop_guard_tick(manager, pid: str, run: dict) -> tuple[dict, dict | None]:
+    """Stage1 空転ガード: 同一(署名,クラス,コード)2連続で stopped にする。
+
+    履歴を書くのはランのティックだけ。新しい署名・新しい入力・人の選択があれば解除。
+    戻り値: (guard, flat_record)。guard["repeating"] が True なら停止する。
+    """
+    from app.stop_classifier import append_history, classify_stop, guard_auto_tick
+
+    sig = str(run.get("plan_signature") or "")
+    record = classify_stop({"run": run, "plan_signature": sig})
+    guard = guard_auto_tick(manager, pid, run, record)
+    flat = dict(guard.get("record") or {})
+    # ティックでのみ追記 (冪等キーで同時ティックの二重化を防ぐ)。
+    key_parts = [pid, flat.get("plan_signature") or "", flat.get("stop_class") or "",
+                 flat.get("stop_code") or "", str(run.get("id") or ""),
+                 str(int(run.get("verification_rounds") or 0))]
+    import hashlib as _hashlib
+
+    idem = "tick:" + _hashlib.sha256("|".join(key_parts).encode()).hexdigest()[:32]
+    try:
+        append_history(manager, pid, flat, actor="auto-tick", idempotency_key=idem)
+    except Exception:
+        pass
+    guard["history"] = guard.get("history") or []
+    return guard, flat
+
+
 async def _run_locked(manager, pid: str, run_id: str) -> dict:
     from app.goal_review import plan_snapshot as _snap
     from app.goal_review import public_structure as _pub
@@ -1271,6 +1320,29 @@ async def _run_locked(manager, pid: str, run_id: str) -> dict:
 
     run = get_run(manager, pid, run_id)
     if run.get("state") in {"cancelled", "awaiting_human"}:
+        return public_view(run)
+
+    # Stage1 空転ガード (自動ランのティック/再試行の入口)。
+    # 同一署名・同一停止の2連続で stopped にし、理由を残す。
+    # 既存の再試行上限・外部評価上限 (最大2回)・人確認ゲートは変えない。
+    try:
+        guard, _flat = _stop_guard_tick(manager, pid, run)
+    except Exception:
+        guard = {"repeating": False}
+    if bool(guard.get("repeating")):
+        run = get_run(manager, pid, run_id)
+        run["state"] = "stopped"
+        run["stop_reason"] = "同じ停止の繰り返しのため自動ランを停止しました"
+        run["stop_kind"] = "stopped"
+        _save(manager, run)
+        lease = _lease_get(manager, pid) or {}
+        if lease.get("run_id") == run_id:
+            _lease_set(manager, pid, None)
+        try:
+            manager.memory.add_event(pid, "auto_loop_stopped", "同じ停止の繰り返しのため自動ランを停止しました",
+                                     detail=canonical({"run_id": run_id}))
+        except Exception:
+            pass
         return public_view(run)
 
     def _stop(reason: str, kind: str = "stopped") -> dict:

@@ -201,3 +201,23 @@ def test_p0_5_stop_reason_and_next_action_consistency(tmp_path):
     elif phase == 'dev_blocked':
         assert '開発' in stop_reason or '指摘' in stop_reason
         assert next_action['id'] == 'resolve_development'
+
+
+def test_uncovered_saved_draft_routes_to_review_instead_of_regeneration():
+    revision = {"status": "draft", "blockers": [], "changes": [{"target": "execution_pipeline"}],
+                "coverage_matrix": {"rows": [{"issue_id": "i1", "coverage": "uncovered", "reason": "ambiguous"}]}}
+    stage, action = resolve_pipeline_stage(
+        {"status": "planning"}, {"status": "not_passed"}, revision,
+        [{"id": "i1"}], {"blocked": True}, None,
+    )
+    assert stage == "human_confirm"
+    assert action == "review_feedback"
+
+
+def test_saved_draft_ready_has_apply_as_next_action():
+    from app.workflow_readiness import _next_action
+    row = _next_action('proposal_ready', {}, [], 'project-1',
+                       allowed_actions={'apply': {'allowed': True, 'reason': ''}})
+    assert row['id'] == 'apply'
+    assert row['manual_executable'] is True
+    assert row['auto_executable'] is False

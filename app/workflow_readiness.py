@@ -88,6 +88,7 @@ PHASE_LABELS = {
     'dev_blocked': ('development_blocker', '追加開発が必要な指摘があります'),
     'plan_conflict': ('plan_conflict', '修正案の対象・根拠を確認してください'),
     'plan_fact_confirm': ('plan_fact_confirm', '計画に必要な業務事実を確認してください'),
+    'proposal_ready': ('proposal_ready', '保存済み修正案の確認待ち'),
     'issues_open': ('plan_issues_open', '計画への指摘が未対応です'),
     'waiting_budget': ('waiting_budget', '外部検証の予算回復待ち'),
     'unverified': ('external_review_required', '現行版の外部検証が未完了です'),
@@ -196,6 +197,9 @@ def resolve_pipeline_stage(mission: dict, plan: dict, revision: dict, issues: li
         return 'applied', 'external_review'
 
     if revision_status == 'draft':
+        from app.plan_coverage_matrix import coverage_gate_error
+        if coverage_gate_error(revision.get('coverage_matrix')):
+            return 'human_confirm', 'review_feedback'
         if blockers:
             return 'proposal_ready', 'resolve_development'
         if draft_ok:
@@ -342,6 +346,12 @@ def _phase(mission, vehicle, revision, plan, queue, gate, issues, failures, job,
         return 'accuracy_blocked'
     if vehicle['applicable'] and vehicle['unresolved_allocations']:
         return 'fact_confirm'
+    if revision.get('status') == 'draft':
+        from app.plan_coverage_matrix import coverage_gate_error
+        if coverage_gate_error(revision.get('coverage_matrix')):
+            return 'plan_conflict'
+        if not revision.get('blockers') and revision.get('changes'):
+            return 'proposal_ready'
     if revision.get('blockers'):
         code = (classify_replan_failure(revision) or {}).get('code')
         return {'development_required': 'dev_blocked', 'input_insufficient': 'plan_fact_confirm'}.get(code, 'plan_conflict')
@@ -389,6 +399,8 @@ def _next_action(phase, vehicle, issues, pid='', allowed_actions=None, stop_reas
         action = {'id': 'review_feedback', 'label': '保存済み修正案の対象と根拠を確認する', 'endpoint': _endpoint(pid, '/goal-review'), 'class': 'human_approval', 'auto_executable': False}
     elif phase == 'plan_fact_confirm':
         action = {'id': 'review_feedback', 'label': '必要な業務事実と修正案を確認する', 'endpoint': _endpoint(pid, '/goal-review'), 'class': 'human_fact', 'auto_executable': False}
+    elif phase == 'proposal_ready':
+        action = {'id': 'apply', 'label': '保存済み修正案を確認して計画へ反映する', 'endpoint': _endpoint(pid, '/goal-review/feedback/apply'), 'class': 'human_approval', 'auto_executable': False}
     elif phase == 'issues_open':
         action = {'id': 'propose_feedback', 'label': '指摘から修正案を作成する', 'endpoint': _endpoint(pid, '/goal-review/feedback/propose'), 'class': 'local_safe', 'auto_executable': False}
     elif phase == 'waiting_budget':
@@ -425,12 +437,18 @@ def _stop_reason(phase, gate, vehicle, revision, issues, failures, plan=None):
     if phase == 'fact_confirm':
         return '未配賦または業務事実の確認が残っています。'
     if phase in {'plan_conflict', 'plan_fact_confirm'}:
+        from app.plan_coverage_matrix import coverage_gate_error
+        coverage_reason = coverage_gate_error(revision.get('coverage_matrix'))
+        if coverage_reason:
+            return coverage_reason
         failure = classify_replan_failure(revision) or {}
         return str(failure.get('reason') or failure.get('next_work') or '修正案の未解決事項を確認してください。')
     if phase == 'dev_blocked':
         blockers = revision.get('blockers') or []
         first = blockers[0] if blockers and isinstance(blockers[0], dict) else {}
         return str(first.get('reason') or '追加開発が必要な指摘があるため反映と実行を開始できません。')
+    if phase == 'proposal_ready':
+        return '修正案は保存済みです。差分と目標の充足を確認してください。'
     if phase == 'issues_open':
         return '計画への指摘が未対応です。修正案を作成してください。'
     if phase == 'waiting_budget':
@@ -456,7 +474,9 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
     blockers = list(revision.get('blockers') or [])
     failure = classify_replan_failure(revision) or {}
     blocker_label = failure.get('label') or '未解決の指摘'
-    draft_ok = revision.get('status') == 'draft' and not blockers and revision.get('changes')
+    from app.plan_coverage_matrix import coverage_gate_error
+    coverage_problem = coverage_gate_error(revision.get('coverage_matrix'))
+    draft_ok = revision.get('status') == 'draft' and not blockers and revision.get('changes') and not coverage_problem
     try:
         from app.plan_repair_loop import repair_gate_summary
         repair = repair_gate_summary(manager, pid) or {}
@@ -485,7 +505,7 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
         'propose_feedback': _action(bool(issues) and not running, busy or ('指摘がありません' if not issues else '')),
         'apply': _action(
             bool(draft_ok) and not running,
-            busy or ('追加開発が必要な指摘があります' if blockers else '反映できる修正案がありません'),
+            busy or ('追加開発が必要な指摘があります' if blockers else coverage_problem or '反映できる修正案がありません'),
         ),
         'external_review': _action(
             not running and send_allowed(manager, pid),
@@ -521,7 +541,7 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
             busy or '追加開発が必要な指摘はありません',
         ),
         'review_feedback': _action(
-            bool(blockers) and not running,
+            bool(blockers or coverage_problem) and not running,
             busy or '確認する保存済み修正案はありません',
         ),
         'review_artifacts': _action(
@@ -647,6 +667,48 @@ def _cached_gate(manager, pid: str, contract: dict, mission: dict) -> dict:
     return dict(value)
 
 
+def build_stop_class(manager, pid: str, built: dict | None = None) -> dict:
+    """Stage1: 主たる停止分類 (読み取り専用・追加のみ)。
+
+    build_readiness の既存材料から classify_stop の入力を作り、主たる1件を返す。
+    副作用なし。既存キーを削除・変更しない。
+    """
+    from app.stop_classifier import classify_stop
+
+    if not isinstance(built, dict):
+        return classify_stop({"phase": "idle"})
+    readiness_view = {
+        "phase": built.get("phase"),
+        "plan_signature": built.get("plan_signature"),
+    }
+    inputs: dict = {
+        "readiness": readiness_view,
+        "plan_signature": built.get("plan_signature"),
+        "gate": built.get("gate") if isinstance(built.get("gate"), dict) else {},
+    }
+    for key in ("phase", "state"):
+        _ = key
+    # run 状態 (active_job の保存済み状態)
+    job = built.get("active_job")
+    if isinstance(job, dict):
+        inputs["run"] = job
+    # 被覆行列 (revision に保存済みの場合のみ)
+    triz_view = built.get("triz")
+    if isinstance(triz_view, dict) and triz_view.get("status"):
+        inputs["triz"] = {"status": triz_view.get("status")}
+    pending = built.get("pending_summary")
+    if isinstance(pending, dict):
+        inputs["ledger"] = {"summary": pending}
+    gate = built.get("gate")
+    if isinstance(gate, dict) and list(gate.get("failed_criteria") or []):
+        # completion_gate の未達理由の材料 (既存の failed_criteria のみ)
+        inputs.setdefault("gate", dict(gate))
+    # 再試行上限・予算待ちは安全境界の明示として扱う
+    if built.get("phase") in {"waiting_budget"}:
+        inputs["budget_exhausted"] = True
+    return classify_stop(inputs)
+
+
 def build_readiness(manager, pid: str) -> dict:
     """設計書 第4.1節の JSON を組み立てる。既存判定関数を呼ぶだけ。"""
     mission = manager.memory.get_mission(pid)
@@ -704,6 +766,7 @@ def build_readiness(manager, pid: str) -> dict:
         'dev_blocked': 'development_required',
         'plan_conflict': 'plan_review',
         'plan_fact_confirm': 'needs_input',
+        'proposal_ready': 'plan_review',
         'issues_open': 'plan_review',
         'waiting_budget': 'plan_review',
         'unverified': 'plan_review',
@@ -748,7 +811,7 @@ def build_readiness(manager, pid: str) -> dict:
     except Exception:
         generation = dict(generation)
 
-    return {
+    built = {
         'project_id': pid,
         'goal': mission.get('goal') or '',
         'plan_version': mission.get('plan_version') or 0,
@@ -796,3 +859,22 @@ def build_readiness(manager, pid: str) -> dict:
         'generation': generation,
         'revision_token': _token(signature, mission.get('plan_version'), vehicle.get('controls'), plan.get('status')),
     }
+    # Stage1: 停止分類を追加のみ (既存キーは不変)。失敗時は分類不能に倒す。
+    try:
+        built['stop_class'] = build_stop_class(manager, pid, built)
+    except Exception:
+        try:
+            from app.stop_classifier import classify_stop as _classify_stop
+
+            built['stop_class'] = _classify_stop({})
+        except Exception:
+            built['stop_class'] = {
+                'stop_class': 'missing_decision',
+                'stop_code': 'unknown:empty',
+                'evidence_refs': {},
+                'next_action': 'none',
+                'reason_ja': '分類不能のため人の判断が必要です。',
+                'external_sends': 0,
+                'also': [],
+            }
+    return built

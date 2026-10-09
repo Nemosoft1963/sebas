@@ -207,3 +207,20 @@ img,svg,canvas,video{max-width:100%}
 .project-management-list li{margin:8px 0;overflow-wrap:anywhere}
 .project-management-status{min-height:1.5em;overflow-wrap:anywhere}
 @media(max-width:760px){.project-management-row{align-items:stretch;flex-direction:column}.project-management-row input,.project-management-row button{width:100%;min-width:0}}
+
+#projectResetSection label{display:block;margin:12px 0 5px;font-weight:700}
+#projectResetSection input{display:block;width:min(100%,640px);min-height:38px}
+#projectResetSection button{margin:12px 8px 4px 0;min-height:38px}
+
+.workflow-quick{margin:0 0 14px;padding:14px 16px;border:1px solid var(--mission-blue);border-radius:12px;background:#101e34}
+.workflow-quick h2{font-size:17px;margin:0 0 10px}
+.workflow-quick p{margin:7px 0;line-height:1.5;overflow-wrap:anywhere}
+.workflow-quick p strong{color:var(--mission-blue)}
+.workflow-quick-steps{display:flex;flex-wrap:wrap;gap:6px;list-style:none;margin:0 0 12px;padding:0}
+.workflow-quick-steps li{padding:5px 9px;border:1px solid var(--line);border-radius:99px;color:var(--muted);font-size:12px}
+.workflow-quick-steps li.is-current{border-color:var(--mission-blue);background:#243f65;color:#fff;font-weight:700}
+.workflow-quick-steps li.is-done{color:var(--accent,#52d6a7)}
+.workflow-quick button{min-height:40px;margin-top:7px;padding:0 16px}
+.workflow-detail-state{margin:0 0 14px}
+.workflow-detail-state>summary{cursor:pointer;padding:10px 12px;border:1px solid var(--line);border-radius:9px}
+.workflow-detail-state[open]>summary{margin-bottom:10px}
