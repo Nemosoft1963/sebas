@@ -530,14 +530,17 @@ def reset_adapter_registry(pid: str | None = None) -> None:
 async def on_failure(manager, pid, task, error):
     """車両 ReviewRequired でも failure を保存する。返却は握りつぶさない。
 
-    L3: 論理削除中のPJはTRIZ・自動再開の起動対象から除外する。
+    L3: 論理削除中・削除状態が確認できないPJはTRIZ・自動再開の起動対象から除外する。
     """
     try:
-        from app.project_delete import is_deleted as _l3_is_deleted
-        if _l3_is_deleted(manager.memory.path, pid):
-            return {"status": "excluded", "reason": "論理削除中のためTRIZを起動しません"}
+        from app.project_delete import delete_state_status as _l3_delete_state
+        _state = _l3_delete_state(manager.memory.path, pid)
+        if _state in ("deleted", "purged", "unknown"):
+            return {"status": "excluded",
+                    "reason": ("削除状態を確認できないためTRIZを起動しません(状態を確定できません)"
+                               if _state == "unknown" else "論理削除中のためTRIZを起動しません")}
     except Exception:
-        pass
+        return {"status": "excluded", "reason": "削除状態を確認できないためTRIZを起動しません(状態を確定できません)"}
     from app.vehicle_workflow import requirements_hash, sources
     mission = manager.memory.get_mission(pid); snapshot = sources(manager, pid)
     signature = digest([requirements_hash(mission), task.get('acceptance_criteria'), snapshot, str(error)])

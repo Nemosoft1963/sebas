@@ -570,15 +570,19 @@ def _post_completion_reevaluation(manager, project_id: str, task_key: str, run_r
 async def resume(manager, project_id: str, executor=None, retry_limit: int = MAX_RETRIES) -> dict:
     """Run only trusted local document steps; all other steps wait for a human.
 
-    L3: 論理削除中のPJは自動再開の起動対象から除外する。
+    L3: 論理削除中・削除状態が確認できないPJは自動再開の起動対象から除外する。
     """
     try:
-        from app.project_delete import is_deleted as _l3_is_deleted
-        if _l3_is_deleted(manager.memory.path, project_id):
-            return {"status": "excluded", "reason": "論理削除中のため自動再開しません",
+        from app.project_delete import delete_state_status as _l3_delete_state
+        _state = _l3_delete_state(manager.memory.path, project_id)
+        if _state in ("deleted", "purged", "unknown"):
+            return {"status": "excluded",
+                    "reason": ("削除状態を確認できないため自動再開しません(状態を確定できません)"
+                               if _state == "unknown" else "論理削除中のため自動再開しません"),
                     "executed": [], "waiting_human": [], "failed": []}
     except Exception:
-        pass
+        return {"status": "excluded", "reason": "削除状態を確認できないため自動再開しません(状態を確定できません)",
+                "executed": [], "waiting_human": [], "failed": []}
     """Run only trusted local document steps; all other steps wait for a human."""
     if os.environ.get("LOCALSAPORTER_AUTO_RESUME_AVAILABLE") != "1":
         return {"status": "disabled", "reason": "server feature flag is off", "executed": [], "waiting_human": [], "failed": []}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -19,6 +20,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 DELETE_FORMAT = "l3-delete/1"
 PREVIEW_TOKEN_TTL_SEC = 10 * 60
@@ -132,6 +135,73 @@ def is_deleted(memory_path: str | Path, project_id: str) -> bool:
 def is_purged(memory_path: str | Path, project_id: str) -> bool:
     st = get_delete_state(memory_path, project_id)
     return bool(st and st.get("state") == "purged")
+
+
+def delete_state_status(memory_path: str | Path, project_id: str) -> str:
+    """削除状態を安全側で読む(読み取り専用)。
+
+    - "active": サイドカーDBが存在しない、または正常で当該PJの行が無い
+    - 行がある場合: その state ("deleted"/"purged"/"restoring" 等の既存値)
+    - "unknown": DBが存在するが開けない/読めない/破損・テーブル欠落など確定不能
+    失敗時は例外の型名だけをログに残し、パスや内部情報は出さない。
+    """
+    pid = str(project_id)
+    try:
+        path = delete_db_path(memory_path)
+    except Exception as exc:
+        LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+        return "unknown"
+    try:
+        if not path.exists():
+            # サイドカーDBが存在しないことは「未削除」(active)であり unknown ではない。
+            # 既存テストの monkeypatch 対象 (is_deleted) との互換のため、
+            # DBが無い場合だけ is_deleted の差し替え結果を尊重する。
+            try:
+                if bool(is_deleted(memory_path, project_id)):
+                    return "deleted"
+            except Exception:
+                pass
+            return "active"
+        try:
+            db = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+            db.row_factory = sqlite3.Row
+        except Exception as exc:
+            if not path.exists():
+                return "active"
+            LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+            return "unknown"
+        try:
+            if not _table_exists(db, "project_delete_states"):
+                LOGGER.warning("project delete state unreadable: missing table")
+                return "unknown"
+            try:
+                row = db.execute(
+                    "SELECT * FROM project_delete_states WHERE project_id=?",
+                    (pid,)).fetchone()
+            except Exception as exc:
+                LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+                return "unknown"
+            if row is None:
+                return "active"
+            state = str(dict(row).get("state") or "")
+            return state if state in ("deleted", "purged", "restored") else "unknown"
+        finally:
+            try:
+                db.close()
+            except Exception as exc:
+                LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+                return "unknown"
+    except Exception as exc:
+        LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+        return "unknown"
+
+
+def is_deleted_or_unknown(memory_path: str | Path, project_id: str) -> bool:
+    """deleted/purged/unknown のとき True (fail-closed 用)。"""
+    try:
+        return delete_state_status(memory_path, project_id) in ("deleted", "purged", "unknown")
+    except Exception:
+        return True
 
 
 def list_deleted(memory_path: str | Path) -> list[dict[str, Any]]:
@@ -898,6 +968,15 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
             _dpurged = _purge_deliveries(memory_path, pid)
             removed["gap:gap_deliveries"] = int((_dpurged or {}).get("gap_deliveries") or 0)
             removed["gap:gap_verifications"] = int((_dpurged or {}).get("gap_verifications") or 0)
+        except Exception:
+            pass
+        # Stage3 (追加のみ): autopilot_config/ticks は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        try:
+            from app.autopilot import purge_project_autopilot as _purge_autopilot
+            _apurged = _purge_autopilot(memory_path, pid)
+            removed["autopilot:autopilot_config"] = int((_apurged or {}).get("autopilot_config") or 0)
+            removed["autopilot:autopilot_ticks"] = int((_apurged or {}).get("autopilot_ticks") or 0)
         except Exception:
             pass
         orphans = list_orphans_after_legacy_delete(memory_path, pid, workspace_root)

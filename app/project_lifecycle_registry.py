@@ -258,6 +258,22 @@ def build_registry() -> list[RegistryEntry]:
         backup_method="stop-sidecar-preserved",
         delete_method_declared="S1-stop-history (append-only, no physical delete)",
     ))
+    # Stage3: 境界付き自走 (サイドカーSQLite: *.autopilot.sqlite3 の
+    # autopilot_config / autopilot_ticks)。kind は stop/generation と同様 "other"
+    # とし、件数テスト (全エントリ1件以上) の対象外にする。網羅性検証
+    # (audit_registry_completeness) では table 名で登録扱いになる。退避は
+    # sidecar-preserved (行複写対象外)、PJ初期化では無効に戻し (行は残す)、
+    # 完全削除では purge_project_autopilot で当該PJ行を消す。
+    for _t in ("autopilot_config", "autopilot_ticks"):
+        entries.append(RegistryEntry(
+            name=f"autopilot:{_t}", kind="other", db_label="autopilot",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="autopilot の設定とティック履歴(*.autopilot.sqlite3)。"
+                        "追記のみ。既定は無効",
+            backup_method="autopilot-sidecar-preserved",
+            delete_method_declared="S3-autopilot-purge (purge_project_autopilot)",
+        ))
     # Stage 2-A: 機能提案 (サイドカーSQLite: *.gap.sqlite3 の function_proposals /
     # proposal_events)。kind は stop/generation と同様 "other" とし、件数テスト
     # (全エントリ1件以上) の対象外にする。網羅性検証 (audit_registry_completeness)
@@ -370,6 +386,8 @@ def resolve_db_path(memory_path: str | Path, db_label: str) -> Path | None:
         return parent / "goal_reviews.sqlite3"
     if db_label == "goal_completion":
         return parent / "goal_completion.sqlite3"
+    if db_label == "autopilot":
+        return mem.with_name(mem.name + ".autopilot.sqlite3")
     if db_label == "experience":
         return parent / "experience_memory" / "experience.sqlite3"
     if db_label == "vector_index":

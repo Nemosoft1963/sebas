@@ -417,15 +417,21 @@ def require_project(project_id: str) -> dict:
     project = memory.get_project(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
-    # L3: 論理削除中のPJは通常の読出し対象から外す (データは残す)。
+    # L3: 論理削除中・削除状態が確認できないPJは通常の読出し対象から外す (データは残す)。
     try:
-        from app.project_delete import is_deleted as _l3_is_deleted
-        if _l3_is_deleted(memory.path, project_id):
+        mem_path = getattr(memory, "path", None)
+        if mem_path is None:
+            raise HTTPException(410, "このPJは削除状態を確認できないため表示できません(状態を確認できません)")
+        from app.project_delete import delete_state_status as _l3_delete_state
+        state = _l3_delete_state(mem_path, project_id)
+        if state in ("deleted", "purged"):
             raise HTTPException(410, "このPJは論理削除されています(削除済み一覧から復元できます)")
+        if state == "unknown":
+            raise HTTPException(410, "このPJは削除状態を確認できないため表示できません(状態を確定できません)")
     except HTTPException:
         raise
     except Exception:
-        pass
+        raise HTTPException(410, "このPJは削除状態を確認できないため表示できません(状態を確定できません)")
     return project
 
 
@@ -3131,6 +3137,19 @@ async def get_stop_class(project_id: str):
     }
 
 
+@app.get('/api/projects/{project_id}/execution-funnel')
+async def get_execution_funnel(project_id: str):
+    require_project(project_id)
+    from app.execution_funnel import project_funnel
+    return project_funnel(orchestrator, project_id)
+
+
+@app.get('/api/execution-funnel')
+async def get_execution_funnel_portfolio():
+    from app.execution_funnel import portfolio_funnel
+    return portfolio_funnel(orchestrator)
+
+
 @app.get('/api/projects/{project_id}/goal-metrics')
 async def get_goal_metrics(project_id: str):
     require_project(project_id)
@@ -3306,6 +3325,96 @@ async def post_auto_resume_run(project_id: str):
     from app.safe_auto_resume import resume
     try:
         return await resume(orchestrator, project_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class AutopilotSettingPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class AutopilotTickPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    dry_run: bool = False
+
+
+class AutopilotRunPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    max_ticks: int = Field(default=10, ge=1, le=10)
+
+
+@app.get('/api/projects/{project_id}/autopilot')
+async def get_autopilot(project_id: str):
+    require_project(project_id)
+    from app import autopilot as _auto
+    # 読み取り専用: 状態・設定・直近のティックのみ。DB・ファイルを変更しない。
+    config = _auto.get_config(orchestrator, project_id)
+    ticks = _auto.list_ticks(orchestrator, project_id)
+    return {'project_id': project_id, 'config': config, 'ticks': ticks,
+            'read_only': True, 'external_sends': 0}
+
+
+@app.post('/api/projects/{project_id}/autopilot/enable')
+async def enable_autopilot(project_id: str, payload: AutopilotSettingPayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    reason = payload.reason.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    if not reason:
+        raise HTTPException(422, 'reason is required')
+    from app import autopilot as _auto
+    try:
+        return _auto.set_enabled(orchestrator, project_id, True,
+                                 actor=actor, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/autopilot/disable')
+async def disable_autopilot(project_id: str, payload: AutopilotSettingPayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    reason = payload.reason.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    if not reason:
+        raise HTTPException(422, 'reason is required')
+    from app import autopilot as _auto
+    try:
+        return _auto.set_enabled(orchestrator, project_id, False,
+                                 actor=actor, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/autopilot/tick')
+async def tick_autopilot(project_id: str, payload: AutopilotTickPayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import autopilot as _auto
+    try:
+        return await asyncio.to_thread(_auto.autopilot_tick, orchestrator,
+                                       project_id, actor=actor,
+                                       dry_run=bool(payload.dry_run))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/autopilot/run')
+async def run_autopilot(project_id: str, payload: AutopilotRunPayload):
+    require_project(project_id)
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import autopilot as _auto
+    try:
+        return await asyncio.to_thread(_auto.run_until_stop, orchestrator,
+                                       project_id, actor=actor,
+                                       max_ticks=int(payload.max_ticks))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

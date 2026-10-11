@@ -37,17 +37,17 @@ async def tick(manager):
     with store.connect() as db:
         rows=[(r[0],r[1],json.loads(r[2])) for r in db.execute("SELECT project,signature,payload FROM reviews WHERE kind='plan_queue'")]
     try:
-        from app.project_delete import is_deleted as _l3_is_deleted
+        from app.project_delete import is_deleted_or_unknown as _l3_is_deleted
     except Exception:
         _l3_is_deleted = None
     for pid,signature,row in rows:
         if row.get('status')!='waiting_budget' or row.get('next_at',0)>time.time():continue
-        # L3: 論理削除中のPJは自動評価ループから除外する (新規実行しない)。
+        # L3: 論理削除中・削除状態が確認できないPJは自動評価ループから除外する (新規実行しない)。
         try:
             if _l3_is_deleted is not None and _l3_is_deleted(manager.memory.path, pid):
                 continue
         except Exception:
-            pass
+            continue
         try:
             mission=manager.memory.get_mission(pid)
             _,current=plan_snapshot(manager,pid,selected_detail(manager,pid,row.get('task_id')))

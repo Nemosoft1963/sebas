@@ -452,6 +452,14 @@ def _selected_send_allowed(manager, mission: dict, selected: list[str]) -> bool:
 
 def preview_run(manager, pid: str, providers: list[str] | None = None,
                 actor: str = "", ttl_seconds: int = LEASE_TTL) -> dict:
+    try:
+        from app.project_delete import is_deleted_or_unknown as _l3_is_blocked
+        if _l3_is_blocked(manager.memory.path, pid):
+            raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     mission, snapshot, signature, contract = _current(manager, pid)
     from app.goal_review_queue import public_draft
     from app.goal_review import public_structure
@@ -529,6 +537,14 @@ def start_run(manager, pid: str, actor: str, providers: list[str],
     existing = _find_by_idempotency(manager, pid, key) if key else None
     if existing:
         return public_view(existing)
+    try:
+        from app.project_delete import is_deleted_or_unknown as _l3_is_blocked
+        if _l3_is_blocked(manager.memory.path, pid):
+            raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     lease = _lease_get(manager, pid) or {}
     if lease.get("run_id") and float(lease.get("expires") or 0) > _now():
         raise ValueError("同一PJで実行中のauto-loopがあります")
@@ -1004,15 +1020,15 @@ def _map_issues_local(parsed_reviews: list[dict], contract: dict, snapshot: dict
 
 
 def _remap_base(manager, pid: str, run_id: str) -> tuple:
-    from app.project_delete import is_deleted as _is_deleted
+    from app.project_delete import is_deleted_or_unknown as _is_deleted
 
     try:
         if _is_deleted(manager.memory.path, pid):
-            raise ValueError("論理削除中のPJには動作しません")
+            raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     except ValueError:
         raise
     except Exception:
-        pass
+        raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     run = get_run(manager, pid, run_id)
     if str(run.get("state") or "") != "stopped" or str(run.get("stop_kind") or "") != "human_required":
         raise ValueError("human_requiredで停止したランだけ対応付け直しできます")
@@ -1146,15 +1162,15 @@ async def confirm_binding(manager, pid: str, run_id: str, issue_id: str, *,
 async def remap_run(manager, pid: str, run_id: str, actor: str = "",
                     idempotency_key: str = "") -> dict:
     """保存済みの第1回レビューからP0/P1だけ再実行。外部AI呼出0・検証回数/利用枠の消費0。"""
-    from app.project_delete import is_deleted as _is_deleted
+    from app.project_delete import is_deleted_or_unknown as _is_deleted
 
     try:
         if _is_deleted(manager.memory.path, pid):
-            raise ValueError("論理削除中のPJには動作しません")
+            raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     except ValueError:
         raise
     except Exception:
-        pass
+        raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     async with _lock(pid):
         run = get_run(manager, pid, run_id)
         if str(run.get("state") or "") != "stopped" or str(run.get("stop_kind") or "") != "human_required":
@@ -1276,6 +1292,14 @@ async def remap_run(manager, pid: str, run_id: str, actor: str = "",
 
 async def run_loop(manager, pid: str, run_id: str) -> dict:
     """保存済み状態から再開可能。送信済みpacketは無断で再送しない。"""
+    try:
+        from app.project_delete import is_deleted_or_unknown as _l3_is_blocked
+        if _l3_is_blocked(manager.memory.path, pid):
+            raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("論理削除中または削除状態を確認できないPJには動作しません(状態を確定できません)")
     async with _lock(pid):
         return await _run_locked(manager, pid, run_id)
 

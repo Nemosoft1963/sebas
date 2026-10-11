@@ -179,9 +179,9 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
     plan_version = int(plan_version or 0)
     plan_signature = str(plan_signature or "").strip()
     extra = dict(extra_context or {})
-    # L3: 論理削除中のPJは計画・RAG参照から除外する。
+    # L3: 論理削除中・削除状態が確認できないPJは計画・RAG参照から除外する。
     try:
-        from app.project_delete import is_deleted as _l3_is_deleted
+        from app.project_delete import is_deleted_or_unknown as _l3_is_deleted
         _mem = None
         try:
             _store = getattr(exp_memory, "store", None)
@@ -208,7 +208,7 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
                         result_none["criteria"].append({
                             "criterion_id": entry["criterion_id"], "statement": entry["statement"],
                             "status": STATUS_UNAVAILABLE, "references": [],
-                            "reason": "論理削除中のため参照不可",
+                            "reason": "論理削除中または削除状態を確認できないため参照不可(状態を確定できません)",
                         })
                     return result_none
             except Exception:
@@ -518,15 +518,26 @@ def collect_for_current_plan(manager, project_id: str, criteria_input=None,
 def current_view(memory_path, project_id: str, plan_version: int) -> dict:
     """現行計画版の参照結果と不採用理由を返す(API/画面用)。事例本文は最小限のみ。"""
     from app.experience_memory import configured_memory
+    from app.project_delete import delete_state_status as _l3_delete_state
     pid = str(project_id or "").strip()
     try:
         setting = configured_memory(memory_path, pid)
     except Exception:
         setting = None
     if setting is None:
+        try:
+            _state = _l3_delete_state(memory_path, pid)
+        except Exception:
+            _state = "unknown"
+        if _state == "unknown":
+            suffix = "削除状態を確認できないため利用不可(状態を確定できません)。"
+        elif _state in ("deleted", "purged"):
+            suffix = "論理削除中のため利用不可。"
+        else:
+            suffix = "RAGが無効のため利用不可。"
         return {"project": pid, "plan_version": int(plan_version or 0), "plan_signature": "",
                 "status": STATUS_UNAVAILABLE, "criteria": [],
-                "note": "参考（達成証拠ではない）。RAGが無効のため利用不可。" + REFERENCE_DISCLAIMER}
+                "note": "参考（達成証拠ではない）。" + suffix + REFERENCE_DISCLAIMER}
     exp_memory, _mode = setting
     try:
         ensure_table(exp_memory.store)

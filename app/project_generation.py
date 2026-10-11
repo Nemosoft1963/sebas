@@ -822,6 +822,15 @@ def initialize_project(memory_path: str | Path, project_id: str, mode: str, *,
         if not check.get("ok"):
             return {"ok": False, "reason": "退避の検証に失敗したため何も変更しません",
                     "verify": check, "backup": backup}
+        # 自走設定を確実に無効化してから世代を切り替える。
+        # 失敗時は旧世代を維持し、自走が有効なまま新世代へ進ませない。
+        try:
+            from app.autopilot import reset_for_generation as _autopilot_reset
+            _autopilot_reset(memory_path, pid)
+        except Exception as exc:
+            return {"ok": False,
+                    "reason": f"自走設定を無効化できないため初期化を中止しました: {type(exc).__name__}",
+                    "backup": backup, "code": "AUTOPILOT_RESET_FAILED"}
         prev_gen = current_generation_number(memory_path, pid)
         new_gen_no = prev_gen + 1
         # 新世代の input_version は旧世代と異なる値にする。

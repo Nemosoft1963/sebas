@@ -324,11 +324,23 @@ class ShortTermMemory:
             """).fetchall()
         items = [dict(row) for row in rows]
         # L3: 論理削除中のPJは通常一覧から除外する (データは残す)。
-        # 除外は読み取り専用のサイドカー参照のみ。失敗時は安全側で全件返す。
+        # 削除状態が確認できないPJは一覧から隠さず、確認不能フラグを付ける。
+        # 除外は読み取り専用のサイドカー参照のみ。既存キーは削除・変更しない。
         try:
-            from app.project_delete import is_deleted as _l3_is_deleted
-            items = [it for it in items
-                     if not _l3_is_deleted(self.path, str(it.get("id") or ""))]
+            from app.project_delete import delete_state_status as _l3_delete_state
+            kept: list[dict] = []
+            for it in items:
+                try:
+                    state = _l3_delete_state(self.path, str(it.get("id") or ""))
+                except Exception:
+                    state = "unknown"
+                if state in ("deleted", "purged"):
+                    continue
+                if state == "unknown":
+                    it["delete_state_unknown"] = True
+                    LOGGER.warning("project list delete state unknown")
+                kept.append(it)
+            items = kept
         except Exception:
             pass
         return items

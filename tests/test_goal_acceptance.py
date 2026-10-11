@@ -135,7 +135,10 @@ def test_blank_accepted_by_rejected_by_function_and_api_without_ledger_row(manag
     assert _rows(store) == []
 
     import app.web as web
-    monkeypatch.setattr(web, "memory", SimpleNamespace(get_project=lambda project_id: {"id": project_id}))
+    # require_project は削除状態を確定できないPJを拒否する(410)。path を持たない偽物では判定できないため、
+    # 実体と同じく path を持たせる(この試験の意図は accepted_by の空白を 422 で拒否すること)。
+    monkeypatch.setattr(web, "memory", SimpleNamespace(
+        get_project=lambda project_id: {"id": project_id}, path=manager.memory.path))
     monkeypatch.setattr(web, "orchestrator", manager)
     client = TestClient(web.app)
     response = client.post("/api/projects/p1/completion-gate/accept", json={"accepted_by": "   ", "note": ""})

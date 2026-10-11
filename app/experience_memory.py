@@ -315,13 +315,13 @@ def memory_scope(memory, project, input_version, *, mode='shadow', external_allo
 
 
 def configured_memory(memory_path, project):
-    # L3: 論理削除中のPJはRAG・検索の対象から除外する (新規実行しない)。
+    # L3: 論理削除中・削除状態が確認できないPJはRAG・検索の対象から除外する (新規実行しない)。
     try:
-        from app.project_delete import is_deleted as _l3_is_deleted
+        from app.project_delete import is_deleted_or_unknown as _l3_is_deleted
         if _l3_is_deleted(memory_path, project):
             return None
     except Exception:
-        pass
+        return None
     path=Path(memory_path).parent/'experience_memory.json'
     if not path.exists():return None
     config=json.loads(path.read_text(encoding='utf-8-sig'))
