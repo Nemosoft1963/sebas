@@ -831,6 +831,15 @@ def initialize_project(memory_path: str | Path, project_id: str, mode: str, *,
             return {"ok": False,
                     "reason": f"自走設定を無効化できないため初期化を中止しました: {type(exc).__name__}",
                     "backup": backup, "code": "AUTOPILOT_RESET_FAILED"}
+        # Stage 4-C (追加のみ): パック選択をリセットする (監査は残す)。
+        # 選択は記録のみであり、実行の振り分けは変えない。
+        try:
+            from app.domain_spec import reset_for_generation as _pack_reset
+            _pack_reset(memory_path, pid)
+        except Exception as exc:
+            return {"ok": False,
+                    "reason": f"パック選択をリセットできないため初期化を中止しました: {type(exc).__name__}",
+                    "backup": backup, "code": "PACK_RESET_FAILED"}
         prev_gen = current_generation_number(memory_path, pid)
         new_gen_no = prev_gen + 1
         # 新世代の input_version は旧世代と異なる値にする。

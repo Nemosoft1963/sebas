@@ -970,6 +970,18 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
             removed["gap:gap_verifications"] = int((_dpurged or {}).get("gap_verifications") or 0)
         except Exception:
             pass
+        # Stage 4-C (追加のみ): domain_pack_selection/events は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        # 選択は記録のみであり、実行の振り分けは変えない。
+        try:
+            from app.domain_spec import purge_project_packs as _purge_packs
+            _ppurged = _purge_packs(memory_path, pid)
+            removed["pack:domain_pack_selection"] = int(
+                (_ppurged or {}).get("domain_pack_selection") or 0)
+            removed["pack:domain_pack_events"] = int(
+                (_ppurged or {}).get("domain_pack_events") or 0)
+        except Exception:
+            pass
         # Stage3 (追加のみ): autopilot_config/ticks は kind=other のため
         # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
         try:

@@ -322,6 +322,23 @@ def build_registry() -> list[RegistryEntry]:
             backup_method="gap-sidecar-preserved",
             delete_method_declared="S2D-delivery-purge (purge_delivery_records)",
         ))
+    # Stage 4-C: 分野実行パック DomainSpec の選択の記録 (サイドカーSQLite:
+    # *.pack.sqlite3 の domain_pack_selection / domain_pack_events)。kind は
+    # stop/gap と同様 "other" とし、件数テストの対象外にする。網羅性検証
+    # (audit_registry_completeness) では table 名で登録扱いになる。退避は
+    # sidecar-preserved (行複写対象外)、PJ初期化では選択をリセットし
+    # (監査は残す。reset_for_generation)、完全削除では purge_project_packs で
+    # 当該PJ行を消す。選択は記録のみであり、実行の振り分けは変えない。
+    for _t in ("domain_pack_selection", "domain_pack_events"):
+        entries.append(RegistryEntry(
+            name=f"pack:{_t}", kind="other", db_label="pack",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="domain_spec のパック選択と監査イベント(*.pack.sqlite3)。"
+                        "選択は記録のみ。実行の振り分けは変えない",
+            backup_method="pack-sidecar-preserved",
+            delete_method_declared="S4C-pack-purge (purge_project_packs)",
+        ))
     # Workspace。
     entries.append(RegistryEntry(
         name="workspace:project_dir", kind="directory", db_label="workspace",
@@ -409,6 +426,8 @@ def resolve_db_path(memory_path: str | Path, db_label: str) -> Path | None:
         return mem.with_name(mem.name + ".stop.sqlite3")
     if db_label == "gap":
         return mem.with_name(mem.name + ".gap.sqlite3")
+    if db_label == "pack":
+        return mem.with_name(mem.name + ".pack.sqlite3")
     return None
 
 

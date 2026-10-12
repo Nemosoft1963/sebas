@@ -4779,6 +4779,29 @@ class CapabilityGapVerifyPayload(BaseModel):
     actor: str = Field(default='', max_length=100)
 
 
+class DomainPackSelectPayload(BaseModel):
+    domain_id: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=16)
+    actor: str = Field(default='', max_length=100)
+    reason: str = Field(default='', max_length=2000)
+
+
+class DomainPackClearPayload(BaseModel):
+    actor: str = Field(default='', max_length=100)
+    reason: str = Field(default='', max_length=2000)
+
+
+def _domain_pack_id_or_400(value: str, field: str) -> str:
+    import re as _re
+    text = str(value or '')
+    pattern = r'^[A-Za-z0-9_-]{1,64}$' if field == 'domain_id' else r'^v[0-9]+$'
+    if not _re.fullmatch(pattern, text):
+        raise HTTPException(400, f'{field} が不正です')
+    if text in ('.', '..') or '/' in text or '\\' in text:
+        raise HTTPException(400, f'{field} が不正です')
+    return text
+
+
 def _capability_gap_proposal_id_or_400(proposal_id: str) -> str:
     from app.capability_export import is_safe_proposal_id as _is_safe
     text = str(proposal_id or '')
@@ -4991,6 +5014,81 @@ async def verify_capability_gap_proposal(project_id: str, proposal_id: str,
     elif not result.get('verified'):
         result['note'] = '元の停止が残っています。'
     return result
+
+
+@app.get('/api/domain-packs')
+async def list_domain_packs():
+    from app import domain_spec as _packs
+    # 登録簿の読取りのみ。DB・ファイルを変更しない。
+    return {'packs': _packs.list_specs(), 'schema': _packs.SCHEMA,
+            'read_only': True, 'external_sends': 0}
+
+
+@app.get('/api/projects/{project_id}/domain-packs')
+async def get_project_domain_packs(project_id: str):
+    require_project(project_id)
+    from app import domain_spec as _packs
+    # 読み取り専用: 適用候補と現在の選択のみ。DB・ファイルを変更しない。
+    candidates = _packs.applicable_packs(orchestrator, project_id)
+    selection = _packs.get_selection(orchestrator, project_id)
+    return {'project_id': project_id, 'candidates': candidates,
+            'selection': selection, 'read_only': True, 'external_sends': 0}
+
+
+@app.get('/api/projects/{project_id}/domain-packs/{domain_id}/conformance')
+async def get_domain_pack_conformance(project_id: str, domain_id: str,
+                                      version: str = 'v1'):
+    require_project(project_id)
+    safe_id = _domain_pack_id_or_400(domain_id, 'domain_id')
+    safe_version = _domain_pack_id_or_400(version, 'version')
+    from app import domain_spec as _packs
+    # 読み取り専用: 適合検査のみ。DB・ファイルを変更しない。
+    if _packs.get_spec(safe_id, safe_version) is None:
+        raise HTTPException(404, 'パックが見つかりません')
+    return _packs.conformance_report(orchestrator, project_id,
+                                     safe_id, safe_version)
+
+
+@app.post('/api/projects/{project_id}/domain-packs/select')
+async def select_project_domain_pack(project_id: str,
+                                     payload: DomainPackSelectPayload):
+    require_project(project_id)
+    safe_id = _domain_pack_id_or_400(payload.domain_id, 'domain_id')
+    safe_version = _domain_pack_id_or_400(payload.version, 'version')
+    # 確認者名は本人確認を保証しない (認証は未実装)。作業記録用の表示名である。
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    reason = (payload.reason or '').strip()
+    if not reason:
+        raise HTTPException(422, 'reason is required')
+    from app import domain_spec as _packs
+    if _packs.get_spec(safe_id, safe_version) is None:
+        raise HTTPException(404, 'パックが見つかりません')
+    try:
+        return _packs.select_pack(orchestrator, project_id, safe_id,
+                                  safe_version, actor=actor, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/domain-packs/clear')
+async def clear_project_domain_pack(project_id: str,
+                                    payload: DomainPackClearPayload):
+    require_project(project_id)
+    # 確認者名は本人確認を保証しない (認証は未実装)。作業記録用の表示名である。
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    reason = (payload.reason or '').strip()
+    if not reason:
+        raise HTTPException(422, 'reason is required')
+    from app import domain_spec as _packs
+    try:
+        return _packs.clear_pack(orchestrator, project_id,
+                                 actor=actor, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')
