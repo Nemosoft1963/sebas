@@ -2322,6 +2322,10 @@ async def project_delete_js():
 async def capability_gap_js():
     return FileResponse(ROOT / "app" / "static" / "capability_gap.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
+@app.get("/static/domain_pack.js")
+async def domain_pack_js():
+    return FileResponse(ROOT / "app" / "static" / "domain_pack.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
+
 @app.get("/static/project_management.js")
 async def project_management_js():
     return FileResponse(ROOT / "app" / "static" / "project_management.js", media_type="text/javascript", headers={"Cache-Control": "no-store"})
