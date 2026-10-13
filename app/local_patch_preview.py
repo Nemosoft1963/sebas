@@ -19,6 +19,26 @@ _ORDER = re.compile(r"順序|先に|後に|依存|禁止|してはいけ|公開�
 _ID = re.compile(r"\b(?:SC|C)\d{2}\b", re.I)
 
 
+def _review_store(memory_path):
+    """Instantiate ReviewStore without keeping a leftover test double.
+
+    Tests patch ``app.local_patch_preview.ReviewStore.get``. If this module was
+    first imported while ``app.goal_review.ReviewStore`` was patched, the bound
+    name can remain a mock after that patch is undone. A mock ``get`` is truthy
+    and would invent approvals. Only a real class is used.
+    """
+    global ReviewStore
+    cls = ReviewStore
+    if not isinstance(cls, type):
+        from app.goal_review import ReviewStore as live
+
+        if not isinstance(live, type):
+            raise TypeError("ReviewStore is unavailable")
+        ReviewStore = live
+        cls = live
+    return cls(memory_path)
+
+
 def _stable_issue_id(issue: dict, index: int) -> str:
     return str(issue.get("id") or issue.get("issue_id") or f"issue-{index:02d}")
 
@@ -87,7 +107,7 @@ def preview(manager, project_id: str, issues: list[dict] | None = None) -> dict:
     criteria = list(contract.get("criteria") or [])
     tasks = list(snapshot.get("tasks") or mission.get("tasks") or [])
     source = list(issues if issues is not None else issues_for(manager, project_id, signature))
-    store = ReviewStore(manager.memory.path)
+    store = _review_store(manager.memory.path)
 
     invalidations = []
     if store.get(project_id, "plan", signature):

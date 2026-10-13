@@ -740,7 +740,13 @@ def capability_preflight(manager, project_id: str, plan_signature: str | None = 
             })
     missing = [g for g in gaps if g.get("gap_code") == "missing_capability"]
     _ = mission
-    return {
+    # 4-E (追加のみ): 選択された汎用パックの参照を付ける。選択が無ければ
+    # domain_pack キー自体を出さない (後方互換)。失敗・不明は unknown とし、
+    # 不足の判定 (criteria/gaps/missing_capability/gap_codes) には触れない。
+    # pack_boundary_violation は有効なパックがあるときだけ rows 上に付く
+    # (メモリ上の表示用。gap_code 不変、DB・ファイル不変)。
+    domain_pack = _build_domain_pack(manager, pid, rows)
+    result = {
         "schema": SCHEMA_PREFLIGHT,
         "project_id": pid,
         "plan_signature": signature,
@@ -754,6 +760,217 @@ def capability_preflight(manager, project_id: str, plan_signature: str | None = 
         "external_calls": 0,
         "read_only": True,
     }
+    if domain_pack is not None:
+        result["domain_pack"] = domain_pack
+    return result
+
+
+# ----------------------------------------------------------------------------
+# 4-E: 選択された分野実行パックの参照 (読み取り専用・追加のみ)
+#
+# 方針 (厳守):
+# - 汎用パックだけを扱う。実行の振り分けは変えない。
+# - パック未選択のPJでは domain_pack キー自体を出さない (後方互換)。
+# - パックの宣言は能力の実証の代用にしない。5状態は従来どおり登録簿・
+#   設定・検証の実測値をそのまま写すだけで、宣言を理由に真にしない。
+# - エラー・不明・読取不能を通過扱いにしない (fail-closed)。読めないときは
+#   {"status": "unknown", ...} とし、不足の判定には影響させない
+#   (criteria/gaps/missing_capability/gap_codes は変えない)。
+# - 権限境界の違反は不足を増やす方向の旗 (pack_boundary_violation=True) だけ
+#   を操作行に足し、gap_code は変えない。
+# - DB・ファイルを変更しない。監査・ログの書込みは行わないため握りつぶしも
+#   生じない。例外メッセージは型名だけにし、内容物・秘密を混ぜない。
+# ----------------------------------------------------------------------------
+
+#: 外部作用の操作からパック権限境界キーへの対応 (固定2件のみ)。
+_PACK_EXTERNAL_PERMISSION: dict[str, str] = {
+    "external_publish": "external_publish",
+    "external_send": "external_send",
+}
+
+
+def _pack_operation_order() -> dict[str, int]:
+    return {str(entry.get("operation_id") or ""): index
+            for index, entry in enumerate(OPERATION_VOCABULARY)}
+
+
+def _assemble_domain_pack(spec: dict, report: dict, conforms: bool,
+                          verdict: str, counts: dict, rows: list) -> dict:
+    """domain_pack 本体の組立て。5状態は rows の実測値の写しだけを使う。"""
+    domain_id = str(spec.get("domain_id") or "")
+    version = str(spec.get("version") or "")
+    exec_to_op: dict[str, str] = {}
+    for entry in OPERATION_VOCABULARY:
+        executor = entry.get("executor")
+        if executor:
+            exec_to_op.setdefault(str(executor), str(entry.get("operation_id") or ""))
+    op_to_pack_executors: dict[str, list[str]] = {}
+    for executor in (spec.get("executor_ids") or []):
+        name = str(executor or "")
+        mapped = exec_to_op.get(name)
+        if mapped and mapped in OPERATION_INDEX and mapped != "unknown":
+            bucket = op_to_pack_executors.setdefault(mapped, [])
+            if name not in bucket:
+                bucket.append(name)
+    for bucket in op_to_pack_executors.values():
+        bucket.sort()
+    first_seen: dict[str, dict] = {}
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        for op_row in (row.get("operations") or []):
+            if not isinstance(op_row, dict):
+                continue
+            op = str(op_row.get("operation_id") or "")
+            if not op or op in first_seen:
+                continue
+            first_seen[op] = {
+                "executor_capability": str(op_row.get("executor_capability") or ""),
+                "implemented": bool(op_row.get("implemented")),
+                "configured": bool(op_row.get("configured")),
+                "input_compatible": bool(op_row.get("input_compatible")),
+                "validated": bool(op_row.get("validated")),
+                "permitted": bool(op_row.get("permitted")),
+            }
+    order = _pack_operation_order()
+    ordered_ops = sorted(op_to_pack_executors.keys(),
+                         key=lambda name: (order.get(name, 9999), name))
+    resolution: list[dict] = []
+    for op in ordered_ops:
+        measured = first_seen.get(op)
+        if measured is None:
+            # 事前照合に現れない操作は列挙しない (不足を減らさない)。
+            continue
+        for executor in op_to_pack_executors[op]:
+            resolution.append({
+                "operation_id": op,
+                "pack_executor_id": executor,
+                "executor_capability": str(measured.get("executor_capability") or ""),
+                "implemented": bool(measured.get("implemented")),
+                "configured": bool(measured.get("configured")),
+                "input_compatible": bool(measured.get("input_compatible")),
+                "validated": bool(measured.get("validated")),
+                "permitted": bool(measured.get("permitted")),
+                "pack_declared": True,
+            })
+    boundary = spec.get("permission_boundary")
+    if not isinstance(boundary, dict):
+        boundary = {}
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        for op_row in (row.get("operations") or []):
+            if not isinstance(op_row, dict):
+                continue
+            op = str(op_row.get("operation_id") or "")
+            perm_key = _PACK_EXTERNAL_PERMISSION.get(op)
+            if perm_key is None:
+                continue
+            # True のときだけ許可。それ以外 (False・欠落・非真偽値) は違反。
+            if boundary.get(perm_key) is True:
+                continue
+            op_row["pack_boundary_violation"] = True
+    return {
+        "selected": {"domain_id": domain_id, "version": version},
+        "conformance": {
+            "conforms": bool(conforms),
+            "verdict": verdict,
+            "counts": {"conforms": int(counts.get("conforms") or 0),
+                       "violates": int(counts.get("violates") or 0),
+                       "unknown": int(counts.get("unknown") or 0)},
+            "reason": str(report.get("reason") or "")[:200],
+        },
+        "resolution": resolution,
+    }
+
+
+def _build_domain_pack(manager, project_id: str, rows: list) -> dict | None:
+    """選択が無ければ None (呼出側はキーを出さない)。失敗・不明は unknown。
+
+    rows への変更は、有効なパックがあるときの pack_boundary_violation 付与
+    (メモリ上の表示用だけ。DB・ファイル不変、gap_code 不変) に限る。
+    """
+    try:
+        from app import domain_spec as _packs
+    except Exception as exc:
+        return {"status": "unknown",
+                "reason": f"パック定義の読込に失敗:{type(exc).__name__}"}
+    try:
+        selection = _packs.get_selection(manager, str(project_id or ""))
+    except Exception as exc:
+        return {"status": "unknown",
+                "reason": f"選択の読取に失敗:{type(exc).__name__}"}
+    if selection is None:
+        return None
+    if not isinstance(selection, dict):
+        return {"status": "unknown",
+                "reason": "選択の形式不正(内容は信用しない)"}
+    domain_id = str(selection.get("domain_id") or "")
+    version = str(selection.get("version") or "")
+    if not domain_id or not version:
+        return {"status": "unknown",
+                "reason": "選択の形式不正(内容は信用しない)"}
+    try:
+        spec = _packs.get_spec(domain_id, version)
+    except Exception as exc:
+        return {"status": "unknown",
+                "reason": f"パックの取得に失敗:{type(exc).__name__}"}
+    if spec is None:
+        return {"status": "unknown",
+                "reason": "選択中のパックが登録簿に無い(内容は信用しない)"}
+    try:
+        checked = _packs.validate_spec(spec)
+    except Exception as exc:
+        return {"status": "unknown",
+                "reason": f"パック宣言の検証に失敗:{type(exc).__name__}"}
+    if not isinstance(checked, dict) or not checked.get("ok"):
+        return {"status": "unknown",
+                "reason": "パックの宣言が不正(内容は信用しない)"}
+    try:
+        report = _packs.conformance_report(manager, str(project_id or ""),
+                                           domain_id, version)
+    except Exception as exc:
+        return {"status": "unknown",
+                "reason": f"適合検査に失敗:{type(exc).__name__}"}
+    if not isinstance(report, dict):
+        return {"status": "unknown",
+                "reason": "適合検査の形式不正(内容は信用しない)"}
+    counts_raw = report.get("counts")
+    tasks = report.get("tasks")
+    keys = ("conforms", "violates", "unknown")
+    if (not isinstance(counts_raw, dict) or not isinstance(tasks, list)
+            or any(type(counts_raw.get(key)) is not int for key in keys)
+            or str(report.get("domain_id") or "") != domain_id
+            or str(report.get("version") or "") != version):
+        return {"status": "unknown",
+                "reason": "適合検査の形式不正(内容は信用しない)"}
+    counts = {key: counts_raw[key] for key in keys}
+    measured = {key: 0 for key in keys}
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("verdict") not in measured:
+            return {"status": "unknown",
+                    "reason": "適合検査の形式不正(内容は信用しない)"}
+        measured[task["verdict"]] += 1
+    if counts != measured:
+        return {"status": "unknown",
+                "reason": "適合検査の形式不正(内容は信用しない)"}
+    verdict = str(report.get("verdict") or "")
+    if verdict not in ("conforms", "violates", "unknown"):
+        return {"status": "unknown",
+                "reason": "適合検査の形式不正(内容は信用しない)"}
+    conforms = report.get("conforms")
+    if not isinstance(conforms, bool):
+        return {"status": "unknown",
+                "reason": "適合検査の形式不正(内容は信用しない)"}
+    if bool(conforms) != (verdict == "conforms"):
+        return {"status": "unknown",
+                "reason": "適合検査の形式不正(内容は信用しない)"}
+    try:
+        return _assemble_domain_pack(spec, report, bool(conforms), verdict,
+                                     counts, rows)
+    except Exception as exc:
+        return {"status": "unknown",
+                "reason": f"パック情報の整理に失敗:{type(exc).__name__}"}
 
 
 def preflight_to_classifier_inputs(preflight: dict) -> dict:
@@ -779,6 +996,18 @@ def preflight_to_classifier_inputs(preflight: dict) -> dict:
     if missing:
         base["disposition"] = "development"
         base["development_required"] = True
+    # 4-E (追加のみ): 選択済みパックの適合検査が violates/unknown のとき、
+    # stop_classifier が参照できる形で conforms=false を渡す。分類コード・
+    # 優先順位は変えない (分類器側は既存の development 相当のまま)。
+    # conforms=true は渡さない。読めないときは付けない (通過扱いにしない)。
+    domain_pack = preflight.get("domain_pack") if isinstance(preflight, dict) else None
+    if isinstance(domain_pack, dict):
+        conformance = domain_pack.get("conformance")
+        if isinstance(conformance, dict) and "conforms" in conformance:
+            if conformance.get("conforms") is False:
+                base["capability_preflight"]["pack_conforms"] = False
+                base["capability_preflight"]["pack_verdict"] = str(
+                    conformance.get("verdict") or "unknown")
     return base
 
 

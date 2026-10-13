@@ -5,6 +5,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+import app.local_patch_preview as local_patch_preview
 from app.goal_review import plan_snapshot
 from app.safe_auto_resume import enabled as auto_enabled, records as auto_records
 
@@ -82,12 +83,11 @@ def preview(manager, project_id: str) -> dict:
 
     from app.completion_gate import evaluate
     from app.goal_review import ReviewStore
-    from app.local_patch_preview import preview as patch_preview
     from app.pending_ledger import build as pending_build
 
     try:
         plan = ReviewStore(manager.memory.path).get(project_id, "plan", signature) or {}
-        patches = patch_preview(manager, project_id)
+        patches = local_patch_preview.preview(manager, project_id)
         ledger = pending_build(manager, project_id)
         gate = evaluate(manager, project_id, persist=False)
         summary = ledger.get("summary") or {}
