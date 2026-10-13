@@ -10,6 +10,16 @@ function verdictJa(verdict){const v=String(verdict||'');if(Object.prototype.hasO
 function executorJa(executorId){const s=String(executorId||'');if(Object.prototype.hasOwnProperty.call(EXECUTOR_JA,s))return EXECUTOR_JA[s];return '';}
 function countConformance(tasks){const counts={conforms:0,violates:0,unknown:0};const rows=Array.isArray(tasks)?tasks:[];for(const row of rows){const v=String((row||{}).verdict||'');if(v==='conforms')counts.conforms+=1;else if(v==='violates')counts.violates+=1;else counts.unknown+=1;}return counts;}
 function countText(counts){return '適合 '+counts.conforms+'件 / 違反 '+counts.violates+'件 / 確認できず '+counts.unknown+'件';}
+function conformanceMeaningNote(){return '『適合』は、工程がこのパックの宣言(実行器・権限境界・証拠契約)に合うという意味です。達成条件を満たせることを示すものではありません。';}
+function missingCapabilityNote(state){
+ const info=state||{};
+ if(info.confirmed!==true)return '不足機能は確認できず。パックが適合でも、達成条件を満たせるとは限りません。';
+ const n=Number(info.count);
+ if(!isFinite(n))return '不足機能は確認できず。パックが適合でも、達成条件を満たせるとは限りません。';
+ if(n===0)return '不足機能は確認されていません。';
+ return 'この案件には不足機能が '+String(n)+' 件あります。パックが適合でも、達成条件を満たせるとは限りません。';
+}
+function apiCapabilityGaps(pid){return fetchJson('/api/projects/'+encodeURIComponent(pid)+'/capability-gaps').then(d=>{if(!d||!d.preflight||!Array.isArray(d.preflight.missing_capability))throw Error('不足機能を確認できませんでした');return d;});}
 function warningSummary(conformance){const report=conformance||{};const tasks=Array.isArray(report.tasks)?report.tasks:[];const bad=tasks.filter(row=>String((row||{}).verdict||'')!=='conforms');const parts=bad.map(row=>{const key=String((row||{}).task_key||'(工程不明)');const reasons=Array.isArray((row||{}).reasons)?(row||{}).reasons.join('; '):'';return key+':'+verdictJa((row||{}).verdict)+(reasons?':'+reasons:'');});if(!parts.length&&String(report.verdict||'')==='unknown'&&report.reason)parts.push(String(report.reason));if(!parts.length&&!tasks.length&&report.reason)parts.push(String(report.reason));return parts;}
 function packButtonState(selection,conformance,inputs){
  const opts=inputs||{};
@@ -113,10 +123,20 @@ function renderCandidates(host,statusNode,candidatesBox,pid,body,isCurrent,confo
    try{
     const report=await apiConformance(pid,String(item.domain_id||''),String(item.version||'v1'));
     if(!isCurrent())return;
+    let missingState={confirmed:false};
+    try{
+     const gapBody=await apiCapabilityGaps(pid);
+     if(!isCurrent())return;
+     const missing=Array.isArray(gapBody.preflight.missing_capability)?gapBody.preflight.missing_capability:[];
+     missingState={confirmed:true,count:missing.length};
+    }catch(_gapError){
+     if(!isCurrent())return;
+     missingState={confirmed:false};
+    }
     conformanceCache.key=String(item.domain_id||'')+' '+String(item.version||'v1');
     conformanceCache.report=report;
     statusNode.textContent='';
-    onConformance(report,item);
+    onConformance(report,item,missingState);
    }catch(e){if(!isCurrent())return;statusNode.textContent='適合検査を取得できませんでした: '+(e.message||'通信できませんでした');}
    finally{checkBtn.disabled=false;}
   };
@@ -128,9 +148,10 @@ function renderCandidates(host,statusNode,candidatesBox,pid,body,isCurrent,confo
   addText(host,'p','適合度の筆頭候補: '+String(info.selected.label_ja||info.selected.domain_id||'')+'。候補です。採用は人が決めます。');
  }
 }
-function renderConformance(host,report){
+function renderConformance(host,report,missingState){
  host.replaceChildren();
- if(!report){addText(host,'p','適合検査はまだ実行していません。候補ごとの「適合を確認」を押したときだけ取得します。');return;}
+ addText(host,'p',conformanceMeaningNote());
+ if(!report){addText(host,'p','適合検査はまだ実行していません。候補ごとの「適合を確認」を押したときだけ取得します。');addText(host,'p',missingCapabilityNote(missingState));return;}
  addText(host,'p','対象: '+String(report.domain_id||'')+' '+String(report.version||''));
  addText(host,'p','全体: '+verdictJa(report.verdict)+(report.reason?'（'+String(report.reason)+'）':''));
  const counts=countConformance(report.tasks);
@@ -140,7 +161,7 @@ function renderConformance(host,report){
  const skipped=Array.isArray(report.skipped_task_keys)?report.skipped_task_keys:[];
  if(skipped.length)addText(host,'p','検査対象外の工程: '+skipped.join(' / '));
  const rows=Array.isArray(report.tasks)?report.tasks:[];
- if(!rows.length){addText(host,'p','評価できる工程がありません。適合と判定しません。');return;}
+ if(!rows.length){addText(host,'p','評価できる工程がありません。適合と判定しません。');addText(host,'p',missingCapabilityNote(missingState));return;}
  const ul=document.createElement('ul');
  for(const row of rows){
   const line=document.createElement('li');
@@ -150,6 +171,7 @@ function renderConformance(host,report){
   ul.append(line);
  }
  host.append(ul);
+ addText(host,'p',missingCapabilityNote(missingState));
 }
 function formBusy(selectBtn,clearBtn){return selectBtn.dataset.busy==='1'||clearBtn.dataset.busy==='1';}
 function refreshSelectButton(selectBtn,clearBtn,ackBox,ackNote,selection,conformanceCache,actorInput,reasonInput){
@@ -273,8 +295,8 @@ function mount(){
    };
    syncButtons();
   }
-  function onConformance(report,item){
-   renderConformance(confHost,report);
+  function onConformance(report,item,missingState){
+   renderConformance(confHost,report,missingState);
    if(item&&box.setTargetPack)box.setTargetPack(item);
    const inputs={actor:(document.getElementById('domainPackActor')||{}).value||'',reason:(document.getElementById('domainPackReason')||{}).value||'',acknowledged:Boolean((document.getElementById('domainPackAck')||{}).checked),busy:false};
    const state=packButtonState(renderSelection.current||null,report,inputs);
@@ -304,7 +326,7 @@ function mount(){
     if(ticket!==epoch)return;
     const info=(body&&body.candidates)||{};
     conformanceCache.key='';conformanceCache.report=null;
-    renderConformance(confHost,null);
+    renderConformance(confHost,null,{confirmed:false});
     renderSelection(body.selection||null);
     renderSelection.current=body.selection||null;
     renderCandidates(candHost,status,confHost,pid,body,isCurrent,conformanceCache,onConformance);
@@ -330,5 +352,5 @@ function mount(){
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 }
 if(typeof document!=='undefined')mount();
-if(typeof module!=='undefined')module.exports={CANDIDATE_STATUS_JA,VERDICT_JA,PERMISSION_JA,EXECUTOR_JA,candidateStatusJa,verdictJa,executorJa,countConformance,countText,warningSummary,packButtonState,permissionBoundaryText,candidateNote,formBusy,fetchJson,apiPacks,apiProjectPacks,apiConformance,apiSelect,apiClear};
+if(typeof module!=='undefined')module.exports={CANDIDATE_STATUS_JA,VERDICT_JA,PERMISSION_JA,EXECUTOR_JA,candidateStatusJa,verdictJa,executorJa,countConformance,countText,warningSummary,packButtonState,permissionBoundaryText,candidateNote,formBusy,fetchJson,apiPacks,apiProjectPacks,apiConformance,apiCapabilityGaps,conformanceMeaningNote,missingCapabilityNote,apiSelect,apiClear};
 })();

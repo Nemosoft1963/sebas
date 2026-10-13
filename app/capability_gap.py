@@ -987,6 +987,7 @@ def preflight_to_classifier_inputs(preflight: dict) -> dict:
         "plan_signature": signature,
         "capability_preflight": {
             "missing_capability": bool(missing),
+            "missing_count": int(len(missing)),
             "gap_codes": sorted({str(g.get("gap_code") or "") for g in gaps
                                  if g.get("gap_code")}),
             "criterion_ids": sorted({str(g.get("criterion_id") or "") for g in missing
@@ -1176,6 +1177,37 @@ def _content_hash(body: dict) -> str:
     return _short_hash(material) + _short_hash(str(body.get("proposal_id") or ""))
 
 
+def _build_acceptance_tests(*, operation_id: str, criterion_id: str,
+                               label_ja: str, quote_raw: str) -> list[str]:
+    """達成条件と操作から決定的に作る具体的な検証項目。
+
+    各項目は文字列で、先頭に従来のID (accept:<operation>:<kind>) を残し、
+    続けて日本語の具体的な検証内容を書く。引用は既存の短い引用の仕組み
+    (長さ制限・秘密除去) を使い、原本の本文全文を入れない。同じ入力では
+    同じ出力を返す (決定的)。秘密値は含めない。
+    """
+    op = str(operation_id or "unknown")
+    cid = str(criterion_id or "")
+    label = str(label_ja or op)
+    quote = _safe_short(quote_raw, 80)
+    return [
+        _safe_short(
+            f"accept:{op}:executes 条件{cid}『{quote}』について、"
+            f"操作『{label}』を登録された実行器で実行でき、"
+            "実行ログと成果物のハッシュが証拠として登録され、"
+            "完了判定が『達成』になること", 500),
+        _safe_short(
+            f"accept:{op}:evidence 実行器が実装・設定・入力適合・"
+            "実証・許可の5状態で『可』と判定されること", 500),
+        _safe_short(
+            f"accept:{op}:no_bypass 既存の安全ゲート(承認・公開境界・"
+            "外部送信)を迂回しないこと(外部送信0)", 500),
+        _safe_short(
+            f"accept:{op}:replay 同じ入力で事前照合を再生し、"
+            "元の不足が消えること(verified の条件)", 500),
+    ]
+
+
 def _build_proposal_body(*, project_id: str, plan_signature: str, gap: dict) -> dict:
     op_id = str(gap.get("operation_id") or "unknown")
     entry = OPERATION_INDEX.get(op_id) or {}
@@ -1238,9 +1270,9 @@ def _build_proposal_body(*, project_id: str, plan_signature: str, gap: dict) -> 
                                "evidence_missing"],
         },
         "permission_class": permission,
-        "acceptance_tests": [f"accept:{op_id}:executes",
-                             f"accept:{op_id}:evidence",
-                             f"accept:{op_id}:no_bypass"],
+        "acceptance_tests": _build_acceptance_tests(
+            operation_id=op_id, criterion_id=cid, label_ja=label,
+            quote_raw=str((gap.get("evidence_refs") or {}).get("quote") or cid)),
         "status": "draft",
         "created_at": _utcnow(),
     }
@@ -1545,7 +1577,7 @@ def correct_proposal(manager, project_id: str, proposal_id: str, patch: dict,
                     elif key == "acceptance_tests":
                         if not isinstance(value, list) or not value:
                             raise ValueError("acceptance_tests は空でない配列です")
-                        body[key] = [_safe_short(v, 80) for v in value]
+                        body[key] = [_safe_short(v, 500) for v in value]
                     elif key == "interface_contract":
                         if not isinstance(value, dict):
                             raise ValueError("interface_contract はオブジェクトです")

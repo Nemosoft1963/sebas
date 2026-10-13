@@ -478,6 +478,152 @@ def test_registry_completeness_s1():
     assert audit["ok"] is True, audit["unregistered"]
 
 
+def _make_doc_only_with_system_build(tmp_path, tag="-docsys"):
+    """文書だけの工程で、達成条件にシステム構築を含む疑似PJ (実機再現の一般形)。"""
+    manager, pid = _make_manager(tmp_path, "doc", 2, tag=tag)
+    mission = manager.memory.get_mission(pid)
+    mission["success_criteria"] = ("1. 架空手順書01を文書で作る\n"
+                                   "2. 架空共有体系02のシステム構築と稼働検証\n"
+                                   "3. 架空稼働結果03の検証と報告")
+    manager.memory.save_mission(pid, mission["goal"], mission["success_criteria"],
+                                mission.get("constraints_text") or "",
+                                mission.get("allow_external_ai", False),
+                                mission.get("external_providers") or [])
+    return manager, pid
+
+
+def test_preflight_missing_flows_to_primary_stop(tmp_path):
+    """(1) 事前照合の不足が主たる停止 missing_capability になる。"""
+    import app.capability_gap as gap
+    from app.workflow_readiness import IMPLEMENTED_ACTIONS, build_readiness
+    manager, pid = _make_doc_only_with_system_build(tmp_path)
+    preflight = gap.capability_preflight(manager, pid)
+    assert preflight["missing_capability"], preflight["gap_codes"]
+    assert len(preflight["missing_capability"]) >= 1
+    record = build_readiness(manager, pid)["stop_class"]
+    assert record["stop_class"] == "missing_capability", record
+    assert record["preflight_status"] == "ok"
+    assert "達成条件に必要な操作を実行する機能が無い" in record["reason_ja"]
+    assert "不足" in record["reason_ja"] and "件" in record["reason_ja"]
+    assert record["next_action"] in set(IMPLEMENTED_ACTIONS) | {"none"}
+    assert isinstance(record["also"], list)
+
+
+def test_preflight_unreadable_does_not_hide_missing(tmp_path, monkeypatch):
+    """事前照合が読めない場合は従来分類のまま preflight_status unknown を付ける。"""
+    import app.capability_gap as gap
+    from app.stop_classifier import classify_stop
+    from app.workflow_readiness import build_readiness, build_stop_class
+    manager, pid = _make_doc_only_with_system_build(tmp_path, tag="-unl")
+    ok_record = build_readiness(manager, pid)["stop_class"]
+    assert ok_record["preflight_status"] == "ok"
+
+    def _boom(_manager, _pid):
+        raise RuntimeError("架空の読取失敗")
+
+    monkeypatch.setattr(gap, "capability_preflight", _boom)
+    built = build_readiness(manager, pid)
+    # build_readiness 内の事前照合が失敗しても分類は壊れない
+    assert built["stop_class"]["preflight_status"] == "unknown"
+    assert built["stop_class"]["preflight_reason"] == "RuntimeError"
+    # 従来の分類 (事前照合なし) と同じ主たる停止になる
+    legacy_inputs = {
+        "readiness": {"phase": built.get("phase"),
+                      "plan_signature": built.get("plan_signature")},
+        "plan_signature": built.get("plan_signature"),
+        "gate": built.get("gate") if isinstance(built.get("gate"), dict) else {},
+    }
+    legacy = classify_stop(legacy_inputs)
+    assert built["stop_class"]["stop_class"] == legacy["stop_class"]
+    assert built["stop_class"]["stop_code"] == legacy["stop_code"]
+
+
+def test_no_missing_keeps_legacy_classification(tmp_path):
+    """事前照合が正常で不足が無いときは従来と同じ分類になる。"""
+    import app.capability_gap as gap
+    from app.stop_classifier import classify_stop
+    from app.workflow_readiness import build_readiness
+    manager, pid = _make_manager(tmp_path, "doc", 3, tag="-nomiss")
+    preflight = gap.capability_preflight(manager, pid)
+    assert not preflight["missing_capability"], preflight["gap_codes"]
+    built = build_readiness(manager, pid)
+    assert built["stop_class"]["preflight_status"] == "ok"
+    legacy_inputs = {
+        "readiness": {"phase": built.get("phase"),
+                      "plan_signature": built.get("plan_signature")},
+        "plan_signature": built.get("plan_signature"),
+        "gate": built.get("gate") if isinstance(built.get("gate"), dict) else {},
+    }
+    legacy = classify_stop(legacy_inputs)
+    assert built["stop_class"]["stop_class"] == legacy["stop_class"]
+    assert built["stop_class"]["stop_code"] == legacy["stop_code"]
+    assert built["stop_class"]["next_action"] == legacy["next_action"]
+
+
+def test_policy_block_beats_missing_capability(tmp_path):
+    """policy_block がある場合は不足があっても policy_block が主たる停止になる。"""
+    from app.stop_classifier import classify_stop
+    out = classify_stop({
+        "budget_exhausted": True,
+        "capability_preflight": {"missing_capability": True, "missing_count": 3,
+                                 "gap_codes": ["missing_capability"],
+                                 "criterion_ids": ["SC01", "SC02", "SC03"]},
+        "plan_signature": "架空署名",
+    })
+    assert out["stop_class"] == "policy_block"
+    assert out["next_action"] == "none"
+    assert any(a["stop_class"] == "missing_capability" for a in out["also"])
+
+
+def test_idle_and_unverified_do_not_hide_missing_capability():
+    """分類不能の idle と証拠不足の unverified は、確定した機能不足を隠さない。"""
+    from app.stop_classifier import classify_stop
+    preflight = {"missing_capability": True, "missing_count": 2,
+                 "gap_codes": ["missing_capability"],
+                 "criterion_ids": ["SC01", "SC02"]}
+    idle = classify_stop({
+        "readiness": {"phase": "idle"},
+        "capability_preflight": preflight,
+        "plan_signature": "架空署名",
+    })
+    assert idle["stop_class"] == "missing_capability", idle
+    assert idle["stop_code"] == "disposition:development"
+    assert "不足" in idle["reason_ja"] and "件" in idle["reason_ja"]
+    assert any(a["stop_code"] == "phase:idle" for a in idle["also"])
+    unverified = classify_stop({
+        "readiness": {"phase": "unverified"},
+        "capability_preflight": preflight,
+        "plan_signature": "架空署名",
+    })
+    assert unverified["stop_class"] == "missing_capability", unverified
+    assert unverified["stop_code"] == "disposition:development"
+    assert any(a["stop_class"] == "missing_evidence" for a in unverified["also"])
+    # 人の判断が必要な承認待ちは従来どおり不足より上位。
+    waiting = classify_stop({
+        "run": {"state": "awaiting_human"},
+        "capability_preflight": preflight,
+        "plan_signature": "架空署名",
+    })
+    assert waiting["stop_class"] == "missing_decision"
+    assert waiting["stop_code"] == "run:awaiting_human"
+    assert any(a["stop_class"] == "missing_capability" for a in waiting["also"])
+
+
+def test_stop_class_api_carries_preflight_status(tmp_path):
+    """GET /stop-class の応答に preflight_status が付く。"""
+    import asyncio
+    from app import web as web_mod
+    manager, pid = _make_doc_only_with_system_build(tmp_path, tag="-api2")
+    web_mod.memory = manager.memory
+    web_mod.orchestrator = manager
+    web_mod.workspace = manager.workspace
+    first = asyncio.run(web_mod.get_stop_class(pid))
+    assert first["preflight_status"] == "ok"
+    assert first["stop_class"]["stop_class"] == "missing_capability"
+    assert first["stop_class"]["preflight_status"] == "ok"
+    assert first["read_only"] is True
+
+
 def test_no_new_innerhtml():
     from pathlib import Path
     assert Path("app/static/plan_review_loop.js").read_text(encoding="utf-8").count("innerHTML") == 0

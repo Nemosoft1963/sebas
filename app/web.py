@@ -3131,11 +3131,14 @@ async def get_stop_class(project_id: str):
     # 防衛: classify 出力の形を保証する (既存キーは触らない)。
     if not isinstance(record, dict) or not record.get("stop_class"):
         record = classify_stop({})
+        record.setdefault("preflight_status", "unknown")
+        record.setdefault("preflight_reason", "empty_record")
     return {
         "project_id": project_id,
         "plan_signature": built.get("plan_signature"),
         "phase": built.get("phase"),
         "stop_class": record,
+        "preflight_status": str(record.get("preflight_status") or "unknown"),
         "external_sends": int(record.get("external_sends") or 0),
         "read_only": True,
     }

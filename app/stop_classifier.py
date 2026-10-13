@@ -518,9 +518,25 @@ def _collect_candidates(inputs: dict) -> list[dict]:
         _push("disposition:development", "development_required")
     # Stage 2-A (追加のみ): capability preflight の結果を入力として受け付ける。
     # missing_capability が残れば development 相当で分類する。
+    # reason_ja は不足件数入りの定型文にし、主たる停止の説明にする。
     preflight = inputs.get("capability_preflight")
     if isinstance(preflight, dict) and preflight.get("missing_capability") is True:
+        raw_count = preflight.get("missing_count")
+        if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0:
+            missing_count = int(raw_count)
+        else:
+            criterion_ids = preflight.get("criterion_ids")
+            if isinstance(criterion_ids, list) and len(criterion_ids) > 0:
+                missing_count = int(len(criterion_ids))
+            else:
+                missing_count = 1
+        before_len = len(out)
         _push("disposition:development", "capability_preflight.missing_capability")
+        if len(out) > before_len:
+            out[-1]["reason_ja"] = (
+                "達成条件に必要な操作を実行する機能が無いため停止しています"
+                f"（不足{int(missing_count)}件）。機能提案を確認してください。"
+            )
     unimplemented = inputs.get("unimplemented_action")
     if unimplemented:
         _push("disposition:development", "unimplemented_action")
@@ -615,7 +631,27 @@ def classify_stop(inputs: dict) -> dict:
         also: list[dict] = []
     else:
         def _rank(item: dict) -> tuple:
-            return (_PRIORITY_INDEX.get(item["stop_class"], 99), item["stop_code"])
+            # 設計の優先順位は policy_block > missing_decision > missing_capability
+            # > missing_evidence > missing_coverage > missing_binding。
+            # ただし分類不能系の missing_decision (phase:idle / unknown:*) は
+            # 「待機・分類不能」の意味であり、事前照合で確定した機能不足
+            # (capability_preflight.missing_capability 起源) よりは下位にする。
+            # 人の判断が必要な missing_decision (run:awaiting_human 等) は
+            # 従来どおり上位のまま。不足を隠さないための順序調整であり、
+            # PRIORITY 自体は変えない。例外で cap を読めないときに idle を
+            # 上位のまま残すと不足を隠すため、候補の origin を直接見る。
+            base = _PRIORITY_INDEX.get(item["stop_class"], 99)
+            if (item.get("stop_class") == "missing_decision"
+                    and item.get("stop_code") in ("phase:idle", "unknown:empty",
+                                                  "unknown:unclassifiable")
+                    and any(c.get("origin") ==
+                            "capability_preflight.missing_capability"
+                            for c in candidates)):
+                base = _PRIORITY_INDEX.get("missing_capability", 99) + 0.5
+            # 同じクラス・コードなら、不足件数入りの定型文を持つ候補を選ぶ。
+            origin_pref = 0 if item.get("origin") == (
+                "capability_preflight.missing_capability") else 1
+            return (base, origin_pref, item["stop_code"])
 
         ordered = sorted(candidates, key=_rank)
         primary = dict(ordered[0])

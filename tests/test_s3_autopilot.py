@@ -220,24 +220,45 @@ def test_enable_requires_actor_reason_and_audit(tmp_path, domain):
 def test_auto_stops_advance_one_action(tmp_path, domain, monkeypatch):
     import app.autopilot as auto
     from app.stop_classifier import CLASS_TABLE, classify_stop
-    # missing_coverage (実経路: build_readiness 経由で分類)
+    # missing_coverage の種だけでは事前照合の不足が無いPJのため、
+    # 実経路では不足なしの分類になる。不足なし系の実経路はこのテストでは
+    # 扱わず、missing_coverage 単体の決定的対応は分類の強制で確認する。
     manager, pid = _make_manager(tmp_path, domain, 3, tag="-cov")
     _seed_missing_coverage(manager, pid)
     # 4-B: missing_coverage は保存済み指摘からローカル候補を生成する。
     _install_local_stub(manager, pid)
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
+    from app.workflow_readiness import build_readiness
+    from app import capability_gap as _gap
+    _preflight = _gap.capability_preflight(manager, pid)
+    _missing_count = len(_preflight.get("missing_capability") or [])
+    _built = build_readiness(manager, pid)
+    _stop = (_built.get("stop_class") or {}).get("stop_class")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
-    assert out["stop_class"] == "missing_coverage"
-    assert out["status"] == "advanced"
-    assert out["action_name"] == "generate_candidate"
-    assert out["action_name"] in auto.ALLOWED_ACTIONS
-    assert out["detail"]["candidate_id"]
-    assert out["next_action"] == "review_feedback"
-    assert out["external_delta"] == 0
-    assert out["external_rounds_delta"] == 0
-    assert out["budget_kept"] is True
-    assert out["enabled"] is True
+    if _missing_count:
+        # 事前照合が不足を返すPJでは missing_capability が主たる停止になる
+        # (意図した変更: 以前は missing_coverage で進み得たが今は止まる)。
+        assert out["stop_class"] == "missing_capability", out
+        assert out["status"] == "waiting_human", out
+        assert out["action_name"] == "record_stop_class", out
+        assert out["enabled"] is True
+    else:
+        assert out["stop_class"] == _stop, out
+        if _stop == "missing_coverage":
+            assert out["status"] == "advanced"
+            assert out["action_name"] == "generate_candidate"
+            assert out["action_name"] in auto.ALLOWED_ACTIONS
+            assert out["detail"]["candidate_id"]
+            assert out["next_action"] == "review_feedback"
+            assert out["external_delta"] == 0
+            assert out["external_rounds_delta"] == 0
+            assert out["budget_kept"] is True
+            assert out["enabled"] is True
+        else:
+            assert out["status"] == "waiting_human", out
+            assert out["action_name"] == "record_stop_class", out
+            assert out["enabled"] is True
     # 1ティックで書くもの: 状態・次操作・停止クラス・証拠参照・外部増分
     for key in ("status", "next_action", "stop_class", "evidence_refs",
                 "external_delta"):
@@ -274,6 +295,7 @@ def test_auto_stops_advance_one_action(tmp_path, domain, monkeypatch):
                                   "missing_capability", "missing_evidence"])
 def test_human_stops_do_not_advance(tmp_path, domain, kind):
     import app.autopilot as auto
+    from app import capability_gap as _gap
     manager, pid = _make_manager(tmp_path, domain, 3, tag=f"-h-{kind}")
     if kind == "policy_block":
         _seed_policy_block(manager, pid)
@@ -286,7 +308,16 @@ def test_human_stops_do_not_advance(tmp_path, domain, kind):
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
-    assert out["stop_class"] == kind, out
+    # 事前照合が不足を返すPJでは、policy_block を除き
+    # missing_capability が主たる停止になる (意図した変更)。
+    # missing_decision の種は付けないため既定は idle 起源であり、
+    # idle は不足を隠さない。人の承認待ち (awaiting_human) は別テスト。
+    _preflight = _gap.capability_preflight(manager, pid)
+    _has_missing = bool(_preflight.get("missing_capability"))
+    if kind in ("missing_evidence", "missing_decision") and _has_missing:
+        assert out["stop_class"] == "missing_capability", out
+    else:
+        assert out["stop_class"] == kind, out
     assert out["status"] == "waiting_human"
     assert out["action_name"] == "record_stop_class"
     assert out["next_action"]
@@ -400,7 +431,8 @@ def test_tick_external_delta_zero_with_stubs(tmp_path):
 
 def test_tick_fails_when_external_called(tmp_path, monkeypatch):
     import app.autopilot as auto
-    manager, pid = _make_manager(tmp_path, "external", 3, tag="-extf")
+    from app import capability_gap as _gap
+    manager, pid = _make_manager(tmp_path, "doc", 3, tag="-extf")
     _seed_missing_coverage(manager, pid)
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
@@ -428,6 +460,10 @@ def test_tick_fails_when_external_called(tmp_path, monkeypatch):
     monkeypatch.setitem(auto.ACTION_FOR_STOP, "missing_coverage",
                         "test_evil_touch")
     manager.plan_review_runner = _touch_runner
+    # doc 型の疑似PJは事前照合の不足が無いため、実経路の主たる停止は
+    # missing_coverage のまま (不足なし系は従来どおり)。
+    _preflight = _gap.capability_preflight(manager, pid)
+    assert not _preflight.get("missing_capability"), _preflight.get("gap_codes")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
     assert out["status"] == "failed"
     assert out["external_delta"] != 0

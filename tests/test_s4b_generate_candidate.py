@@ -167,6 +167,35 @@ def test_tick_generates_candidate_via_propose(tmp_path, domain):
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
+    if domain == "external":
+        # 事前照合で機能不足が確定するため自走は進まず記録して止まる。
+        assert out["stop_class"] == "missing_capability", out
+        assert out["status"] == "waiting_human", out
+        assert out["action_name"] == "record_stop_class", out
+        assert out["enabled"] is True
+        assert counter["local"] == 0, counter
+        assert out.get("local_calls", 0) == 0, out
+        assert counter["external"] == 0
+        assert out["external_delta"] == 0
+        assert out["external_rounds_delta"] == 0
+        assert out["budget_kept"] is True
+        assert _version_of(manager, pid) == version_before
+        ext_after = _external_counters(manager, pid)
+        assert ext_after["sends"] == ext_before["sends"]
+        assert ext_after["rounds"] == ext_before["rounds"]
+        assert ext_after["budget"] == ext_before["budget"]
+        from app.goal_review import ReviewStore
+        stored_ext = ReviewStore(manager.memory.path).get(pid, "revision", sig) or {}
+        assert not stored_ext.get("candidate_id"), stored_ext
+        assert "機能" in out.get("reason_ja", ""), out
+        assert out["next_action"] == "resolve_development", out
+        # 主たる停止は機能不足だが被覆不足も併発として残る。
+        from app.workflow_readiness import build_readiness, build_stop_class
+        record = build_stop_class(manager, pid, build_readiness(manager, pid))
+        assert record["stop_class"] == "missing_capability", record
+        assert any(a.get("stop_class") == "missing_coverage"
+                   for a in (record.get("also") or [])), record
+        return
     assert out["stop_class"] == "missing_coverage", out
     assert out["status"] == "advanced", out
     assert out["action_name"] == "generate_candidate", out
@@ -218,6 +247,40 @@ def test_idempotent_second_tick_no_new_llm_call(tmp_path, domain, monkeypatch):
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
     first = auto.autopilot_tick(manager, pid, actor="架空担当")
+    if domain == "external":
+        # 機能不足で止まるため候補は作らず、LLM呼出も増えない。
+        assert first["status"] == "waiting_human", first
+        assert first["stop_class"] == "missing_capability", first
+        assert first["action_name"] == "record_stop_class", first
+        assert counter["local"] == 0, counter
+        # 同じ停止の繰返しは空転ガードで止まる(生成も外部呼出も増えない)。
+        second = auto.run_until_stop(manager, pid, actor="架空担当", max_ticks=5)
+        assert counter["local"] == 0, counter
+        assert counter["external"] == 0
+        assert second["status"] == "stopped_guard", second
+        assert auto.is_enabled(manager, pid) is False
+        from app.goal_review import ReviewStore
+        stored = ReviewStore(manager.memory.path).get(pid, "revision", sig) or {}
+        assert not stored.get("candidate_id"), stored
+        # 空転ガードの従来動作(同一停止の強制で止まる)は doc/table 側で確認する。
+        manager2, pid2 = _make_manager(tmp_path, "doc", 3, tag="-idem2")
+        _seed_missing_coverage(manager2, pid2)
+        counter2 = _install_local_stub(manager2, pid2, {"local": 0, "external": 0})
+        auto.set_enabled(manager2, pid2, True, actor="架空担当",
+                         reason="架空の有効化理由")
+        sig2 = _sig_of(manager2, pid2)
+        from app.stop_classifier import classify_stop
+        record = classify_stop({"binding_state": "invalid_reference",
+                                "plan_signature": sig2})
+        assert record["stop_class"] == "missing_binding"
+        monkeypatch.setattr(auto, "_classify_current",
+                            lambda _m, _p: ({}, dict(record)))
+        auto.autopilot_tick(manager2, pid2, actor="架空担当")
+        guarded = auto.autopilot_tick(manager2, pid2, actor="架空担当")
+        assert guarded["status"] == "stopped_guard", guarded
+        assert auto.is_enabled(manager2, pid2) is False
+        assert counter2["external"] == 0
+        return
     assert first["status"] == "advanced", first
     first_id = first["detail"]["candidate_id"]
     assert counter["local"] == 1
@@ -276,6 +339,22 @@ def test_generation_failures_recorded_as_failed(tmp_path, domain, mode):
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
+    if domain == "external":
+        # 機能不足で生成を試みない(事前に止まる)。失敗ではなく人の判断待ち。
+        assert out["status"] == "waiting_human", out
+        assert out["stop_class"] == "missing_capability", out
+        assert out["action_name"] == "record_stop_class", out
+        assert out["reason_ja"], out
+        assert out["enabled"] is True
+        assert auto.is_enabled(manager, pid) is True
+        assert out["external_delta"] == 0
+        assert out["external_rounds_delta"] == 0
+        assert counter["external"] == 0
+        assert counter["local"] == 0, counter
+        # 同じ停止の繰返しで空転ガードが止める(2回目は stopped_guard)。
+        again = auto.autopilot_tick(manager, pid, actor="架空担当")
+        assert again["status"] == "stopped_guard", again
+        return
     # 失敗は成功扱いにしない。理由つきで記録し、自走を止める。
     assert out["status"] == "failed", out
     assert out["reason_ja"], out
@@ -371,6 +450,17 @@ def test_preconditions_do_not_proceed(tmp_path, domain, case):
     assert counter["local"] == 0, counter
     assert counter["external"] == 0
     assert out["reason_ja"], out
+    if domain == "external":
+        # 機能不足が先に確定するため、LLM種別より前に人の判断待ちで止まる。
+        # ただし生成中の明示がある場合は従来どおり実行中(missing_decision)で止まる。
+        assert out["status"] == "waiting_human", out
+        assert out["action_name"] == "record_stop_class", out
+        assert out["enabled"] is True
+        if case == "generating":
+            assert out["stop_class"] == "missing_decision", out
+        else:
+            assert out["stop_class"] == "missing_capability", out
+        return
     if case == "wrong_llm":
         # LLM種別が不正: 生成を試みずティックは失敗。
         assert out["status"] == "failed", out
@@ -404,6 +494,22 @@ def test_generate_candidate_never_applies_or_sends(tmp_path, domain, monkeypatch
     auto.set_enabled(manager, pid, True, actor="架空担当",
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
+    if domain == "external":
+        # 機能不足では生成に進まず、適用・送信・外部評価は触れない。
+        assert out["status"] == "waiting_human", out
+        assert out["stop_class"] == "missing_capability", out
+        assert out["action_name"] == "record_stop_class", out
+        assert out["enabled"] is True
+        assert touched == {"apply": 0, "approve": 0, "send": 0, "rag": 0}
+        assert counter["external"] == 0
+        assert counter["local"] == 0, counter
+        assert _version_of(manager, pid) == version_before
+        # 許可リスト外の名前は引き続き拒否。
+        with pytest.raises(ValueError):
+            auto.run_named_action(manager, pid, "apply", actor="架空担当")
+        with pytest.raises(ValueError):
+            auto.run_named_action(manager, pid, "register_rag", actor="架空担当")
+        return
     assert out["status"] == "advanced", out
     assert out["action_name"] == "generate_candidate"
     assert touched == {"apply": 0, "approve": 0, "send": 0, "rag": 0}
@@ -434,6 +540,41 @@ def test_api_tick_run_and_concurrent_ticks(tmp_path, domain, monkeypatch):
                          json={"actor": "架空担当"})
     assert ticked.status_code == 200, ticked.text
     body = ticked.json()
+    if domain == "external":
+        assert body["status"] == "waiting_human", body
+        assert body["stop_class"] == "missing_capability", body
+        assert body["action_name"] == "record_stop_class", body
+        assert counter["local"] == 0, counter
+        ran = client.post(f"/api/projects/{pid}/autopilot/run",
+                          json={"actor": "架空担当", "max_ticks": 3})
+        assert ran.status_code == 200
+        assert ran.json()["count"] <= 3
+        # 同時ティック(asyncio.gather)で片方が busy になり、生成は増えない。
+        manager2, pid2 = _make_manager(tmp_path, domain, 3, tag="-conc2")
+        sig2 = _seed_missing_coverage(manager2, pid2)
+        counter2 = _install_local_stub(manager2, pid2, {"local": 0, "external": 0})
+        auto.set_enabled(manager2, pid2, True, actor="架空担当",
+                         reason="架空の有効化理由")
+
+        async def _gather_ext():
+            return await asyncio.gather(
+                asyncio.to_thread(auto.autopilot_tick, manager2, pid2,
+                                  actor="架空担当"),
+                asyncio.to_thread(auto.autopilot_tick, manager2, pid2,
+                                  actor="架空担当"))
+
+        results_ext = asyncio.run(_gather_ext())
+        statuses_ext = sorted(str(r.get("status")) for r in results_ext)
+        assert "busy" in statuses_ext, statuses_ext
+        assert "waiting_human" in statuses_ext, statuses_ext
+        assert counter2["local"] == 0, counter2
+        assert counter2["external"] == 0
+        from app.plan_feedback import issues_for as _issues_for_ext
+        assert len(_issues_for_ext(manager2, pid2, sig2)) >= 1
+        from app.goal_review import ReviewStore as _StoreExt
+        stored_ext2 = _StoreExt(manager2.memory.path).get(pid2, "revision", sig2) or {}
+        assert not stored_ext2.get("candidate_id"), stored_ext2
+        return
     assert body["status"] == "advanced", body
     assert body["action_name"] == "generate_candidate", body
     assert body["detail"]["candidate_id"], body
@@ -467,6 +608,95 @@ def test_api_tick_run_and_concurrent_ticks(tmp_path, domain, monkeypatch):
     assert stored.get("candidate_id"), stored
     assert counter2["external"] == 0
     _ = sig
+
+
+def test_missing_capability_and_coverage_combined(tmp_path, monkeypatch):
+    """被覆不足と機能不足の併発: 機能不足で止まり also に被覆不足が残る。
+
+    疑似PJ(架空・文書だけの工程+システム構築を含む達成条件+未被覆の指摘)。
+    機能不足の解消(事前照合が不足を返さない状態)に戻れば generate_candidate が動く。
+    """
+    import app.autopilot as auto
+    import app.capability_gap as gap
+    from app.goal_review import ReviewStore
+    from app.workflow_readiness import build_readiness, build_stop_class
+
+    name = "s4b-疑似-mixed-combined"
+    db_path = tmp_path / (name + ".db")
+    memory = ShortTermMemory(db_path)
+    project = memory.create_project(name, workspace_path="projects/" + name)
+    pid = project["id"]
+    criteria = ["架空文書01の作成と検証",
+                "架空システム構築02の実施と検証",
+                "架空文書03の作成と検証"]
+    memory.save_mission(pid, "架空目標-mixed", "\n".join(
+        f"{i}. {text}" for i, text in enumerate(criteria, 1)), "", True, ["chatgpt"])
+    tasks = []
+    for i, text in enumerate(criteria, 1):
+        tasks.append(compile_task(i, text, {
+            "title": f"架空文書工程{i}",
+            "scope": f"架空文書{i:02d}の成果物を作成し根拠を検証する。",
+            "headings": ["目的", "実施内容"],
+        }, []))
+    memory.replace_plan(pid, name + " plan", tasks)
+    manager = ProjectOrchestrator(
+        memory, None, lambda p: ("", []), None,
+        lambda: [{"id": "chatgpt", "configured": True}],
+        workspace=WorkspaceSandbox(tmp_path / ("ws-" + name)),
+    )
+    sig = _seed_missing_coverage(manager, pid)
+    counter = _install_local_stub(manager, pid, {"local": 0, "external": 0})
+    ext_before = _external_counters(manager, pid)
+    version_before = _version_of(manager, pid)
+    record = build_stop_class(manager, pid, build_readiness(manager, pid))
+    assert record["stop_class"] == "missing_capability", record
+    assert any(a.get("stop_class") == "missing_coverage"
+               for a in (record.get("also") or [])), record
+    auto.set_enabled(manager, pid, True, actor="架空担当",
+                     reason="架空の有効化理由")
+    out = auto.autopilot_tick(manager, pid, actor="架空担当")
+    assert out["stop_class"] == "missing_capability", out
+    assert out["status"] == "waiting_human", out
+    assert out["action_name"] == "record_stop_class", out
+    assert out["enabled"] is True
+    assert counter["local"] == 0, counter
+    assert counter["external"] == 0
+    assert out["external_delta"] == 0
+    assert out["external_rounds_delta"] == 0
+    assert _version_of(manager, pid) == version_before
+    stored = ReviewStore(manager.memory.path).get(pid, "revision", sig) or {}
+    assert not stored.get("candidate_id"), stored
+    ext_after = _external_counters(manager, pid)
+    assert ext_after["sends"] == ext_before["sends"]
+    assert ext_after["rounds"] == ext_before["rounds"]
+    assert ext_after["budget"] == ext_before["budget"]
+
+    # 機能不足の解消: 事前照合が不足を返さない状態に戻す(差し替え)。
+    real_preflight = gap.capability_preflight
+
+    def _no_gap(m, p, plan_signature=None, ai_assist=None):
+        real = real_preflight(m, p, plan_signature=plan_signature,
+                              ai_assist=ai_assist)
+        return {"schema": real.get("schema"), "project_id": real.get("project_id"),
+                "plan_signature": real.get("plan_signature"),
+                "criteria": real.get("criteria"), "gaps": [],
+                "missing_capability": [], "has_missing_capability": False,
+                "gap_codes": [], "ai_assist_used": False, "external_sends": 0,
+                "external_calls": 0, "read_only": True}
+
+    monkeypatch.setattr(gap, "capability_preflight", _no_gap)
+    try:
+        record2 = build_stop_class(manager, pid, build_readiness(manager, pid))
+        assert record2["stop_class"] == "missing_coverage", record2
+        out2 = auto.autopilot_tick(manager, pid, actor="架空担当")
+    finally:
+        monkeypatch.undo()
+    assert out2["stop_class"] == "missing_coverage", out2
+    assert out2["status"] == "advanced", out2
+    assert out2["action_name"] == "generate_candidate", out2
+    assert (out2.get("detail") or {}).get("candidate_id"), out2
+    assert counter["local"] == 1, counter
+    assert counter["external"] == 0
 
 
 def test_registry_completeness_s4b(tmp_path):

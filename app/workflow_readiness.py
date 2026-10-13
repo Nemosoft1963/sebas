@@ -676,7 +676,12 @@ def build_stop_class(manager, pid: str, built: dict | None = None) -> dict:
     from app.stop_classifier import classify_stop
 
     if not isinstance(built, dict):
-        return classify_stop({"phase": "idle"})
+        record = classify_stop({"phase": "idle"})
+        if not isinstance(record, dict):
+            record = {}
+        record["preflight_status"] = "unknown"
+        record["preflight_reason"] = "no_readiness"
+        return record
     readiness_view = {
         "phase": built.get("phase"),
         "plan_signature": built.get("plan_signature"),
@@ -706,7 +711,35 @@ def build_stop_class(manager, pid: str, built: dict | None = None) -> dict:
     # 再試行上限・予算待ちは安全境界の明示として扱う
     if built.get("phase") in {"waiting_budget"}:
         inputs["budget_exhausted"] = True
-    return classify_stop(inputs)
+    # Stage 2-A の接続 (読み取り専用・追加のみ): 事前照合の結果を分類器へ渡す。
+    # GET /stop-class・workflow-readiness の stop_class・自走の _classify_current は
+    # いずれもこの関数を通るため、入口は一本化される。事前照合が読めない場合は
+    # 従来の分類をそのまま返し、不足を隠さない (preflight_status で明示する)。
+    preflight_status = "ok"
+    preflight_reason = ""
+    try:
+        from app import capability_gap as _gap
+
+        preflight = _gap.capability_preflight(manager, str(pid))
+        classifier_inputs = _gap.preflight_to_classifier_inputs(preflight)
+        if isinstance(classifier_inputs, dict):
+            cap = classifier_inputs.get("capability_preflight")
+            if isinstance(cap, dict):
+                inputs["capability_preflight"] = cap
+            if classifier_inputs.get("disposition") == "development":
+                inputs["disposition"] = "development"
+            if classifier_inputs.get("development_required") is True:
+                inputs["development_required"] = True
+    except Exception as exc:
+        preflight_status = "unknown"
+        preflight_reason = type(exc).__name__
+    record = classify_stop(inputs)
+    if not isinstance(record, dict):
+        record = classify_stop({})
+    record["preflight_status"] = preflight_status
+    if preflight_reason:
+        record["preflight_reason"] = preflight_reason
+    return record
 
 
 def build_readiness(manager, pid: str) -> dict:
@@ -860,15 +893,17 @@ def build_readiness(manager, pid: str) -> dict:
         'revision_token': _token(signature, mission.get('plan_version'), vehicle.get('controls'), plan.get('status')),
     }
     # Stage1: 停止分類を追加のみ (既存キーは不変)。失敗時は分類不能に倒す。
+    # 例外を通過扱いにしない: 事前照合の成否は unknown とし、不足を隠す
+    # 既定値 (ok / missing_count=0) は付けない。
     try:
         built['stop_class'] = build_stop_class(manager, pid, built)
     except Exception:
         try:
             from app.stop_classifier import classify_stop as _classify_stop
 
-            built['stop_class'] = _classify_stop({})
+            fallback = _classify_stop({})
         except Exception:
-            built['stop_class'] = {
+            fallback = {
                 'stop_class': 'missing_decision',
                 'stop_code': 'unknown:empty',
                 'evidence_refs': {},
@@ -877,4 +912,17 @@ def build_readiness(manager, pid: str) -> dict:
                 'external_sends': 0,
                 'also': [],
             }
+        if not isinstance(fallback, dict):
+            fallback = {
+                'stop_class': 'missing_decision',
+                'stop_code': 'unknown:empty',
+                'evidence_refs': {},
+                'next_action': 'none',
+                'reason_ja': '分類不能のため人の判断が必要です。',
+                'external_sends': 0,
+                'also': [],
+            }
+        fallback['preflight_status'] = 'unknown'
+        fallback['preflight_reason'] = 'stop_class_build_failed'
+        built['stop_class'] = fallback
     return built

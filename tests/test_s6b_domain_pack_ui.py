@@ -122,6 +122,50 @@ def test_js_api_paths_exist_and_keys_match(tmp_path):
     assert missing_refs == [], missing_refs
 
 
+def test_conformance_notes_do_not_imply_achievement():
+    # 適合検査の常設注記: 適合は達成の代用にしない。
+    assert "conformanceMeaningNote" in PACK_JS
+    assert "missingCapabilityNote" in PACK_JS
+    assert "apiCapabilityGaps" in PACK_JS
+    assert "達成条件を満たせることを示すものではありません" in PACK_JS
+    assert "パックが適合でも、達成条件を満たせるとは限りません" in PACK_JS
+    assert "不足機能は確認できず" in PACK_JS
+    assert "不足機能は確認されていません" in PACK_JS
+    assert "この案件には不足機能が " in PACK_JS
+    # 不足件数の取得失敗は 0件扱いにしない (confirmed:false)。
+    compact = PACK_JS.replace(" ", "")
+    assert "missingState={confirmed:false}" in compact
+    assert "info.confirmed!==true" in compact
+    assert "if(n===0)return" in compact
+    import shutil
+    if shutil.which("node") is None:
+        return
+    import subprocess
+    probe = (
+        "const fs=require('fs');const src=fs.readFileSync("
+        "'app/static/domain_pack.js','utf8');const mod={exports:{}};"
+        "require('vm').runInNewContext(src,{module:mod,document:undefined});"
+        "const f=mod.exports.missingCapabilityNote;"
+        "const note=mod.exports.conformanceMeaningNote();"
+        "if(!String(note).includes('達成条件を満たせることを示すものではありません'))"
+        "{console.error('meaning');process.exit(1);}"
+        "const cases=["
+        "[null,'不足機能は確認できず'],"
+        "[{confirmed:false},'不足機能は確認できず'],"
+        "[{confirmed:true,count:0},'不足機能は確認されていません'],"
+        "[{confirmed:true,count:3},'この案件には不足機能が 3 件あります'],"
+        "[{confirmed:true,count:'x'},'不足機能は確認できず']"
+        "];"
+        "for(const [input,expect] of cases){"
+        "const got=f(input);"
+        "if(!String(got).includes(expect)){console.error(JSON.stringify({input,got}));"
+        "process.exit(1);}}"
+    )
+    completed = subprocess.run(["node", "-e", probe], cwd=ROOT,
+                               capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+
+
 def test_words_and_fail_closed_static():
     # 必須の文言。
     for word in ("記録のみ", "自動では選べません", "確認できず",

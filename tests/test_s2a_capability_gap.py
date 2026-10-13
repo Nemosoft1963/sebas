@@ -482,6 +482,104 @@ def test_no_new_innerhtml():
     assert Path("app/static/goal_review.js").read_text(encoding="utf-8").count("innerHTML") == 1
 
 
+def _make_missing_manager(tmp_path, domain, tag="-conc"):
+    """不足が出る疑似PJを作る。doc/table は体系構築の条件を足す。"""
+    if domain == "external":
+        return _make_manager(tmp_path, domain, 3, tag=tag)
+    manager, pid = _make_manager(tmp_path, domain, 2, tag=tag)
+    mission = manager.memory.get_mission(pid)
+    if domain == "doc":
+        mission["success_criteria"] = "1. 架空文書01の作成と検証\n2. 架空体系02のシステム構築と稼働検証"
+    else:
+        mission["success_criteria"] = ("1. 架空営業管理表01の集計と検算\n"
+                                       "2. 架空顧客へ送信02の実行と検証\n"
+                                       "3. 架空告知文書03の作成と検証")
+    manager.memory.save_mission(pid, mission["goal"], mission["success_criteria"],
+                                mission.get("constraints_text") or "",
+                                mission.get("allow_external_ai", False),
+                                mission.get("external_providers") or [])
+    return manager, pid
+
+
+@pytest.mark.parametrize("domain", DOMAINS)
+def test_acceptance_tests_are_concrete_and_deterministic(tmp_path, domain):
+    """受入テストが (a)従来ID先頭 (b)達成条件引用と操作名 (c)外部送信0・再生条件
+    (d)長さ制限・秘密なし (e)決定的 (f)冪等キー不変 を満たす。"""
+    import app.capability_gap as gap
+    manager, pid = _make_missing_manager(tmp_path, domain)
+    preflight = gap.capability_preflight(manager, pid)
+    assert preflight["missing_capability"]
+    out = gap.generate_proposals(manager, pid, preflight, actor="架空担当")
+    assert out["proposals"]
+    ids_before = sorted(r["proposal_id"] for r in out["proposals"])
+    again = gap.generate_proposals(manager, pid, preflight, actor="架空担当")
+    assert sorted(r["proposal_id"] for r in again["proposals"]) == ids_before
+    for row in out["proposals"]:
+        tests = row["acceptance_tests"]
+        assert isinstance(tests, list) and len(tests) >= 4
+        # (a) 先頭に従来ID
+        for item in tests:
+            assert isinstance(item, str) and item.startswith("accept:")
+        assert any(t.startswith("accept:") and ":executes" in t for t in tests)
+        # (b) 達成条件の短い引用と操作名を含む
+        blob = " / ".join(tests)
+        assert row["criterion_ids"]
+        assert "『" in blob and "』" in blob
+        # (c) 「外部送信0」「再生で不足が消える」を含む
+        assert "外部送信0" in blob
+        assert "再生" in blob and "不足が消える" in blob
+        # 実行器の5状態・安全ゲートの文言を含む
+        assert "5状態" in blob
+        assert "安全ゲート" in blob
+        # (d) 引用が長さ制限内で秘密を含まない
+        for item in tests:
+            assert len(item) <= 500
+        assert "架空ダミー秘密値" not in blob
+        # 原本の本文全文を入れない (各項目は短文)
+        for item in tests:
+            assert len(item) <= 500
+    # (e) 同じ入力で決定的
+    replay = gap.capability_preflight(manager, pid)
+    out2 = gap.generate_proposals(manager, pid, replay, actor="架空担当")
+    for before, after in zip(
+            sorted(out["proposals"], key=lambda r: r["proposal_id"]),
+            sorted(out2["proposals"], key=lambda r: r["proposal_id"])):
+        assert before["acceptance_tests"] == after["acceptance_tests"]
+    # (f) 冪等キーが不変 (同じ不足で提案が増えない)
+    assert len(gap.list_proposals(manager, pid)) == len(ids_before)
+
+
+@pytest.mark.parametrize("domain", DOMAINS)
+def test_acceptance_tests_reach_export(tmp_path, domain):
+    """エクスポートした instruction.json / REQUEST.md に新しい受入テストが反映される。"""
+    import app.capability_export as export
+    import app.capability_gap as gap
+    manager, pid = _make_missing_manager(tmp_path, domain, tag="-exp")
+    preflight = gap.capability_preflight(manager, pid)
+    out = gap.generate_proposals(manager, pid, preflight, actor="架空担当")
+    target = out["proposals"][0]["proposal_id"]
+    gap.set_proposal_status(manager, pid, target, "reviewed",
+                            actor="架空担当", reason="架空確認")
+    result = export.export_proposal(manager, pid, target,
+                                    actor="架空担当",
+                                    base_ref=export.get_base_ref())
+    assert result["ok"] is True
+    ws = manager.workspace
+    project = manager.memory.get_project(pid)
+    _, scope = ws.project_path(project.get("workspace_path") or "", pid)
+    base = scope / "development_instructions" / target
+    import json as _json
+    instruction = _json.loads((base / "instruction.json").read_text(encoding="utf-8"))
+    request_text = (base / "REQUEST.md").read_text(encoding="utf-8")
+    assert instruction["acceptance_tests"]
+    assert all(str(x).startswith("accept:") for x in instruction["acceptance_tests"])
+    blob = " / ".join(str(x) for x in instruction["acceptance_tests"])
+    assert "外部送信0" in blob
+    assert "不足が消える" in blob
+    for item in instruction["acceptance_tests"]:
+        assert str(item) in request_text
+
+
 def test_proposal_schema_contract(tmp_path):
     import app.capability_gap as gap
     manager, pid = _make_manager(tmp_path, "external", 3, tag="-schema")
