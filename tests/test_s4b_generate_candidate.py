@@ -168,10 +168,11 @@ def test_tick_generates_candidate_via_propose(tmp_path, domain):
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
     if domain == "external":
-        # 事前照合で機能不足が確定するため自走は進まず記録して止まる。
+        # B-3: 事前照合で機能不足が確定するため下書きまで自走し、確認待ちで止まる。
         assert out["stop_class"] == "missing_capability", out
         assert out["status"] == "waiting_human", out
-        assert out["action_name"] == "record_stop_class", out
+        assert out["action_name"] == "capability_preflight", out
+        assert out.get("capability_outcome") == "created", out
         assert out["enabled"] is True
         assert counter["local"] == 0, counter
         assert out.get("local_calls", 0) == 0, out
@@ -248,17 +249,23 @@ def test_idempotent_second_tick_no_new_llm_call(tmp_path, domain, monkeypatch):
                      reason="架空の有効化理由")
     first = auto.autopilot_tick(manager, pid, actor="架空担当")
     if domain == "external":
-        # 機能不足で止まるため候補は作らず、LLM呼出も増えない。
+        # B-3: 機能不足は下書きまで自走し、確認待ちで止まる。LLM呼出は増えない。
         assert first["status"] == "waiting_human", first
         assert first["stop_class"] == "missing_capability", first
-        assert first["action_name"] == "record_stop_class", first
+        assert first["action_name"] == "capability_preflight", first
+        assert first.get("capability_outcome") == "created", first
         assert counter["local"] == 0, counter
-        # 同じ停止の繰返しは空転ガードで止まる(生成も外部呼出も増えない)。
+        # 2回目は既存提案を確認して止まり、3回目で空転ガードが止める。
         second = auto.run_until_stop(manager, pid, actor="架空担当", max_ticks=5)
         assert counter["local"] == 0, counter
         assert counter["external"] == 0
-        assert second["status"] == "stopped_guard", second
-        assert auto.is_enabled(manager, pid) is False
+        assert second["status"] in ("waiting_human", "stopped_guard"), second
+        if second["status"] == "stopped_guard":
+            assert auto.is_enabled(manager, pid) is False
+        else:
+            third = auto.run_until_stop(manager, pid, actor="架空担当", max_ticks=5)
+            assert third["status"] == "stopped_guard", third
+            assert auto.is_enabled(manager, pid) is False
         from app.goal_review import ReviewStore
         stored = ReviewStore(manager.memory.path).get(pid, "revision", sig) or {}
         assert not stored.get("candidate_id"), stored
@@ -273,6 +280,8 @@ def test_idempotent_second_tick_no_new_llm_call(tmp_path, domain, monkeypatch):
         record = classify_stop({"binding_state": "invalid_reference",
                                 "plan_signature": sig2})
         assert record["stop_class"] == "missing_binding"
+        # A-1修正後: 実経路と同じ形 (preflight_status ok + 現行署名) で渡す。
+        record["preflight_status"] = "ok"
         monkeypatch.setattr(auto, "_classify_current",
                             lambda _m, _p: ({}, dict(record)))
         auto.autopilot_tick(manager2, pid2, actor="架空担当")
@@ -304,6 +313,8 @@ def test_idempotent_second_tick_no_new_llm_call(tmp_path, domain, monkeypatch):
     record = classify_stop({"binding_state": "invalid_reference",
                             "plan_signature": sig2})
     assert record["stop_class"] == "missing_binding"
+    # A-1修正後: 実経路と同じ形 (preflight_status ok + 現行署名) で渡す。
+    record["preflight_status"] = "ok"
     monkeypatch.setattr(auto, "_classify_current",
                         lambda _m, _p: ({}, dict(record)))
     auto.autopilot_tick(manager2, pid2, actor="架空担当")
@@ -340,10 +351,11 @@ def test_generation_failures_recorded_as_failed(tmp_path, domain, mode):
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
     if domain == "external":
-        # 機能不足で生成を試みない(事前に止まる)。失敗ではなく人の判断待ち。
+        # B-3: 機能不足は下書きまで自走し、確認待ちで止まる(失敗ではない)。
         assert out["status"] == "waiting_human", out
         assert out["stop_class"] == "missing_capability", out
-        assert out["action_name"] == "record_stop_class", out
+        assert out["action_name"] == "capability_preflight", out
+        assert out.get("capability_outcome") == "created", out
         assert out["reason_ja"], out
         assert out["enabled"] is True
         assert auto.is_enabled(manager, pid) is True
@@ -351,9 +363,12 @@ def test_generation_failures_recorded_as_failed(tmp_path, domain, mode):
         assert out["external_rounds_delta"] == 0
         assert counter["external"] == 0
         assert counter["local"] == 0, counter
-        # 同じ停止の繰返しで空転ガードが止める(2回目は stopped_guard)。
+        # 2回目は既存提案の確認。3回目で空転ガードが止める。
         again = auto.autopilot_tick(manager, pid, actor="架空担当")
-        assert again["status"] == "stopped_guard", again
+        assert again["status"] in ("waiting_human", "stopped_guard"), again
+        if again["status"] == "waiting_human":
+            third = auto.autopilot_tick(manager, pid, actor="架空担当")
+            assert third["status"] == "stopped_guard", third
         return
     # 失敗は成功扱いにしない。理由つきで記録し、自走を止める。
     assert out["status"] == "failed", out
@@ -387,12 +402,18 @@ def test_attempt_limit_stops_without_fourth_call(tmp_path, domain, monkeypatch):
 
     def _fake_classify(_m, _p):
         seq["n"] += 1
+        sig_current = _sig_of(manager, pid)
+        # A-1修正後: 実経路と同じ形 (preflight ok + 現行署名) で渡す。
+        # 空転ガード回避のため stop_code を交互に変えて3回失敗させる。
+        codes = ["coverage:incomplete", "coverage:partial"]
         return {}, {"stop_class": "missing_coverage",
-                    "stop_code": "coverage:incomplete",
-                    "evidence_refs": {"plan_signature": f"架空署名-{seq['n']}"},
+                    "stop_code": codes[seq["n"] % 2],
+                    "plan_signature": sig_current,
+                    "evidence_refs": {"plan_signature": sig_current},
                     "next_action": "propose_feedback",
                     "reason_ja": "架空の被覆不足",
-                    "external_sends": 0}
+                    "external_sends": 0,
+                    "preflight_status": "ok"}
 
     monkeypatch.setattr(auto, "_classify_current", _fake_classify)
     for _ in range(3):
@@ -451,15 +472,17 @@ def test_preconditions_do_not_proceed(tmp_path, domain, case):
     assert counter["external"] == 0
     assert out["reason_ja"], out
     if domain == "external":
-        # 機能不足が先に確定するため、LLM種別より前に人の判断待ちで止まる。
+        # B-3: 機能不足が先に確定するため下書きまで自走し、確認待ちで止まる。
         # ただし生成中の明示がある場合は従来どおり実行中(missing_decision)で止まる。
         assert out["status"] == "waiting_human", out
-        assert out["action_name"] == "record_stop_class", out
         assert out["enabled"] is True
         if case == "generating":
             assert out["stop_class"] == "missing_decision", out
+            assert out["action_name"] == "record_stop_class", out
         else:
             assert out["stop_class"] == "missing_capability", out
+            assert out["action_name"] == "capability_preflight", out
+            assert out.get("capability_outcome") == "created", out
         return
     if case == "wrong_llm":
         # LLM種別が不正: 生成を試みずティックは失敗。
@@ -495,10 +518,11 @@ def test_generate_candidate_never_applies_or_sends(tmp_path, domain, monkeypatch
                      reason="架空の有効化理由")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
     if domain == "external":
-        # 機能不足では生成に進まず、適用・送信・外部評価は触れない。
+        # B-3: 機能不足は下書きまで自走するが、適用・送信・外部評価は触れない。
         assert out["status"] == "waiting_human", out
         assert out["stop_class"] == "missing_capability", out
-        assert out["action_name"] == "record_stop_class", out
+        assert out["action_name"] == "capability_preflight", out
+        assert out.get("capability_outcome") == "created", out
         assert out["enabled"] is True
         assert touched == {"apply": 0, "approve": 0, "send": 0, "rag": 0}
         assert counter["external"] == 0
@@ -543,7 +567,8 @@ def test_api_tick_run_and_concurrent_ticks(tmp_path, domain, monkeypatch):
     if domain == "external":
         assert body["status"] == "waiting_human", body
         assert body["stop_class"] == "missing_capability", body
-        assert body["action_name"] == "record_stop_class", body
+        assert body["action_name"] == "capability_preflight", body
+        assert body.get("capability_outcome") == "created", body
         assert counter["local"] == 0, counter
         ran = client.post(f"/api/projects/{pid}/autopilot/run",
                           json={"actor": "架空担当", "max_ticks": 3})
@@ -657,7 +682,8 @@ def test_missing_capability_and_coverage_combined(tmp_path, monkeypatch):
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
     assert out["stop_class"] == "missing_capability", out
     assert out["status"] == "waiting_human", out
-    assert out["action_name"] == "record_stop_class", out
+    assert out["action_name"] == "capability_preflight", out
+    assert out.get("capability_outcome") == "created", out
     assert out["enabled"] is True
     assert counter["local"] == 0, counter
     assert counter["external"] == 0
@@ -752,10 +778,14 @@ def test_human_wait_does_not_hide_external_increment(tmp_path, monkeypatch):
     auto.set_enabled(manager, project_id, True, actor="架空担当", reason="架空の有効化理由")
     original = int(_EXTERNAL_SENDS_COUNTER.get("calls") or 0)
     monkeypatch.setitem(_EXTERNAL_SENDS_COUNTER, "calls", original)
+    # A-1修正後: 実経路と同じ形 (preflight_status ok + 現行署名) で渡す。
+    sig_current = _sig_of(manager, project_id)
     monkeypatch.setattr(auto, "_classify_current", lambda *_: ({}, {
         "stop_class": "missing_coverage", "stop_code": "coverage:incomplete",
-        "plan_signature": "架空署名", "evidence_refs": {"plan_signature": "架空署名"},
-        "next_action": "propose_feedback", "reason_ja": "架空の被覆不足"}))
+        "plan_signature": sig_current,
+        "evidence_refs": {"plan_signature": sig_current},
+        "next_action": "propose_feedback", "reason_ja": "架空の被覆不足",
+        "preflight_status": "ok"}))
 
     def unexpected_external_then_wait(*_args, **_kwargs):
         _EXTERNAL_SENDS_COUNTER["calls"] += 1

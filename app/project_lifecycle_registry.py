@@ -374,6 +374,41 @@ def build_registry() -> list[RegistryEntry]:
             backup_method="delete-sidecar-preserved",
             delete_method_declared="L3-delete-state (preserved on purge)",
         ))
+    # C-1/C-2: 見張りの記録 (サイドカーSQLite: *.watch.sqlite3 の
+    # watch_snapshots / watch_events)。kind は autopilot/gap/pack と同様
+    # "other" とし、件数テストの対象外にする。網羅性検証
+    # (audit_registry_completeness) では table 名で登録扱いになる。退避は
+    # sidecar-preserved (行複写対象外)、PJ初期化では当該PJ行を捨て
+    # (reset_for_generation。通知は残す)、完全削除では purge_project_watch
+    # で当該PJ行を消す。PJのデータには書込まない。
+    for _t in ("watch_snapshots", "watch_events"):
+        entries.append(RegistryEntry(
+            name=f"watch:{_t}", kind="other", db_label="watch",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="watchtower の見張り記録(*.watch.sqlite3)。"
+                        "追記のみ。PJのデータには書込まない",
+            backup_method="watch-sidecar-preserved",
+            delete_method_declared="C1-watch-purge (purge_project_watch)",
+        ))
+    # C-3: 人が起動する夜間実行 (サイドカーSQLite: *.nightrun.sqlite3 の
+    # night_runs / night_run_steps / kill_switch)。kind は同様に "other"
+    # とし、件数テストの対象外にする。網羅性検証では table 名で登録扱いに
+    # なる。night_runs はPJごとの行を持たない (project_idは記録のみ) が、
+    # 棚卸しの対象として登録する。退避は sidecar-preserved (行複写対象外)、
+    # PJ初期化では記録を変えず (reset_for_generation)、完全削除では
+    # purge_project_nightrun でステップ行の当該project_idを消す
+    # (run行自体はPJごとの行を持たないため残す)。秘密や本文は入れない。
+    for _t in ("night_runs", "night_run_steps", "kill_switch"):
+        entries.append(RegistryEntry(
+            name=f"nightrun:{_t}", kind="other", db_label="nightrun",
+            table=_t, project_column="project_id" if _t == "night_run_steps" else "",
+            shared_with_other_projects=False,
+            description="night_run の夜間実行記録(*.nightrun.sqlite3)。"
+                        "追記のみ。IDと件数と状態のみ",
+            backup_method="nightrun-sidecar-preserved",
+            delete_method_declared="C3-nightrun-purge (purge_project_nightrun)",
+        ))
     return entries
 
 
@@ -428,6 +463,10 @@ def resolve_db_path(memory_path: str | Path, db_label: str) -> Path | None:
         return mem.with_name(mem.name + ".gap.sqlite3")
     if db_label == "pack":
         return mem.with_name(mem.name + ".pack.sqlite3")
+    if db_label == "watch":
+        return mem.with_name(mem.name + ".watch.sqlite3")
+    if db_label == "nightrun":
+        return mem.with_name(mem.name + ".nightrun.sqlite3")
     return None
 
 

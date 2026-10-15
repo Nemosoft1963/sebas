@@ -237,11 +237,12 @@ def test_auto_stops_advance_one_action(tmp_path, domain, monkeypatch):
     _stop = (_built.get("stop_class") or {}).get("stop_class")
     out = auto.autopilot_tick(manager, pid, actor="架空担当")
     if _missing_count:
-        # 事前照合が不足を返すPJでは missing_capability が主たる停止になる
-        # (意図した変更: 以前は missing_coverage で進み得たが今は止まる)。
+        # B-3: 事前照合が不足を返すPJでは missing_capability が主たる停止になり、
+        # 下書きまで自走して確認待ちで止まる (review/export は自動化しない)。
         assert out["stop_class"] == "missing_capability", out
         assert out["status"] == "waiting_human", out
-        assert out["action_name"] == "record_stop_class", out
+        assert out["action_name"] == "capability_preflight", out
+        assert out.get("capability_outcome") == "created", out
         assert out["enabled"] is True
     else:
         assert out["stop_class"] == _stop, out
@@ -277,6 +278,8 @@ def test_auto_stops_advance_one_action(tmp_path, domain, monkeypatch):
     assert record2["stop_class"] == "missing_binding"
     assert record2["stop_code"] == "binding:invalid_reference"
     assert CLASS_TABLE[record2["stop_code"]] == "missing_binding"
+    # A-1修正後: 実経路と同じ形 (preflight_status ok + 現行署名) で渡す。
+    record2["preflight_status"] = "ok"
     monkeypatch.setattr(auto, "_classify_current",
                         lambda _m, _p: ({}, dict(record2)))
     out2 = auto.autopilot_tick(manager2, pid2, actor="架空担当")
@@ -319,7 +322,12 @@ def test_human_stops_do_not_advance(tmp_path, domain, kind):
     else:
         assert out["stop_class"] == kind, out
     assert out["status"] == "waiting_human"
-    assert out["action_name"] == "record_stop_class"
+    if out["stop_class"] == "missing_capability":
+        # B-3: 機能不足が主たる停止なら下書きまで自走し、確認待ちで止まる。
+        assert out["action_name"] == "capability_preflight", out
+        assert out.get("capability_outcome") in ("created", "existing", "skipped"), out
+    else:
+        assert out["action_name"] == "record_stop_class"
     assert out["next_action"]
     assert out["reason_ja"]
     assert isinstance(out["evidence_refs"], dict)
@@ -490,6 +498,8 @@ def test_guard_two_consecutive_and_release(tmp_path, monkeypatch):
     record = classify_stop({"coverage_incomplete": True,
                             "plan_signature": sig})
     assert record["stop_class"] == "missing_coverage"
+    # A-1修正後: 実経路と同じ形 (preflight_status ok + 現行署名) で渡す。
+    record["preflight_status"] = "ok"
     monkeypatch.setattr(auto, "_classify_current",
                         lambda _m, _p: ({}, dict(record)))
     auto.set_enabled(manager, pid, True, actor="架空担当",
@@ -559,16 +569,22 @@ def test_run_until_stop_caps_at_ten(tmp_path, monkeypatch):
     auto.set_enabled(manager3, pid3, True, actor="架空担当",
                      reason="架空の有効化理由")
     seq = {"n": 0}
+    sig_real = _sig_of(manager3, pid3)
+    # A-1修正後: 実経路と同じ形 (preflight ok + 現行署名) で渡す。
+    # 空転ガード回避のため stop_code を交互に変えて10回進める。
+    codes = ["binding:invalid_reference", "binding:multiple_targets"]
 
     def _fake_classify(_m, _p):
         seq["n"] += 1
-        sig = f"架空署名-{seq['n']}"
+        code = codes[seq["n"] % 2]
         record = {"stop_class": "missing_binding",
-                  "stop_code": "binding:invalid_reference",
-                  "evidence_refs": {"plan_signature": sig},
+                  "stop_code": code,
+                  "evidence_refs": {"plan_signature": sig_real},
+                  "plan_signature": sig_real,
                   "next_action": "review_feedback",
                   "reason_ja": "架空の対応付け不足",
-                  "external_sends": 0}
+                  "external_sends": 0,
+                  "preflight_status": "ok"}
         return {}, record
 
     monkeypatch.setattr(auto, "_classify_current", _fake_classify)
@@ -600,6 +616,8 @@ def test_concurrent_ticks_single_execution(tmp_path):
     record = classify_stop({"binding_state": "invalid_reference",
                             "plan_signature": sig})
     assert record["stop_class"] == "missing_binding"
+    # A-1修正後: 実経路と同じ形 (preflight_status ok + 現行署名) で渡す。
+    record["preflight_status"] = "ok"
     orig_classify = auto._classify_current
     auto._classify_current = lambda _m, _p: ({}, dict(record))
     auto.run_named_action = _counting

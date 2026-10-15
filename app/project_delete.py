@@ -991,6 +991,51 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
             removed["autopilot:autopilot_ticks"] = int((_apurged or {}).get("autopilot_ticks") or 0)
         except Exception:
             pass
+        # C-1/C-2 (追加のみ): watch_snapshots/events は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        try:
+            from app.watchtower import purge_project_watch as _purge_watch
+            _wpurged = _purge_watch(memory_path, pid)
+            if not isinstance(_wpurged, dict) or not all(
+                    key in _wpurged for key in ("watch_snapshots", "watch_events")):
+                raise ValueError("watch purge result unavailable")
+            removed["watch:watch_snapshots"] = int(_wpurged["watch_snapshots"])
+            removed["watch:watch_events"] = int(_wpurged["watch_events"])
+        except Exception as exc:
+            LOGGER.warning("watch purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed", "watch purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="見張りの記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "見張りの記録を完全削除できません",
+                    "code": "WATCH_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # C-3 (追加のみ): night_run_steps は kind=other のため
+        # _purge_all_data では触れない。ステップ行の当該project_idを消す
+        # (run行自体はPJごとの行を持たないため残す。他PJに影響しない)。
+        try:
+            from app.night_run import purge_project_nightrun as _purge_nightrun
+            _npurged = _purge_nightrun(memory_path, pid)
+            if not isinstance(_npurged, dict) or "night_run_steps" not in _npurged:
+                raise ValueError("nightrun purge result unavailable")
+            removed["nightrun:night_run_steps"] = int(
+                _npurged["night_run_steps"])
+        except Exception as exc:
+            LOGGER.warning("nightrun purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed",
+                       "nightrun purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="夜間実行の記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "夜間実行の記録を完全削除できません",
+                    "code": "NIGHTRUN_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
         orphans = list_orphans_after_legacy_delete(memory_path, pid, workspace_root)
         if orphans.get("orphan_count"):
             _record_op(memory_path, pid, "purge", key, "failed", "orphans remain")

@@ -840,6 +840,15 @@ def initialize_project(memory_path: str | Path, project_id: str, mode: str, *,
             return {"ok": False,
                     "reason": f"パック選択をリセットできないため初期化を中止しました: {type(exc).__name__}",
                     "backup": backup, "code": "PACK_RESET_FAILED"}
+        # C-1/C-2 (追加のみ): 見張りのスナップショットを捨てる (通知は残す)。
+        # 古い世代の停止・進捗を見張り続けないため。失敗時は中止する。
+        try:
+            from app.watchtower import reset_for_generation as _watch_reset
+            _watch_reset(memory_path, pid)
+        except Exception as exc:
+            return {"ok": False,
+                    "reason": f"見張りを初期化できないため初期化を中止しました: {type(exc).__name__}",
+                    "backup": backup, "code": "WATCH_RESET_FAILED"}
         prev_gen = current_generation_number(memory_path, pid)
         new_gen_no = prev_gen + 1
         # 新世代の input_version は旧世代と異なる値にする。

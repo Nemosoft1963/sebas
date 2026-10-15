@@ -5098,6 +5098,240 @@ async def clear_project_domain_pack(project_id: str,
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.get('/api/projects/{project_id}/goal-progress')
+async def get_goal_progress(project_id: str):
+    require_project(project_id)
+    from app.goal_state_model import build_goal_state
+    # 読み取り専用: 進捗モデルだけを返す。DB・ファイルを変更しない。
+    return await asyncio.to_thread(build_goal_state, orchestrator, project_id)
+
+
+@app.get('/static/goal_state.js')
+async def goal_state_js():
+    return FileResponse(ROOT / 'app' / 'static' / 'goal_state.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+@app.get('/static/watch_panel.js')
+async def watch_panel_js():
+    return FileResponse(ROOT / 'app' / 'static' / 'watch_panel.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+class WatchRefreshPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class WatchAckPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    note: str = Field(default='', max_length=500)
+
+
+@app.post('/api/watch/refresh')
+async def post_watch_refresh(payload: WatchRefreshPayload):
+    # 人が押したときだけ動く。定期スレッド・タイマーは作らない。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import watchtower as _watch
+    try:
+        return await asyncio.to_thread(_watch.refresh, orchestrator, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/watch/events')
+async def get_watch_events(unread: int = 0, limit: int = 50):
+    from app import watchtower as _watch
+    try:
+        count = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'limit が不正です')
+    try:
+        events = await asyncio.to_thread(
+            _watch.list_events, orchestrator, bool(int(unread)), count)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {'events': events, 'read_only': True, 'external_sends': 0}
+
+
+@app.post('/api/watch/events/{event_id}/ack')
+async def post_watch_event_ack(event_id: str, payload: WatchAckPayload):
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import watchtower as _watch
+    try:
+        return await asyncio.to_thread(
+            _watch.ack_event, orchestrator, event_id, actor,
+            payload.note or '')
+    except ValueError as exc:
+        text = str(exc)
+        if '見つかりません' in text:
+            raise HTTPException(404, text) from exc
+        raise HTTPException(409, text) from exc
+
+
+@app.get('/api/watch/status')
+async def get_watch_status():
+    from app import watchtower as _watch
+    try:
+        status = await asyncio.to_thread(_watch.watch_status, orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**status, 'read_only': True, 'external_sends': 0}
+
+
+@app.get('/api/watch/decisions')
+async def get_watch_decisions():
+    from app import watchtower as _watch
+    try:
+        decisions = await asyncio.to_thread(_watch.collect_decisions,
+                                            orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {'decisions': decisions, 'read_only': True, 'external_sends': 0}
+
+
+@app.get('/static/night_run_panel.js')
+async def night_run_panel_js():
+    return FileResponse(ROOT / 'app' / 'static' / 'night_run_panel.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+class NightRunStartPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    budget: dict = Field(default_factory=dict)
+
+
+class NightRunTickPayload(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+
+
+class NightRunFinishPayload(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+    actor: str = Field(min_length=1, max_length=100)
+    end_reason: str = Field(default='', max_length=500)
+
+
+class AutopilotDisableAllPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class KillSwitchReleasePayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.post('/api/night-run/start')
+async def post_night_run_start(payload: NightRunStartPayload):
+    # 人が起動したときだけ動く。実際のティックは回さず、実行を running として
+    # 登録しIDとトークンを返す (外部ランナー用の受付)。すでに実行中なら409。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.start_run, orchestrator, actor,
+                                       payload.budget or None)
+    except _night.NightRunBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/night-run/{run_id}/tick-next')
+async def post_night_run_tick_next(run_id: str, payload: NightRunTickPayload):
+    # ランナーが呼ぶ。次に回すPJをサーバ側で選び、1ティックだけ既存の
+    # autopilot_tick を実行して結果を記録する。重い処理はスレッドプール。
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.tick_next, orchestrator,
+                                       run_id, payload.token or '')
+    except ValueError as exc:
+        text = str(exc)
+        if '見つかりません' in text:
+            raise HTTPException(404, text) from exc
+        raise HTTPException(409, text) from exc
+
+
+@app.post('/api/night-run/{run_id}/finish')
+async def post_night_run_finish(run_id: str, payload: NightRunFinishPayload):
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.finish_run, orchestrator,
+                                       run_id, payload.token or '', actor,
+                                       payload.end_reason or '')
+    except ValueError as exc:
+        text = str(exc)
+        if '見つかりません' in text:
+            raise HTTPException(404, text) from exc
+        raise HTTPException(409, text) from exc
+
+
+@app.get('/api/night-run/latest')
+async def get_night_run_latest():
+    # 読み取り専用: 最新の実行 (報告つき)。DB・ファイルを変更しない。
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.get_latest, orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/night-run/{run_id}')
+async def get_night_run(run_id: str):
+    # 読み取り専用。DB・ファイルを変更しない。
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.get_run, orchestrator,
+                                       run_id)
+    except ValueError as exc:
+        text = str(exc)
+        if '見つかりません' in text:
+            raise HTTPException(404, text) from exc
+        raise HTTPException(409, text) from exc
+
+
+@app.post('/api/autopilot/disable-all')
+async def post_autopilot_disable_all(payload: AutopilotDisableAllPayload):
+    # 全PJの自走を無効化し (各PJの監査に記録)、同時にキルスイッチを active にする。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.disable_all, orchestrator,
+                                       actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/autopilot/kill-switch/release')
+async def post_kill_switch_release(payload: KillSwitchReleasePayload):
+    # 解除は人が行う (actor必須)。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import night_run as _night
+    try:
+        return await asyncio.to_thread(_night.kill_switch_release,
+                                       orchestrator, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/autopilot/kill-switch')
+async def get_kill_switch():
+    # 読み取り専用。DB・ファイルを変更しない。
+    from app import night_run as _night
+    try:
+        state = await asyncio.to_thread(_night.kill_switch_state,
+                                        orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {'state': state, 'read_only': True, 'external_sends': 0}
+
+
 @app.post('/api/projects/{project_id}/ocr/{run_id}/rag')
 async def register_ocr_rag_api(project_id: str, run_id: str, payload: OcrRagPayload):
     require_project(project_id)

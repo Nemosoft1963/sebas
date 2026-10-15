@@ -647,3 +647,32 @@ def test_legacy_delete_api_rejected(monkeypatch, tmp_path):
     assert client.get(f"/api/projects/{pid}/mission").status_code == 200
     d = client.delete("/api/projects/default")
     assert d.status_code == 409
+
+
+
+def test_watch_purge_failure_does_not_report_complete(env, monkeypatch):
+    import app.watchtower as watch
+
+    _fill(env)
+    deleted, _ = _do_delete(env)
+    assert deleted["ok"] is True
+    mem = env["mem"]
+    pid = env["pid"]
+    from app.project_delete import delete_db_path
+    with sqlite3.connect(str(delete_db_path(mem))) as db:
+        db.execute("UPDATE project_delete_states SET purgeable_at=? WHERE project_id=?",
+                   ("2000-01-01T00:00:00+00:00", pid))
+    preview = build_purge_preview(mem, pid, env["ws_root"])
+    assert preview["can_purge"] is True, preview.get("blocked_reasons")
+
+    def fail_watch_purge(*_args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(watch, "purge_project_watch", fail_watch_purge)
+    result = purge_deleted(
+        mem, pid, purge_token=preview["purge_token"],
+        project_name=preview["project_name"], actor="架空担当",
+        workspace_root=env["ws_root"], backup_root=env["backup_root"])
+    assert result["ok"] is False
+    assert result["code"] == "WATCH_PURGE_FAILED"
+    assert get_delete_state(mem, pid)["state"] == "failed"

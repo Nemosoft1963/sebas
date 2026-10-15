@@ -81,3 +81,10 @@
 - Added safe completion recovery for generic projects, including version-bound review feedback, generic rebuilding, evidence checks, unified UI action state, provider failure isolation, and read-only recovery previews.
 - Prevented legacy review tasks from being reused as execution tasks during recovery.
 - Fixed the hardened Docker build order for RAG-enabled builds while keeping runtime package installers removed.
+
+## 2026-10-15
+
+- 自走の安全化：予算・計数・履歴の確認に失敗した場合は停止し、未確認を成功扱いしない。自走は既定で無効。
+- 目標の現在地、見張り通知、全PJの判断待ち一覧を追加。見張りの初回未更新と取得失敗を区別する。
+- 人が起動する夜間実行を追加。有効化済みPJだけを時間・回数の予算内で1ティックずつ処理し、外部増分を検出したら中止する。全体停止スイッチと実行報告を追加。定期実行の登録は行わない。
+- 実案件での夜間実行、OCR実PDF受入、車両損益の実案件受入は未完了。
