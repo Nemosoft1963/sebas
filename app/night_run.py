@@ -829,21 +829,20 @@ def tick_next(manager, run_id: str, token: str) -> dict:
                 step["reason"] = "想定外の状態のため除外します:" + status
                 return {"done": False, "reason": "tick_unexpected_excluded",
                         "step": step, "run_id": rid, "state": RUNNING}
-            try:
-                external_delta = int(tick.get("external_delta") or 0)
-            except (TypeError, ValueError):
-                external_delta = 0
-                tick["external_delta"] = "確認できず"
-            try:
-                rounds_delta = int(tick.get("external_rounds_delta") or 0)
-            except (TypeError, ValueError):
-                rounds_delta = 0
-                tick["external_rounds_delta"] = "確認できず"
+            raw_external = tick.get("external_delta")
+            raw_rounds = tick.get("external_rounds_delta")
+            counts_known = (type(raw_external) is int and raw_external >= 0
+                            and type(raw_rounds) is int and raw_rounds >= 0)
+            # 欠落・不正な計数を0件と見なすと回路遮断を通過できてしまう。
+            # DBの整数列には0を保存するが、budget_kept=False と中止理由で
+            # 「測定できた0件」と区別する。
+            external_delta = raw_external if counts_known else 0
+            rounds_delta = raw_rounds if counts_known else 0
             budget_kept = tick.get("budget_kept")
-            if not isinstance(budget_kept, bool):
+            if not isinstance(budget_kept, bool) or not counts_known:
                 budget_kept = False
             summary = {
-                "status": status,
+                "status": status if counts_known else "unreadable",
                 "stop_class": str(tick.get("stop_class") or ""),
                 "action": str(tick.get("action_name") or ""),
                 "external_delta": external_delta,
@@ -856,9 +855,10 @@ def tick_next(manager, run_id: str, token: str) -> dict:
                     db2.execute("BEGIN IMMEDIATE")
                     step = _append_step(db2, rid, seq, target, summary)
                     _abort_run(db2, rid,
-                               "外部増分を検出したため中止します:"
+                               "外部増分または計数不能のため中止します:"
                                f"calls={external_delta} "
                                f"rounds={rounds_delta} "
+                               f"counts_known={counts_known} "
                                f"budget_kept={bool(budget_kept)}")
                     try:
                         db2.execute("UPDATE night_runs SET heartbeat_at=? "
@@ -885,9 +885,12 @@ def tick_next(manager, run_id: str, token: str) -> dict:
                         disable_note = "無効化できず:" + _type_name(exc)
                 else:
                     disable_note = "既に無効でした"
-                step["circuit"] = "external_delta"
+                step["circuit"] = ("external_delta" if counts_known
+                                   else "external_unknown")
                 step["disable_note"] = disable_note
-                return {"done": True, "reason": "circuit_external_delta",
+                return {"done": True,
+                        "reason": ("circuit_external_delta" if counts_known
+                                   else "circuit_external_unknown"),
                         "step": step, "run_id": rid, "state": ABORTED}
             with _connect(manager) as db2:
                 db2.execute("BEGIN IMMEDIATE")

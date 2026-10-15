@@ -602,3 +602,33 @@ def test_registry_and_purge_and_generic(tmp_path):
     assert "http://" not in text and "https://" not in text
     assert "httpx" not in text and "requests.post" not in text
     assert "urlopen" not in text
+
+@pytest.mark.parametrize("counts", [
+    {},
+    {"external_delta": "確認できず", "external_rounds_delta": 0},
+    {"external_delta": 0, "external_rounds_delta": None},
+    {"external_delta": True, "external_rounds_delta": 0},
+])
+def test_unreadable_external_counts_abort_instead_of_zero(
+        tmp_path, monkeypatch, counts):
+    import app.autopilot as auto
+    import app.night_run as night
+
+    manager, pids = _multi_manager(tmp_path, [("a", "doc", 3)])
+    pid = pids["a"]
+    auto.set_enabled(manager, pid, True, actor="架空担当",
+                     reason="架空の有効化理由")
+    payload = {"status": "advanced", "action_name": "none",
+               "budget_kept": True, **counts}
+    monkeypatch.setattr(auto, "autopilot_tick",
+                        lambda _manager, _pid, **kwargs: payload)
+    started = night.start_run(manager, "架空開始者", {"max_ticks": 10})
+    out = night.tick_next(manager, started["run_id"], started["token"])
+    assert out["done"] is True
+    assert out["state"] == "aborted"
+    assert out["reason"] == "circuit_external_unknown"
+    assert out["step"]["status"] == "unreadable"
+    assert auto.is_enabled(manager, pid) is False
+    report = night.build_report(manager, started["run_id"])
+    assert report["external_zero_measured"] is False
+    assert "counts_known=False" in report["end_reason"]
