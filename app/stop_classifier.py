@@ -300,13 +300,15 @@ def _next_for(code: str) -> str:
         return "none"
     nxt = NEXT_ACTION_TABLE.get(str(code), "none")
     # 防衛: IMPLEMENTED_ACTIONS に無い名前は出さない (遅延importで検証)。
+    # F2b fail-closed: 検証用importの失敗時は迂回策を出さず none に倒す。
+    # (予定外の次の一手を出さない。既存の policy_block=nome 経路と同方向)
     try:
         from app.workflow_readiness import IMPLEMENTED_ACTIONS as _IMPL
 
         if nxt != "none" and nxt not in set(_IMPL):
             return "none"
-    except Exception:
-        pass
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return "none"
     return nxt
 
 
@@ -588,13 +590,16 @@ def _evidence_refs(inputs: dict) -> dict:
                 issue_ids.append(_truncate_id(binding.get("issue_id"), 64))
     if issue_ids:
         refs["issue_ids"] = sorted(set(issue_ids))[:10]
-    # API応答のハッシュ (本文は入れない)
+    # API応答のハッシュ (本文は入れない)。
+    # F2b fail-closed: ハッシュ計算の失敗項目は黙って飛ばさず、証拠不明として
+    # 残す(読めたものだけの証拠で分類を確定させない)。
     for key in ("readiness", "gate", "replay", "run", "coverage", "ledger"):
         val = inputs.get(key)
         if isinstance(val, dict):
             try:
                 refs[key + "_hash"] = _short_hash(val)
-            except Exception:
+            except (TypeError, ValueError):
+                refs[key + "_hash_error"] = "unknown:unreadable"
                 continue
     return refs
 

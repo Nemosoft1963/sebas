@@ -219,6 +219,8 @@ def _resolve_artifact(manager, project_id: str, relative: str):
 
 
 def _requires_external(tasks: list, cid: str, contract: dict, manager=None) -> bool:
+    # F2b fail-closed: 外部要件の判定失敗は「要外部証拠あり(True)」に倒す。
+    # 判定不能を「不要(False)」にして外部証拠スキップさせない。
     try:
         from app.project_manager import ProjectOrchestrator as _PM
 
@@ -226,10 +228,12 @@ def _requires_external(tasks: list, cid: str, contract: dict, manager=None) -> b
             try:
                 if _PM._task_requires_external_evidence(task):
                     return True
-            except Exception:
-                continue
-    except Exception:
-        pass
+            except (ValueError, AttributeError, TypeError, KeyError):
+                # 当該タスクの要否が確認できない=要求あり扱い(停止側)。
+                return True
+    except (ImportError, AttributeError, TypeError, ValueError):
+        # 判定器自体が使えない=要求あり扱い(停止側)。
+        return True
     try:
         from app.generic_goal_checks import _needs_external
 
@@ -237,8 +241,8 @@ def _requires_external(tasks: list, cid: str, contract: dict, manager=None) -> b
                      if isinstance(c, dict) and c.get("criterion_id") == cid), {})
         if _needs_external(item if isinstance(item, dict) else {}, tasks):
             return True
-    except Exception:
-        pass
+    except (ImportError, AttributeError, TypeError, ValueError, KeyError):
+        return True
     return False
 
 
@@ -288,7 +292,7 @@ def _external_satisfied(tasks: list, evidence: dict) -> bool:
             kind = key.split("\x00")[0]
             by_kind[kind] = by_kind.get(kind, 0) + 1
         for kind in kinds:
-            need = 1
+            need: int | None = None
             for task in tasks:
                 try:
                     reqs = (contract_of(task) or {}).get("action_requirements") or []
@@ -296,10 +300,25 @@ def _external_satisfied(tasks: list, evidence: dict) -> bool:
                     raise
                 for req in reqs:
                     if isinstance(req, dict) and str(req.get("kind") or "") == kind:
+                        # F2b fail-closed: minimum_executed の欠落・不正を 1 で
+                        # 補完しない。欠落=不明として呼び出し側が unknown で
+                        # 止まる(件数判定をずらさない)。厳密な値だけ読む。
+                        raw_need = req.get("minimum_executed")
+                        if raw_need is None or (isinstance(raw_need, str)
+                                               and not raw_need.strip()):
+                            raise ValueError(f"minimum_executed missing for kind={kind}")
                         try:
-                            need = max(need, int(req.get("minimum_executed") or 1))
-                        except (TypeError, ValueError):
-                            pass
+                            parsed = int(raw_need)
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"minimum_executed invalid for kind={kind}") from exc
+                        if parsed <= 0:
+                            raise ValueError(
+                                f"minimum_executed invalid for kind={kind}")
+                        need = parsed if need is None else max(need, parsed)
+            if need is None:
+                # 要求種別の件数が一件も確定できない=判定不能として未達側に倒す。
+                return False
             have = by_kind.get(kind, 0)
             if kind == "approved_external_action":
                 have += by_kind.get("external_action", 0)
@@ -472,7 +491,9 @@ def project_funnel(manager, project_id: str) -> dict:
         return _empty_funnel(pid, "", "", mission_err, 1)
     try:
         mission["project_id"] = pid
-    except Exception:
+    except (TypeError, AttributeError):
+        # F2b fail-closed: mission への project_id 付与の失敗は想定内の型のみ
+        # 許容し、以降の判定は pid 変数で継続(成功偽装なし)。
         pass
     signature, sig_err = _safe_signature(manager, pid)
     contract, contract_err = _safe_contract(manager, pid, mission)
@@ -770,8 +791,10 @@ def portfolio_funnel(manager) -> dict:
         try:
             if _l3_blocked(manager.memory.path, pid):
                 # 削除状態が読めなければ、当該PJの情報を集計へ出さない。
+                # (is_deleted_or_unknown 自体が unknown→True の fail-closed)
                 continue
-        except Exception:
+        except (OSError, ValueError, AttributeError, TypeError, KeyError):
+            # F2b fail-closed: 削除確認不能のPJは集計へ出さない(除外=停止側)。
             continue
         try:
             funnel = project_funnel(manager, pid)

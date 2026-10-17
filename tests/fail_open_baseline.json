@@ -2,306 +2,107 @@
   "generated_at": "2026-10-14T09:58:41.022015+00:00",
   "generator": "scripts/fail_open_lint.py lint_project",
   "tool": "ast(Python P1-P3) + regex(JS P4)",
-  "total": 163,
-  "high_risk_count": 67,
-  "note": "自動初期値は中核モジュール=high_risk、それ以外=review。allowは実コードを読んで理由を書ける4件のみ(表示整形/表示フォールバック)。迷ったものはreviewに残し捏造しない。P3の .get(k, 0) は対象外(報告書に理由記載)。F1: app/autopilot.py の自走17件を fail-closed 化して一覧から外した。",
+  "total": 11,
+  "high_risk_count": 0,
+  "note": "自動初期値は中核モジュール=high_risk、それ以外=review。allowは実コードを読んで理由を書ける件のみ(表示整形/表示フォールバック/補助処理の失敗黙過)。迷ったものはreviewに残し捏造しない。P3の .get(k, 0) は対象外(報告書に理由記載)。F1: app/autopilot.py の自走17件を fail-closed 化して一覧から外した。F2a: 承認・外部評価・計画生成の高リスク24件を fail-closed 化して一覧から外した。F2b: 事前照合・完了ゲート・停止分類・漏斗の高リスク23件を fail-closed 化して一覧から外した。F3a: 中核外レビュー56件のうちA54件を fail-closed 化して一覧から外し、B2件を allow 化した。F3b: 画面JS(app/static)のレビュー36件のうちA31件(取得失敗・空成功・clipboard誤表示などを見える化)を fail-closed 化して一覧から外し、B5件を allow 化した(理由付き・コード不変)。レビュー残件は0件。新規検出なし(lint_changed_files で確認)。",
+  "_f3a_removed_ids": [
+    "app/automatic_triz.py:on_failure:P1:a2ad58d9f50d",
+    "app/automatic_triz.py:save_vehicle_failure:P1:a2ad58d9f50d",
+    "app/domain_spec.py:_check_secret:P1:f83f890754b1",
+    "app/domain_spec.py:_task_contract:P1:eaf9362805e8",
+    "app/domain_spec.py:_task_external_operations:P1:ca6cd4810941",
+    "app/executable_recipes.py:columns_of:P1:ca6cd4810941",
+    "app/executable_recipes.py:execute_recipe:P3:bf9dbece1ca6",
+    "app/executable_recipes.py:match_recipe:P3:bf9dbece1ca6",
+    "app/memory/short_term.py:list_projects:P1:a2ad58d9f50d",
+    "app/pending_ledger.py:_safe_actions:P1:eaf9362805e8",
+    "app/pending_ledger.py:_safe_issues:P1:eaf9362805e8",
+    "app/pending_ledger.py:_safe_mission:P1:2775ad19df79",
+    "app/pending_ledger.py:_safe_store_row:P1:eaf9362805e8",
+    "app/plan_case_reference.py:_persist_rows:P1:a2ad58d9f50d",
+    "app/plan_case_reference.py:collect_for_current_plan:P1:a2ad58d9f50d",
+    "app/plan_case_reference.py:current_input_version:P1:f83f890754b1",
+    "app/plan_case_reference.py:current_view:P1:a2ad58d9f50d",
+    "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#1",
+    "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#2",
+    "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#3",
+    "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#4",
+    "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#5",
+    "app/plan_feedback.py:_apply_replay:P1:a2ad58d9f50d",
+    "app/plan_feedback.py:_binder_version:P1:a2ad58d9f50d",
+    "app/plan_feedback.py:_budget_unchanged:P1:7bea3bdfca89",
+    "app/plan_feedback.py:_ensure_proposal_key_table:P1:a2ad58d9f50d",
+    "app/plan_feedback.py:_existing_candidate_for_key:P1:eaf9362805e8",
+    "app/plan_feedback.py:_fail_apply:P1:a2ad58d9f50d#1",
+    "app/plan_feedback.py:_fail_apply:P1:a2ad58d9f50d#2",
+    "app/plan_feedback.py:_propose_locked:P1:a2ad58d9f50d",
+    "app/plan_feedback.py:_record_replay:P1:a2ad58d9f50d#1",
+    "app/plan_feedback.py:_record_replay:P1:a2ad58d9f50d#2",
+    "app/plan_feedback.py:_release_proposal_key:P1:a2ad58d9f50d",
+    "app/plan_feedback.py:_task_order_for:P1:ca6cd4810941",
+    "app/plan_feedback.py:_total_review_rounds:P1:eaf9362805e8",
+    "app/plan_feedback.py:_unexpected_issue_ids:P1:ca6cd4810941",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#1",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#2",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#3",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#4",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#5",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#6",
+    "app/plan_feedback.py:apply:P1:a2ad58d9f50d#7",
+    "app/plan_repair_loop.py:approval_gate:P1:206e55ee8976",
+    "app/project_generation.py:initialize_project:P1:a2ad58d9f50d",
+    "app/project_generation.py:restore_generation:P1:a2ad58d9f50d",
+    "app/project_lifecycle_backup.py:_target_has_project:P1:af10980773d7",
+    "app/resolution_p3_context.py:_rag_candidates:P1:af10980773d7",
+    "app/resolution_p3_context.py:_rag_candidates:P1:ca6cd4810941",
+    "app/resolution_p3_context.py:_registered_source_hashes:P1:eaf9362805e8",
+    "app/resolution_p3_context.py:collect_p3_context:P1:a2ad58d9f50d",
+    "app/triz_candidate_ranking.py:_is_registered_capability:P1:7bea3bdfca89",
+    "app/vehicle_auto.py:prepare:P1:a2ad58d9f50d",
+    "app/vehicle_service.py:reuse_decisions:P3:08a27810891a"
+  ],
+  "_f3b_removed_ids": [
+    "app/static/capability_gap.js:fetchJson:P4:d037c3a7bcd5",
+    "app/static/experience_import.js:apiFetch:P4:d037c3a7bcd5",
+    "app/static/experience_import.js:submitImport:P4:d037c3a7bcd5",
+    "app/static/goal_review.js:request:P4:d037c3a7bcd5",
+    "app/static/ocr_review.js:loadArtifactText:P4:d037c3a7bcd5",
+    "app/static/ocr_review.js:loadFiles:P4:c5ce004a0ce1",
+    "app/static/ocr_review.js:loadFiles:P4:d037c3a7bcd5",
+    "app/static/ocr_review.js:loadFiles:P4:d85de3af23b6",
+    "app/static/ocr_review.js:openRun:P4:d037c3a7bcd5",
+    "app/static/ocr_review.js:postRun:P4:d037c3a7bcd5",
+    "app/static/ocr_review.js:requestOcr:P4:d037c3a7bcd5",
+    "app/static/ocr_review.js:selectField:P4:d037c3a7bcd5",
+    "app/static/plan_repair_cards.js:load:P4:d037c3a7bcd5",
+    "app/static/plan_review_loop.js:api:P4:d037c3a7bcd5",
+    "app/static/plan_review_loop.js:load:P4:d037c3a7bcd5",
+    "app/static/project_delete.js:apiGet:P4:d037c3a7bcd5",
+    "app/static/project_delete.js:apiPost:P4:d037c3a7bcd5",
+    "app/static/project_delete.js:loadDeleted:P4:d037c3a7bcd5#1",
+    "app/static/project_delete.js:loadDeleted:P4:d037c3a7bcd5#2",
+    "app/static/project_delete.js:loadDeleted:P4:eb70835b81d5",
+    "app/static/project_management.js:request:P4:d037c3a7bcd5",
+    "app/static/project_mission.js:renderPremarketing:P4:eb70835b81d5",
+    "app/static/project_reset.js:api:P4:d037c3a7bcd5",
+    "app/static/resolution_cards.js:load:P4:d037c3a7bcd5",
+    "app/static/resolution_cards.js:loadCandidates:P4:d037c3a7bcd5",
+    "app/static/workflow_readiness.js:load:P4:d037c3a7bcd5",
+    "app/static/workflow_readiness.js:loadCapabilityGap:P4:d037c3a7bcd5",
+    "app/static/workflow_readiness.js:loadExecutionFunnel:P4:d037c3a7bcd5",
+    "app/static/workflow_readiness.js:loadMetrics:P4:d037c3a7bcd5",
+    "app/static/workflow_readiness.js:loadQuestions:P4:d037c3a7bcd5",
+    "app/static/workflow_readiness.js:questionCard:P4:d037c3a7bcd5"
+  ],
   "findings": [
-    {
-      "id": "app/automatic_triz.py:on_failure:P1:a2ad58d9f50d",
-      "file": "app/automatic_triz.py",
-      "function": "on_failure",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/automatic_triz.py:save_vehicle_failure:P1:a2ad58d9f50d",
-      "file": "app/automatic_triz.py",
-      "function": "save_vehicle_failure",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/capability_export.py:_connect:P1:a2ad58d9f50d",
-      "file": "app/capability_export.py",
-      "function": "_connect",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。事前照合を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/capability_gap.py:_active_contract:P1:2775ad19df79",
-      "file": "app/capability_gap.py",
-      "function": "_active_contract",
-      "type": "P1",
-      "snippet": "except Exception: return {}",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。事前照合を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/capability_gap.py:_audit_event:P1:a2ad58d9f50d",
-      "file": "app/capability_gap.py",
-      "function": "_audit_event",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。事前照合を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/capability_gap.py:_context_files_of:P1:ca6cd4810941",
-      "file": "app/capability_gap.py",
-      "function": "_context_files_of",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。事前照合を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/capability_gap.py:_contract_of:P1:2775ad19df79",
-      "file": "app/capability_gap.py",
-      "function": "_contract_of",
-      "type": "P1",
-      "snippet": "except Exception: return {}",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。事前照合を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/completion_gate.py:_current_hashes:P1:af10980773d7",
-      "file": "app/completion_gate.py",
-      "function": "_current_hashes",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。完了ゲートを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/completion_gate.py:_generic_artifact_hash:P1:af10980773d7",
-      "file": "app/completion_gate.py",
-      "function": "_generic_artifact_hash",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。完了ゲートを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/domain_spec.py:_check_secret:P1:f83f890754b1",
-      "file": "app/domain_spec.py",
-      "function": "_check_secret",
-      "type": "P1",
-      "snippet": "except Exception: return ''",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/domain_spec.py:_task_contract:P1:eaf9362805e8",
-      "file": "app/domain_spec.py",
-      "function": "_task_contract",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/domain_spec.py:_task_external_operations:P1:ca6cd4810941",
-      "file": "app/domain_spec.py",
-      "function": "_task_external_operations",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/executable_recipes.py:columns_of:P1:ca6cd4810941",
-      "file": "app/executable_recipes.py",
-      "function": "columns_of",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/executable_recipes.py:execute_recipe:P3:bf9dbece1ca6",
-      "file": "app/executable_recipes.py",
-      "function": "execute_recipe",
-      "type": "P3",
-      "snippet": "recipe.get('version') or 1",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/executable_recipes.py:match_recipe:P3:bf9dbece1ca6",
-      "file": "app/executable_recipes.py",
-      "function": "match_recipe",
-      "type": "P3",
-      "snippet": "recipe.get('version') or 1",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/execution_funnel.py:_external_satisfied:P3:4766cb34bc5c",
-      "file": "app/execution_funnel.py",
-      "function": "_external_satisfied",
-      "type": "P3",
-      "snippet": "req.get('minimum_executed') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。漏斗を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/execution_funnel.py:_requires_external:P1:a2ad58d9f50d#1",
-      "file": "app/execution_funnel.py",
-      "function": "_requires_external",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。漏斗を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/execution_funnel.py:_requires_external:P1:a2ad58d9f50d#2",
-      "file": "app/execution_funnel.py",
-      "function": "_requires_external",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。漏斗を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/execution_funnel.py:_requires_external:P1:af10980773d7",
-      "file": "app/execution_funnel.py",
-      "function": "_requires_external",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。漏斗を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/execution_funnel.py:portfolio_funnel:P1:af10980773d7",
-      "file": "app/execution_funnel.py",
-      "function": "portfolio_funnel",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。漏斗を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/execution_funnel.py:project_funnel:P1:a2ad58d9f50d",
-      "file": "app/execution_funnel.py",
-      "function": "project_funnel",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。漏斗を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/experience_memory.py:configured_memory:P1:eaf9362805e8",
-      "file": "app/experience_memory.py",
-      "function": "configured_memory",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。RAG登録を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/experience_memory.py:convert_success_case_item:P3:ceaa8b3bdf24",
-      "file": "app/experience_memory.py",
-      "function": "convert_success_case_item",
-      "type": "P3",
-      "snippet": "item.get('kind') or 'success'",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。RAG登録を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/experience_memory.py:import_success_cases:P1:a2ad58d9f50d",
-      "file": "app/experience_memory.py",
-      "function": "import_success_cases",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。RAG登録を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/experience_memory.py:remove_from_index:P1:a2ad58d9f50d",
-      "file": "app/experience_memory.py",
-      "function": "remove_from_index",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。RAG登録を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
     {
       "id": "app/generic_goal_checks.py:_check_external:P3:163947fbd1c5",
       "file": "app/generic_goal_checks.py",
       "function": "_check_external",
       "type": "P3",
       "snippet": "minimums.get(kind) or 1",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/goal_completion_store.py:put_contract:P3:be3baed08cbb",
-      "file": "app/goal_completion_store.py",
-      "function": "put_contract",
-      "type": "P3",
-      "snippet": "payload.get('version') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。完了ゲートを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/goal_contract.py:from_mission:P3:337809848ff3",
-      "file": "app/goal_contract.py",
-      "function": "from_mission",
-      "type": "P3",
-      "snippet": "item.get('weight') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。外部送信・契約を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/goal_review.py:execution_gate:P1:a2ad58d9f50d",
-      "file": "app/goal_review.py",
-      "function": "execution_gate",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/goal_review.py:revoke_result:P1:a2ad58d9f50d",
-      "file": "app/goal_review.py",
-      "function": "revoke_result",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/goal_review_queue.py:loop:P1:a2ad58d9f50d",
-      "file": "app/goal_review_queue.py",
-      "function": "loop",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/goal_review_queue.py:tick:P1:af10980773d7",
-      "file": "app/goal_review_queue.py",
-      "function": "tick",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/memory/short_term.py:list_projects:P1:a2ad58d9f50d",
-      "file": "app/memory/short_term.py",
-      "function": "list_projects",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
+      "classification": "allow",
+      "reason": "F3aで許容(B): 外部証拠の最小要求件数の下限。欠落時は1件要求(証拠スキップなし)でfail-closed側。0・負の明示値もmax(1,...)で1件要求に切り上げ、件数を0にしない。実コードを読んで確認済み。"
     },
     {
       "id": "app/next_action_controller.py:_prior_answers_available:P1:7bea3bdfca89",
@@ -309,746 +110,8 @@
       "function": "_prior_answers_available",
       "type": "P1",
       "snippet": "except Exception: return False",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/ocr_fallback.py:run_ocr_fallback:P3:4f3c648478bc",
-      "file": "app/ocr_fallback.py",
-      "function": "run_ocr_fallback",
-      "type": "P3",
-      "snippet": "item.get('page_no') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。OCRを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/ocr_fallback.py:run_ocr_fallback:P3:8df6972f0340",
-      "file": "app/ocr_fallback.py",
-      "function": "run_ocr_fallback",
-      "type": "P3",
-      "snippet": "page_count or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。OCRを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/ocr_invoice_adapter.py:payload_from_ocr_bundle:P3:4f3c648478bc",
-      "file": "app/ocr_invoice_adapter.py",
-      "function": "payload_from_ocr_bundle",
-      "type": "P3",
-      "snippet": "item.get('page_no') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。OCRを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/ocr_invoice_adapter.py:payload_from_ocr_bundle:P3:70cbd93684e8",
-      "file": "app/ocr_invoice_adapter.py",
-      "function": "payload_from_ocr_bundle",
-      "type": "P3",
-      "snippet": "len(pages) or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。OCRを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/ocr_usami_adapter.py:_iter_table_blocks:P3:1821dba8d871",
-      "file": "app/ocr_usami_adapter.py",
-      "function": "_iter_table_blocks",
-      "type": "P3",
-      "snippet": "page.get('page') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。OCRを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/ocr_usami_adapter.py:parse_table_rows:P1:ca6cd4810941",
-      "file": "app/ocr_usami_adapter.py",
-      "function": "parse_table_rows",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。OCRを扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/pending_ledger.py:_safe_actions:P1:eaf9362805e8",
-      "file": "app/pending_ledger.py",
-      "function": "_safe_actions",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/pending_ledger.py:_safe_issues:P1:eaf9362805e8",
-      "file": "app/pending_ledger.py",
-      "function": "_safe_issues",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/pending_ledger.py:_safe_mission:P1:2775ad19df79",
-      "file": "app/pending_ledger.py",
-      "function": "_safe_mission",
-      "type": "P1",
-      "snippet": "except Exception: return {}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/pending_ledger.py:_safe_store_row:P1:eaf9362805e8",
-      "file": "app/pending_ledger.py",
-      "function": "_safe_store_row",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:_persist_rows:P1:a2ad58d9f50d",
-      "file": "app/plan_case_reference.py",
-      "function": "_persist_rows",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:collect_for_current_plan:P1:a2ad58d9f50d",
-      "file": "app/plan_case_reference.py",
-      "function": "collect_for_current_plan",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:current_input_version:P1:f83f890754b1",
-      "file": "app/plan_case_reference.py",
-      "function": "current_input_version",
-      "type": "P1",
-      "snippet": "except Exception: return ''",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:current_view:P1:a2ad58d9f50d",
-      "file": "app/plan_case_reference.py",
-      "function": "current_view",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#1",
-      "file": "app/plan_case_reference.py",
-      "function": "get_case_references",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#2",
-      "file": "app/plan_case_reference.py",
-      "function": "get_case_references",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#3",
-      "file": "app/plan_case_reference.py",
-      "function": "get_case_references",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#4",
-      "file": "app/plan_case_reference.py",
-      "function": "get_case_references",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_case_reference.py:get_case_references:P1:a2ad58d9f50d#5",
-      "file": "app/plan_case_reference.py",
-      "function": "get_case_references",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_apply_replay:P1:a2ad58d9f50d",
-      "file": "app/plan_feedback.py",
-      "function": "_apply_replay",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_binder_version:P1:a2ad58d9f50d",
-      "file": "app/plan_feedback.py",
-      "function": "_binder_version",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_budget_unchanged:P1:7bea3bdfca89",
-      "file": "app/plan_feedback.py",
-      "function": "_budget_unchanged",
-      "type": "P1",
-      "snippet": "except Exception: return False",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_ensure_proposal_key_table:P1:a2ad58d9f50d",
-      "file": "app/plan_feedback.py",
-      "function": "_ensure_proposal_key_table",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_existing_candidate_for_key:P1:eaf9362805e8",
-      "file": "app/plan_feedback.py",
-      "function": "_existing_candidate_for_key",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_fail_apply:P1:a2ad58d9f50d#1",
-      "file": "app/plan_feedback.py",
-      "function": "_fail_apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_fail_apply:P1:a2ad58d9f50d#2",
-      "file": "app/plan_feedback.py",
-      "function": "_fail_apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_propose_locked:P1:a2ad58d9f50d",
-      "file": "app/plan_feedback.py",
-      "function": "_propose_locked",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_record_replay:P1:a2ad58d9f50d#1",
-      "file": "app/plan_feedback.py",
-      "function": "_record_replay",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_record_replay:P1:a2ad58d9f50d#2",
-      "file": "app/plan_feedback.py",
-      "function": "_record_replay",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_release_proposal_key:P1:a2ad58d9f50d",
-      "file": "app/plan_feedback.py",
-      "function": "_release_proposal_key",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_task_order_for:P1:ca6cd4810941",
-      "file": "app/plan_feedback.py",
-      "function": "_task_order_for",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_total_review_rounds:P1:eaf9362805e8",
-      "file": "app/plan_feedback.py",
-      "function": "_total_review_rounds",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:_unexpected_issue_ids:P1:ca6cd4810941",
-      "file": "app/plan_feedback.py",
-      "function": "_unexpected_issue_ids",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#1",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#2",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#3",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#4",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#5",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#6",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_feedback.py:apply:P1:a2ad58d9f50d#7",
-      "file": "app/plan_feedback.py",
-      "function": "apply",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_repair_loop.py:approval_gate:P1:206e55ee8976",
-      "file": "app/plan_repair_loop.py",
-      "function": "approval_gate",
-      "type": "P1",
-      "snippet": "except Exception: return",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_call_gemini:P1:a2ad58d9f50d",
-      "file": "app/plan_review_loop.py",
-      "function": "_call_gemini",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_lease_get:P1:eaf9362805e8",
-      "file": "app/plan_review_loop.py",
-      "function": "_lease_get",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_lease_set:P1:a2ad58d9f50d",
-      "file": "app/plan_review_loop.py",
-      "function": "_lease_set",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_remap_base:P1:a2ad58d9f50d#1",
-      "file": "app/plan_review_loop.py",
-      "function": "_remap_base",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_remap_base:P1:a2ad58d9f50d#2",
-      "file": "app/plan_review_loop.py",
-      "function": "_remap_base",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_run_locked:P1:a2ad58d9f50d",
-      "file": "app/plan_review_loop.py",
-      "function": "_run_locked",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_stop:P1:a2ad58d9f50d",
-      "file": "app/plan_review_loop.py",
-      "function": "_stop",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:_stop_guard_tick:P1:a2ad58d9f50d",
-      "file": "app/plan_review_loop.py",
-      "function": "_stop_guard_tick",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:remap_preview:P3:b160b3008d90",
-      "file": "app/plan_review_loop.py",
-      "function": "remap_preview",
-      "type": "P3",
-      "snippet": "first.get('round') or 1",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:remap_run:P1:a2ad58d9f50d#1",
-      "file": "app/plan_review_loop.py",
-      "function": "remap_run",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:remap_run:P1:a2ad58d9f50d#2",
-      "file": "app/plan_review_loop.py",
-      "function": "remap_run",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:remap_run:P1:a2ad58d9f50d#3",
-      "file": "app/plan_review_loop.py",
-      "function": "remap_run",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/plan_review_loop.py:start_run:P1:a2ad58d9f50d",
-      "file": "app/plan_review_loop.py",
-      "function": "start_run",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・外部評価を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:delete_state_status:P1:a2ad58d9f50d",
-      "file": "app/project_delete.py",
-      "function": "delete_state_status",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:delete_state_status:P2:190ddbe20df6",
-      "file": "app/project_delete.py",
-      "function": "delete_state_status",
-      "type": "P2",
-      "snippet": "return 'active'",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:is_deleted_or_unknown:P2:37992c22232b",
-      "file": "app/project_delete.py",
-      "function": "is_deleted_or_unknown",
-      "type": "P2",
-      "snippet": "return True",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:purge_deleted:P1:a2ad58d9f50d#1",
-      "file": "app/project_delete.py",
-      "function": "purge_deleted",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:purge_deleted:P1:a2ad58d9f50d#2",
-      "file": "app/project_delete.py",
-      "function": "purge_deleted",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:purge_deleted:P1:a2ad58d9f50d#3",
-      "file": "app/project_delete.py",
-      "function": "purge_deleted",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:purge_deleted:P1:a2ad58d9f50d#4",
-      "file": "app/project_delete.py",
-      "function": "purge_deleted",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:request_delete:P1:a2ad58d9f50d",
-      "file": "app/project_delete.py",
-      "function": "request_delete",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_delete.py:restore_deleted:P1:a2ad58d9f50d",
-      "file": "app/project_delete.py",
-      "function": "restore_deleted",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。削除を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_generation.py:initialize_project:P1:a2ad58d9f50d",
-      "file": "app/project_generation.py",
-      "function": "initialize_project",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/project_generation.py:restore_generation:P1:a2ad58d9f50d",
-      "file": "app/project_generation.py",
-      "function": "restore_generation",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/project_lifecycle_backup.py:_target_has_project:P1:af10980773d7",
-      "file": "app/project_lifecycle_backup.py",
-      "function": "_target_has_project",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/project_manager.py:_execute_task:P1:61bbc8f48e47#1",
-      "file": "app/project_manager.py",
-      "function": "_execute_task",
-      "type": "P1",
-      "snippet": "except (Exception, asyncio.TimeoutError): pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・適用を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_manager.py:_execute_task:P1:61bbc8f48e47#2",
-      "file": "app/project_manager.py",
-      "function": "_execute_task",
-      "type": "P1",
-      "snippet": "except (Exception, asyncio.TimeoutError): pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・適用を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_manager.py:_execute_task:P1:61bbc8f48e47#3",
-      "file": "app/project_manager.py",
-      "function": "_execute_task",
-      "type": "P1",
-      "snippet": "except (Exception, asyncio.TimeoutError): pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・適用を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_manager.py:_generate_plan_impl:P1:a2ad58d9f50d#1",
-      "file": "app/project_manager.py",
-      "function": "_generate_plan_impl",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・適用を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_manager.py:_generate_plan_impl:P1:a2ad58d9f50d#2",
-      "file": "app/project_manager.py",
-      "function": "_generate_plan_impl",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・適用を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/project_manager.py:_generate_structured_plan:P1:a2ad58d9f50d",
-      "file": "app/project_manager.py",
-      "function": "_generate_structured_plan",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。承認・適用を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/resolution_coordinator.py:_safe_sources_readable:P1:7bea3bdfca89",
-      "file": "app/resolution_coordinator.py",
-      "function": "_safe_sources_readable",
-      "type": "P1",
-      "snippet": "except Exception: return False",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/resolution_coordinator.py:_statements:P1:2775ad19df79",
-      "file": "app/resolution_coordinator.py",
-      "function": "_statements",
-      "type": "P1",
-      "snippet": "except Exception: return {}",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/resolution_coordinator.py:_trial_evidence_server_side:P1:a2ad58d9f50d#1",
-      "file": "app/resolution_coordinator.py",
-      "function": "_trial_evidence_server_side",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/resolution_coordinator.py:_trial_evidence_server_side:P1:a2ad58d9f50d#2",
-      "file": "app/resolution_coordinator.py",
-      "function": "_trial_evidence_server_side",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/resolution_coordinator.py:_trial_evidence_server_side:P1:af10980773d7",
-      "file": "app/resolution_coordinator.py",
-      "function": "_trial_evidence_server_side",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/resolution_p3_context.py:_rag_candidates:P1:af10980773d7",
-      "file": "app/resolution_p3_context.py",
-      "function": "_rag_candidates",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/resolution_p3_context.py:_rag_candidates:P1:ca6cd4810941",
-      "file": "app/resolution_p3_context.py",
-      "function": "_rag_candidates",
-      "type": "P1",
-      "snippet": "except Exception: return []",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/resolution_p3_context.py:_registered_source_hashes:P1:eaf9362805e8",
-      "file": "app/resolution_p3_context.py",
-      "function": "_registered_source_hashes",
-      "type": "P1",
-      "snippet": "except Exception: return None",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/resolution_p3_context.py:collect_p3_context:P1:a2ad58d9f50d",
-      "file": "app/resolution_p3_context.py",
-      "function": "collect_p3_context",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/safe_auto_resume.py:resume:P1:a2ad58d9f50d",
-      "file": "app/safe_auto_resume.py",
-      "function": "resume",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。自走を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
+      "classification": "allow",
+      "reason": "F3aで許容(B): 失敗時Falseで「既回答なし」扱い。Falseは自動適用せず人間確認経路(confirm_allocation)に留まる。適用はpreviewの厳密一致でのみ行い、失敗を適用扱いにしない。実コードを読んで確認済み。"
     },
     {
       "id": "app/static/artifact_shelf.js:load:P4:eb70835b81d5",
@@ -1058,141 +121,6 @@
       "snippet": "catch(e){}",
       "classification": "allow",
       "reason": "現行経路集合への追加を諦めるだけの表示フォールバック。読めない工程は現行扱いにせず、階級表示は既定で「下書き」(検証済みにはならないfail-closed方向)。実コードを読んで確認済み。"
-    },
-    {
-      "id": "app/static/capability_gap.js:fetchJson:P4:d037c3a7bcd5",
-      "file": "app/static/capability_gap.js",
-      "function": "fetchJson",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/experience_import.js:apiFetch:P4:d037c3a7bcd5",
-      "file": "app/static/experience_import.js",
-      "function": "apiFetch",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/experience_import.js:submitImport:P4:d037c3a7bcd5",
-      "file": "app/static/experience_import.js",
-      "function": "submitImport",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/goal_review.js:request:P4:d037c3a7bcd5",
-      "file": "app/static/goal_review.js",
-      "function": "request",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:loadArtifactText:P4:d037c3a7bcd5",
-      "file": "app/static/ocr_review.js",
-      "function": "loadArtifactText",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:loadFiles:P4:c5ce004a0ce1",
-      "file": "app/static/ocr_review.js",
-      "function": "loadFiles",
-      "type": "P4",
-      "snippet": "catch(_err){}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:loadFiles:P4:d037c3a7bcd5",
-      "file": "app/static/ocr_review.js",
-      "function": "loadFiles",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:loadFiles:P4:d85de3af23b6",
-      "file": "app/static/ocr_review.js",
-      "function": "loadFiles",
-      "type": "P4",
-      "snippet": ".catch(()=>([])",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:openRun:P4:d037c3a7bcd5",
-      "file": "app/static/ocr_review.js",
-      "function": "openRun",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:postRun:P4:d037c3a7bcd5",
-      "file": "app/static/ocr_review.js",
-      "function": "postRun",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:requestOcr:P4:d037c3a7bcd5",
-      "file": "app/static/ocr_review.js",
-      "function": "requestOcr",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/ocr_review.js:selectField:P4:d037c3a7bcd5",
-      "file": "app/static/ocr_review.js",
-      "function": "selectField",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/plan_repair_cards.js:load:P4:d037c3a7bcd5",
-      "file": "app/static/plan_repair_cards.js",
-      "function": "load",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/plan_review_loop.js:api:P4:d037c3a7bcd5",
-      "file": "app/static/plan_review_loop.js",
-      "function": "api",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/plan_review_loop.js:load:P4:d037c3a7bcd5",
-      "file": "app/static/plan_review_loop.js",
-      "function": "load",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
     },
     {
       "id": "app/static/presenters.js:rawJson:P4:2bb0cda1691a",
@@ -1213,76 +141,13 @@
       "reason": "表示整形のフォールバック。文字列化に失敗したらString(value)を返すだけで、合否・承認の判定には使わない(presentersは表示用)。実コードを読んで確認済み。"
     },
     {
-      "id": "app/static/project_delete.js:apiGet:P4:d037c3a7bcd5",
-      "file": "app/static/project_delete.js",
-      "function": "apiGet",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_delete.js:apiPost:P4:d037c3a7bcd5",
-      "file": "app/static/project_delete.js",
-      "function": "apiPost",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_delete.js:loadDeleted:P4:d037c3a7bcd5#1",
-      "file": "app/static/project_delete.js",
-      "function": "loadDeleted",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_delete.js:loadDeleted:P4:d037c3a7bcd5#2",
-      "file": "app/static/project_delete.js",
-      "function": "loadDeleted",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_delete.js:loadDeleted:P4:eb70835b81d5",
-      "file": "app/static/project_delete.js",
-      "function": "loadDeleted",
-      "type": "P4",
-      "snippet": "catch(e){}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_management.js:request:P4:d037c3a7bcd5",
-      "file": "app/static/project_management.js",
-      "function": "request",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
       "id": "app/static/project_mission.js:readWorkflowTab:P4:eb70835b81d5",
       "file": "app/static/project_mission.js",
       "function": "readWorkflowTab",
       "type": "P4",
       "snippet": "catch(e){}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_mission.js:renderPremarketing:P4:eb70835b81d5",
-      "file": "app/static/project_mission.js",
-      "function": "renderPremarketing",
-      "type": "P4",
-      "snippet": "catch(e){}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
+      "classification": "allow",
+      "reason": "F3bで許容(B): 保存済みのタブ選択の読取失敗(localStorage無効等)を握りつぶし、既定の「概要」タブを表示する。合否・件数・成功表示には使わない。実コードを読んで確認済み。"
     },
     {
       "id": "app/static/project_mission.js:setupContextFolderUpload:P4:5c1517a8ee10",
@@ -1290,8 +155,8 @@
       "function": "setupContextFolderUpload",
       "type": "P4",
       "snippet": "catch(function(){}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
+      "classification": "allow",
+      "reason": "F3bで許容(B): 検出は approve/start/pause/verify/retry/cancel の action() 呼出しの .catch(function(){})(検出器は直前の名前付き関数に帰属させる)。action() は失敗時に missionMessage へ『エラー: …』を表示して状態を再読込してから再throwするため、失敗は画面に出る。catch は未処理Promise拒否の抑止のみ。実コードを読んで確認済み。"
     },
     {
       "id": "app/static/project_mission.js:writeWorkflowTab:P4:eb70835b81d5",
@@ -1299,35 +164,8 @@
       "function": "writeWorkflowTab",
       "type": "P4",
       "snippet": "catch(e){}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/project_reset.js:api:P4:d037c3a7bcd5",
-      "file": "app/static/project_reset.js",
-      "function": "api",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/resolution_cards.js:load:P4:d037c3a7bcd5",
-      "file": "app/static/resolution_cards.js",
-      "function": "load",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/resolution_cards.js:loadCandidates:P4:d037c3a7bcd5",
-      "file": "app/static/resolution_cards.js",
-      "function": "loadCandidates",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
+      "classification": "allow",
+      "reason": "F3bで許容(B): タブ選択の保存失敗(localStorage無効等)を無視するだけで、次回表示が既定タブに戻る。成功表示・件数・承認には使わない。実コードを読んで確認済み。"
     },
     {
       "id": "app/static/triz_general.js:render:P4:0f2b111a0963",
@@ -1335,8 +173,8 @@
       "function": "render",
       "type": "P4",
       "snippet": ".catch(()=>{}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
+      "classification": "allow",
+      "reason": "F3bで許容(B): 実行中ジョブの2.5秒間隔の定期再取得が失敗したら何もせず前回の表示を保持し、次の周期で再試行する。成功・0件・完了の表示も triz-updated 通知も出さないため、失敗が成功に見えることはない。実コードを読んで確認済み。"
     },
     {
       "id": "app/static/triz_invention.js:render:P4:0f2b111a0963",
@@ -1344,8 +182,8 @@
       "function": "render",
       "type": "P4",
       "snippet": ".catch(()=>{}",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
+      "classification": "allow",
+      "reason": "F3bで許容(B): 実行中ジョブの2.5秒間隔の定期再取得が失敗したら何もせず前回の表示を保持し、次の周期で再試行する。成功・0件・完了の表示も triz-updated 通知も出さないため、失敗が成功に見えることはない。実コードを読んで確認済み。"
     },
     {
       "id": "app/static/workflow_readiness.js:describe:P4:de9ea16376f5",
@@ -1355,123 +193,6 @@
       "snippet": "catch(_){return String(value);}",
       "classification": "allow",
       "reason": "進行状態の表示整形フォールバック。JSON化に失敗したらString(value)を返すだけで、停止分類・合否の判定には使わない(describeは表示用)。実コードを読んで確認済み。"
-    },
-    {
-      "id": "app/static/workflow_readiness.js:load:P4:d037c3a7bcd5",
-      "file": "app/static/workflow_readiness.js",
-      "function": "load",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/workflow_readiness.js:loadCapabilityGap:P4:d037c3a7bcd5",
-      "file": "app/static/workflow_readiness.js",
-      "function": "loadCapabilityGap",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/workflow_readiness.js:loadExecutionFunnel:P4:d037c3a7bcd5",
-      "file": "app/static/workflow_readiness.js",
-      "function": "loadExecutionFunnel",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/workflow_readiness.js:loadMetrics:P4:d037c3a7bcd5",
-      "file": "app/static/workflow_readiness.js",
-      "function": "loadMetrics",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/workflow_readiness.js:loadQuestions:P4:d037c3a7bcd5",
-      "file": "app/static/workflow_readiness.js",
-      "function": "loadQuestions",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/static/workflow_readiness.js:questionCard:P4:d037c3a7bcd5",
-      "file": "app/static/workflow_readiness.js",
-      "function": "questionCard",
-      "type": "P4",
-      "snippet": ".catch(()=>({})",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/stop_classifier.py:_evidence_refs:P1:af10980773d7",
-      "file": "app/stop_classifier.py",
-      "function": "_evidence_refs",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/stop_classifier.py:_next_for:P1:a2ad58d9f50d",
-      "file": "app/stop_classifier.py",
-      "function": "_next_for",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/triz_candidate_ranking.py:_is_registered_capability:P1:7bea3bdfca89",
-      "file": "app/triz_candidate_ranking.py",
-      "function": "_is_registered_capability",
-      "type": "P1",
-      "snippet": "except Exception: return False",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/vehicle_auto.py:prepare:P1:a2ad58d9f50d",
-      "file": "app/vehicle_auto.py",
-      "function": "prepare",
-      "type": "P1",
-      "snippet": "except Exception: pass",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/vehicle_service.py:reuse_decisions:P3:08a27810891a",
-      "file": "app/vehicle_service.py",
-      "function": "reuse_decisions",
-      "type": "P3",
-      "snippet": "rule.get('status') or 'active'",
-      "classification": "review",
-      "reason": "自動初期値(未精査)。表示・集計のフォールバックの可能性を含め要確認。"
-    },
-    {
-      "id": "app/workflow_readiness.py:_vehicle_view:P1:af10980773d7#1",
-      "file": "app/workflow_readiness.py",
-      "function": "_vehicle_view",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
-    },
-    {
-      "id": "app/workflow_readiness.py:_vehicle_view:P1:af10980773d7#2",
-      "file": "app/workflow_readiness.py",
-      "function": "_vehicle_view",
-      "type": "P1",
-      "snippet": "except Exception: continue",
-      "classification": "high_risk",
-      "reason": "自動初期値(未精査)。停止分類を扱う中核モジュールの検出のため要確認。直す場合の方針は docs/FAIL_OPEN_INVENTORY_2026-10-13.md 参照。"
     }
   ]
 }

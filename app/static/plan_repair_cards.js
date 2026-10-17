@@ -15,7 +15,7 @@ async function load(pid,hostId){
  host.replaceChildren();addText(host,'p','読込中…');
  try{
   const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/plan/repair-runs/cards');
-  const d=await r.json().catch(()=>({}));
+  const d=await r.json().catch((parseErr)=>{throw Error('残件カードを取得できず。再読み込みしてください');});
   if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:'HTTP '+r.status);
   host.replaceChildren();
   const cards=(d&&d.cards)||[];

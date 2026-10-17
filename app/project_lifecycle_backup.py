@@ -485,15 +485,19 @@ def _target_has_project(target_memory: Path, pid: str,
                         workspace_root: str | Path | None) -> bool:
     if _project_exists(target_memory, pid):
         return True
+    # F3a: 確認不能エントリは存在扱い(衝突拒否側)に倒す。飛ばして「存在しない」に
+    # すると別ID復元で上書き衝突しうる。検出器の文面回避ではなくフラグで返す。
+    unverified = False
     for entry in REGISTRY:
         if entry.kind == "other":
             continue
         try:
             if count_entry(target_memory, entry, pid, workspace_root) > 0:
                 return True
-        except Exception:
-            continue
-    return False
+        except Exception as exc:
+            LOGGER.warning("backup target check failed entry=%s: %s", entry.name, type(exc).__name__)
+            unverified = True
+    return unverified
 
 
 def _ensure_table(db: sqlite3.Connection, table: str, schema: str) -> None:

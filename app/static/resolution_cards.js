@@ -48,11 +48,12 @@ function cardFor(item){
  return card;
 }
 async function loadCandidates(host,pid,items){
+ let candidateLoadErrors=0;
  for(const item of (items||[]).slice(0,20)){
   if(!item||!item.id)continue;
   try{
    const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/resolutions/'+encodeURIComponent(item.id)+'/candidates');
-   const d=await r.json().catch(()=>({}));
+   const d=await r.json().catch((parseErr)=>{throw Error('候補を確認できず');});
    if(!r.ok)continue;
    const blocks=host.querySelectorAll('[data-resolution-candidates="'+String(item.id)+'"]');
    for(const block of blocks){
@@ -60,7 +61,14 @@ async function loadCandidates(host,pid,items){
     block.dataset.resolutionCandidatesLoaded='1';
     addCandidates(block,d);
    }
-  }catch(e){/* 候補の追加表示に失敗しても残件カード自体は維持する */}
+  }catch(e){candidateLoadErrors+=1;}
+ }
+ if(candidateLoadErrors>0){
+  host.dataset.candidateErrors=String(candidateLoadErrors);
+  const note=document.createElement('p');
+  note.className='mission-note';
+  note.textContent='参考情報の一部を確認できず（'+candidateLoadErrors+'件）。残件カード自体は維持しています。';
+  host.append(note);
  }
 }
 async function load(pid,hostId){
@@ -68,7 +76,7 @@ async function load(pid,hostId){
  host.replaceChildren();addText(host,'p','読込中…');
  try{
   const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/resolutions');
-  const d=await r.json().catch(()=>({}));
+  const d=await r.json().catch((parseErr)=>{throw Error('残件カードを取得できず。再読み込みしてください');});
   if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:'HTTP '+r.status);
   host.replaceChildren();
   const summary=(d&&d.summary)||{};

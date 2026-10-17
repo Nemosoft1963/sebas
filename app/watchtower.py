@@ -37,6 +37,9 @@ EVENT_KINDS = (
     "read_recovered",
     "new_project",
     "project_removed",
+    "capability_verified",
+    "capability_still_remaining",
+    "capability_stale",
 )
 
 SEVERITY_BY_KIND = {
@@ -49,6 +52,9 @@ SEVERITY_BY_KIND = {
     "read_recovered": "info",
     "new_project": "info",
     "project_removed": "info",
+    "capability_verified": "info",
+    "capability_still_remaining": "attention",
+    "capability_stale": "attention",
 }
 
 SEVERITIES = ("info", "attention", "alert")
@@ -1199,3 +1205,71 @@ def collect_decisions(manager) -> list[dict]:
                               str(row.get("project_id") or ""),
                               str(row.get("kind") or "")))
     return out
+
+
+#: D-4 再判定の通知先 (追加のみ)。kind と outcome の対応は1か所。
+CAPABILITY_NOTIFY_KIND = {
+    "verified": "capability_verified",
+    "still_remaining": "capability_still_remaining",
+    "stale": "capability_stale",
+}
+
+CAPABILITY_NOTIFY_JA = {
+    "verified": "元の停止が再判定で解消しました",
+    "still_remaining": "元の停止が残っています",
+    "stale": "計画が更新されたため古い版です",
+}
+
+
+def record_capability_event(manager_or_path, project_id: str, proposal_id: str,
+                            base_ref: str, outcome: str) -> dict:
+    """D-4 再判定の結果を1件通知する (追加のみ・既存の表を使う)。
+
+    kind は verified/still_remaining/stale の3種だけ。冪等キー =
+    proposal_id + 基準版 + 結果。同じキーでは増やさない (INSERT OR IGNORE)。
+    PJのデータには書込まない (watch_events への追記のみ)。失敗は握りつぶさず
+    ValueError として返す (呼出側が errors に残す)。
+    """
+    pid = str(project_id or "")
+    target = str(proposal_id or "")
+    ref = str(base_ref or "")
+    result = str(outcome or "")
+    if pid == "" or target == "":
+        raise ValueError("project_id と proposal_id が必要です")
+    if ref == "":
+        raise ValueError("基準版を確認できないため通知できません")
+    kind = CAPABILITY_NOTIFY_KIND.get(result)
+    if kind is None:
+        raise ValueError("通知の結果を確認できません:" + result[:32])
+    if kind not in EVENT_KINDS:
+        raise ValueError("通知の種別を確認できません:" + kind[:64])
+    severity = SEVERITY_BY_KIND.get(kind)
+    if severity not in SEVERITIES:
+        raise ValueError("通知の重要度を確認できません:" + kind[:64])
+    summary = ("PJ " + pid + " の提案 " + target[:8] + ": "
+               + str(CAPABILITY_NOTIFY_JA.get(result) or "確認できず"))
+    idem = "reverify:" + target + ":" + ref + ":" + result
+    event_id = _event_id(pid, kind, idem)
+    path = watch_db_path(manager_or_path)
+    lock = _lock_for(path)
+    with lock:
+        with _connect(manager_or_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = db.execute(
+                    """INSERT OR IGNORE INTO watch_events(
+                           id, project_id, kind, severity, summary_ja,
+                           created_at, idempotency_key, ack_by, ack_at,
+                           ack_note)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (event_id, pid[:128], kind, severity,
+                     _safe_text(summary, 200), time.time(), idem[:200],
+                     "", 0.0, ""))
+            except sqlite3.Error as exc:
+                raise ValueError("見張りの記録に失敗しました:"
+                                 + _type_name(exc))
+            db.commit()
+            inserted = bool(cursor.rowcount)
+    return {"ok": True, "id": event_id, "project_id": pid, "kind": kind,
+            "severity": severity, "inserted": inserted,
+            "idempotency_key": idem}

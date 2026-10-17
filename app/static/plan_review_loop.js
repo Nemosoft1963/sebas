@@ -81,7 +81,7 @@ function currentPid(){return (document.getElementById('projectSelect')||{}).valu
 async function api(path,body){
  const r=await fetch('/api/projects/'+encodeURIComponent(currentPid())+'/goal-review/auto-loop'+path,
   body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- const d=await r.json().catch(()=>({}));
+ const d=await r.json().catch((parseErr)=>{throw Error('自動評価を確認できず。再読み込みしてください');});
  if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:'HTTP '+r.status);
  return d;
 }
@@ -116,7 +116,7 @@ async function load(pid,hostId){
  host.replaceChildren();addText(host,'p','読込中…');
  try{
   const r=await fetch('/api/projects/'+encodeURIComponent(pid)+'/goal-review/auto-loop/runs');
-  const d=await r.json().catch(()=>({}));
+  const d=await r.json().catch((parseErr)=>{throw Error('自動評価を取得できず。再読み込みしてください');});
   if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:'HTTP '+r.status);
   host.replaceChildren();
   const runs=(d&&d.runs)||[];

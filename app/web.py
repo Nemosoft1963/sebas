@@ -3339,6 +3339,7 @@ async def post_auto_resume_run(project_id: str):
 class AutopilotSettingPayload(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
     reason: str = Field(min_length=1, max_length=2000)
+    gate_override_reason: str = Field(default="", max_length=2000)
 
 
 class AutopilotTickPayload(BaseModel):
@@ -3372,6 +3373,51 @@ async def enable_autopilot(project_id: str, payload: AutopilotSettingPayload):
     if not reason:
         raise HTTPException(422, 'reason is required')
     from app import autopilot as _auto
+    from app import shadow_mode as _shadow
+    # C-4: 有効化の関門 (Web経路だけ。set_enabled 本体は変更しない)。
+    # 関門の確認に失敗したら有効化しない (409、理由=確認できず)。
+    gate_failed = False
+    gate_result: dict = {}
+    try:
+        gate_result = await asyncio.to_thread(_shadow.gate, orchestrator,
+                                              project_id)
+    except Exception as exc:
+        gate_failed = True
+        gate_result = {"passed": False,
+                       "reasons": ["確認できず:" + type(exc).__name__],
+                       "metrics": {}, "thresholds": dict(_shadow.THRESHOLDS)}
+    if (not isinstance(gate_result, dict) or
+            type(gate_result.get("passed")) is not bool):
+        gate_failed = True
+        gate_result = {"passed": False, "reasons": ["確認できず:TypeError"],
+                       "metrics": {}, "thresholds": dict(_shadow.THRESHOLDS)}
+    reasons = gate_result.get("reasons")
+    if not isinstance(reasons, list) or any(
+            not isinstance(item, str) for item in reasons):
+        gate_failed = True
+    elif any(item.startswith("確認できず") for item in reasons):
+        gate_failed = True
+    if gate_failed:
+        raise HTTPException(409, detail={
+            "gate": gate_result,
+            "hint": "影モードの関門を確認できないため、有効化できません",
+        })
+    if not gate_result["passed"]:
+        # 関門が未達でも、担当者名と理由 (10字以上) があればオーバーライド
+        # として記録して有効化する。
+        override_reason = (payload.gate_override_reason or "").strip()
+        if not override_reason or len(override_reason) < 10:
+            raise HTTPException(
+                409, detail={
+                    "gate": gate_result,
+                    "hint": "影モードの記録と判定を進めるか、理由を付けて関門を無視してください",
+                })
+        try:
+            await asyncio.to_thread(_shadow.record_override, orchestrator,
+                                    project_id, actor, override_reason,
+                                    gate_result)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     try:
         return _auto.set_enabled(orchestrator, project_id, True,
                                  actor=actor, reason=reason)
@@ -4786,6 +4832,10 @@ class CapabilityGapVerifyPayload(BaseModel):
     actor: str = Field(default='', max_length=100)
 
 
+class CapabilityGapReverifyPayload(BaseModel):
+    actor: str = Field(default='', max_length=100)
+
+
 class DomainPackSelectPayload(BaseModel):
     domain_id: str = Field(min_length=1, max_length=64)
     version: str = Field(min_length=1, max_length=16)
@@ -5023,6 +5073,71 @@ async def verify_capability_gap_proposal(project_id: str, proposal_id: str,
     return result
 
 
+@app.get('/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/package')
+async def get_capability_gap_package(project_id: str, proposal_id: str):
+    # D-1b 指示パッケージの取得 (読み取り専用。actor 不要)。運搬の受け口であり、
+    # ジェンキンス側へは接続しない (人が起動するローカル脚本が読むだけ)。
+    # 状態が export_ready/submitted のときだけ全文と base_ref・SHA-256 を返す。
+    # 検証に失敗したら409と理由 (日本語・型名まで)。何も書き込まない。
+    require_project(project_id)
+    safe_id = _capability_gap_proposal_id_or_400(proposal_id)
+    from app import capability_export as _export
+    from app import capability_gap as _gap
+    row = _gap.get_proposal(orchestrator, safe_id)
+    if row is None or str(row.get('project_id') or '') != project_id:
+        raise HTTPException(404, '提案が見つかりません')
+    result = _export.read_package(orchestrator, project_id, safe_id)
+    if not isinstance(result, dict) or not result.get('ok'):
+        reason = ''
+        if isinstance(result, dict):
+            reason = str(result.get('reason') or '確認できず')
+        raise HTTPException(409, reason or '指示パッケージを確認できません')
+    # 応答に秘密値・内部の絶対パスを入れない (相対名とハッシュのみ)。
+    return {
+        'ok': True,
+        'proposal_id': str(result.get('proposal_id') or safe_id),
+        'status': str(result.get('status') or ''),
+        'base_ref': str(result.get('base_ref') or ''),
+        'files': {
+            'instruction.json': str((result.get('files') or {}).get('instruction.json') or ''),
+            'REQUEST.md': str((result.get('files') or {}).get('REQUEST.md') or ''),
+            'manifest.json': str((result.get('files') or {}).get('manifest.json') or ''),
+        },
+        'sha256': {
+            'instruction.json': str((result.get('sha256') or {}).get('instruction.json') or ''),
+            'REQUEST.md': str((result.get('sha256') or {}).get('REQUEST.md') or ''),
+            'manifest.json': str((result.get('sha256') or {}).get('manifest.json') or ''),
+        },
+        'read_only': True,
+        'external_sends': 0,
+    }
+
+
+@app.post('/api/capability-gaps/reverify')
+async def reverify_capability_gaps(payload: CapabilityGapReverifyPayload):
+    # D-4 反映後の再判定 (人が押したときだけ動く。threadpool 経由)。
+    # アプリ内の定期実行は作らない。結果の変化は見張りの通知パネルで表示する。
+    actor = (payload.actor or '').strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import capability_delivery as _delivery
+    try:
+        result = await asyncio.to_thread(_delivery.reverify_delivered,
+                                         orchestrator, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not isinstance(result, dict) or not result.get('ok'):
+        reason = ''
+        if isinstance(result, dict):
+            reason = str(result.get('reason') or '確認できず')
+        raise HTTPException(409, reason or '再判定を確認できません')
+    result = dict(result)
+    result['auth_note'] = '確認者名は本人確認を保証しません(認証は未実装)。'
+    result['note'] = ('基準版が変わった納品済み提案を再判定しました。'
+                      '結果は見張りの通知パネルで確認できます。')
+    return result
+
+
 @app.get('/api/domain-packs')
 async def list_domain_packs():
     from app import domain_spec as _packs
@@ -5194,6 +5309,237 @@ async def get_watch_decisions():
 @app.get('/static/night_run_panel.js')
 async def night_run_panel_js():
     return FileResponse(ROOT / 'app' / 'static' / 'night_run_panel.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+@app.get('/static/shadow_panel.js')
+async def shadow_panel_js():
+    return FileResponse(ROOT / 'app' / 'static' / 'shadow_panel.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+@app.get('/static/ledger_panel.js')
+async def ledger_panel_js():
+    return FileResponse(ROOT / 'app' / 'static' / 'ledger_panel.js', media_type='text/javascript', headers={'Cache-Control':'no-store'})
+
+
+@app.get('/api/ledger/metrics')
+async def get_ledger_metrics():
+    # 読み取り専用: 現在の指標を算出するだけ。記録しない。
+    from app import outcome_ledger as _ledger
+    try:
+        return await asyncio.to_thread(_ledger.compute_metrics, orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class LedgerSnapshotPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+@app.post('/api/ledger/snapshot')
+async def post_ledger_snapshot(payload: LedgerSnapshotPayload):
+    # 人が押したときだけ記録する。threadpool 経由。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import outcome_ledger as _ledger
+    try:
+        result = await asyncio.to_thread(_ledger.record_snapshot,
+                                         orchestrator, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        reason = ""
+        if isinstance(result, dict):
+            reason = str(result.get("reason") or "確認できず")
+        raise HTTPException(409, reason or "台帳の記録に失敗しました")
+    return result
+
+
+@app.get('/api/ledger/snapshots')
+async def get_ledger_snapshots(limit: int = 10):
+    # 読み取り専用: 直近の記録と前回との差。DB・ファイルを変更しない。
+    from app import outcome_ledger as _ledger
+    try:
+        count = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'limit が不正です')
+    try:
+        return await asyncio.to_thread(_ledger.list_snapshots, orchestrator,
+                                       count)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/ledger/suggestions')
+async def get_ledger_suggestions():
+    # 読み取り専用: 方針の改善提案。DB・ファイルを変更しない。
+    from app import outcome_ledger as _ledger
+    try:
+        suggestions = await asyncio.to_thread(_ledger.suggest, orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {'suggestions': suggestions, 'read_only': True,
+            'external_sends': 0}
+
+
+class LedgerSuggestionDecisionPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    decision: str = Field(min_length=1, max_length=16)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+@app.post('/api/ledger/suggestions/{suggestion_id}/decision')
+async def post_ledger_suggestion_decision(suggestion_id: str,
+                                          payload: LedgerSuggestionDecisionPayload):
+    # 採否の記録だけ。何も実行・変更しない。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    decision = (payload.decision or '').strip()
+    if decision not in ("adopted", "rejected", "deferred"):
+        raise HTTPException(422, 'decision を確認できません')
+    reason = (payload.reason or '').strip()
+    if not reason:
+        raise HTTPException(422, 'reason is required')
+    safe_id = str(suggestion_id or '').strip()
+    if safe_id == "" or len(safe_id) > 200:
+        raise HTTPException(400, 'suggestion_id が不正です')
+    from app import outcome_ledger as _ledger
+    result = await asyncio.to_thread(_ledger.record_decision, orchestrator,
+                                     safe_id, decision, actor, reason)
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        reason_text = ""
+        if isinstance(result, dict):
+            reason_text = str(result.get("reason") or "確認できず")
+        raise HTTPException(409, reason_text or "採否の記録に失敗しました")
+    return result
+
+
+class ShadowObservePayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class ShadowLabelPayload(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=16)
+    note: str = Field(default='', max_length=2000)
+    danger: bool = False
+
+
+@app.post('/api/projects/{project_id}/shadow/observe')
+async def post_shadow_observe(project_id: str, payload: ShadowObservePayload):
+    # 人が押したときだけ動く。定期スレッド・スケジューラは作らない。
+    require_project(project_id)
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import shadow_mode as _shadow
+    try:
+        result = await asyncio.to_thread(_shadow.observe, orchestrator,
+                                         project_id, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        reason = ""
+        if isinstance(result, dict):
+            reason = str(result.get("reason") or "確認できず")
+        raise HTTPException(409, reason or "影の記録に失敗しました")
+    return result
+
+
+@app.post('/api/shadow/observe-all')
+async def post_shadow_observe_all(payload: ShadowObservePayload):
+    # 人が押したときだけ動く。定期スレッド・スケジューラは作らない。
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    from app import shadow_mode as _shadow
+    try:
+        # threadpool 経由で実行する (既存の流儀。重い読取を分離)。
+        return await asyncio.to_thread(_shadow.observe_all, orchestrator,
+                                       actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/projects/{project_id}/shadow/records')
+async def get_shadow_records(project_id: str, limit: int = 50):
+    # 読み取り専用。DB・ファイルを変更しない。
+    require_project(project_id)
+    from app import shadow_mode as _shadow
+    try:
+        count = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'limit が不正です')
+    try:
+        records = await asyncio.to_thread(_shadow.list_records, orchestrator,
+                                          project_id, count)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {'project_id': project_id, 'records': records,
+            'read_only': True, 'external_sends': 0}
+
+
+@app.post('/api/shadow/records/{record_id}/label')
+async def post_shadow_label(record_id: str, payload: ShadowLabelPayload):
+    actor = payload.actor.strip()
+    if not actor:
+        raise HTTPException(422, 'actor is required')
+    label_value = (payload.label or "").strip()
+    if label_value not in ("correct", "wrong", "unsure"):
+        raise HTTPException(422, 'label を確認できません')
+    if bool(payload.danger) and label_value != "wrong":
+        raise HTTPException(422, 'danger は誤りのときだけ付けられます')
+    from app import shadow_mode as _shadow
+    result = await asyncio.to_thread(_shadow.label, orchestrator, record_id,
+                                     label_value, actor,
+                                     payload.note or "",
+                                     bool(payload.danger))
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        reason = ""
+        if isinstance(result, dict):
+            reason = str(result.get("reason") or "確認できず")
+        if "見つかりません" in reason:
+            raise HTTPException(404, reason)
+        raise HTTPException(409, reason or "ラベルの記録に失敗しました")
+    return result
+
+
+@app.get('/api/projects/{project_id}/shadow/metrics')
+async def get_shadow_metrics(project_id: str):
+    # 読み取り専用。DB・ファイルを変更しない。
+    require_project(project_id)
+    from app import shadow_mode as _shadow
+    try:
+        data = await asyncio.to_thread(_shadow.metrics, orchestrator,
+                                       project_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**data, 'read_only': True, 'external_sends': 0}
+
+
+@app.get('/api/projects/{project_id}/shadow/gate')
+async def get_shadow_gate(project_id: str):
+    # 読み取り専用。DB・ファイルを変更しない。
+    require_project(project_id)
+    from app import shadow_mode as _shadow
+    try:
+        result = await asyncio.to_thread(_shadow.gate, orchestrator,
+                                         project_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**result, 'read_only': True, 'external_sends': 0}
+
+
+@app.get('/api/shadow/summary')
+async def get_shadow_summary():
+    # 読み取り専用。DB・ファイルを変更しない。
+    from app import shadow_mode as _shadow
+    try:
+        result = await asyncio.to_thread(_shadow.summary, orchestrator)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {**result, 'read_only': True, 'external_sends': 0}
 
 
 class NightRunStartPayload(BaseModel):

@@ -108,14 +108,30 @@ class UsamiOcrBlock:
 
 
 def parse_table_rows(html_text: str) -> list[list[str]]:
-    """HTML 表を行×セルへ。パース不能でも空リスト(捏造しない)。"""
+    """HTML 表を行×セルへ。パース失敗は例外(0行の成功にしない)。"""
     parser = _TableRowParser()
     try:
         parser.feed(html_text or "")
         parser.close()
-    except Exception:
-        return []
+    except (ValueError, TypeError, RuntimeError, AttributeError, KeyError) as exc:
+        raise ValueError("table parse failed: %s" % type(exc).__name__) from exc
+    except Exception as exc:
+        raise ValueError("table parse failed: %s" % type(exc).__name__) from exc
     return parser.rows
+
+
+def _block_page_no(page: Mapping[str, Any]) -> int | None:
+    """table ブロックのページ番号。欠落・不正は None(1に寄せない・採用対象から外す)。"""
+    value = page.get("page")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        page_no = int(value)
+    except (TypeError, ValueError):
+        return None
+    return page_no if page_no >= 1 else None
 
 
 def nonempty_cells(row: Sequence[str]) -> list[str]:
@@ -289,10 +305,10 @@ def _iter_table_blocks(
     for page in pages:
         if not isinstance(page, Mapping):
             continue
-        try:
-            page_no = int(page.get("page") or 1)
-        except (TypeError, ValueError):
-            page_no = 1
+        # F2c fail-closed: page 欠落を 1 で補わない。欠落・不正は採用対象から外す。
+        page_no = _block_page_no(page)
+        if page_no is None:
+            continue
         for block in page.get("blocks") or []:
             if not isinstance(block, Mapping):
                 continue

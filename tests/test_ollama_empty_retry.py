@@ -20,6 +20,8 @@ def test_retry_compaction_preserves_system_task_head_and_source_tail():
 
 @pytest.mark.asyncio
 async def test_complete_retries_empty_and_length_limited_responses(monkeypatch):
+    # 既定の初回コンテキストを固定する(実行環境の OLLAMA_NUM_CTX に依存させない)。
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "8192")
     monkeypatch.setenv("OLLAMA_NUM_PREDICT", "1536")
     monkeypatch.setenv("OLLAMA_EMPTY_RETRY_NUM_CTX", "16384")
     monkeypatch.setenv("OLLAMA_EMPTY_RETRY_NUM_PREDICT", "6144")

@@ -821,3 +821,274 @@ def purge_delivery_records(memory_path: object, project_id: str) -> dict[str, in
         finally:
             db.close()
     return removed
+
+
+# ----------------------------------------------------------------------------
+# D-4 反映後の再判定 (人が押したときだけ。定期実行は作らない)
+# ----------------------------------------------------------------------------
+
+def _reverify_type_name(exc: BaseException) -> str:
+    try:
+        return str(type(exc).__name__ or "Error")
+    except Exception:
+        return "Error"
+
+
+def _reverify_delete_state(manager, project_id: str) -> str:
+    """論理削除状態を安全側で読む。deleted/purged は対象外、unknown は停止側。"""
+    try:
+        from app.project_delete import delete_state_status
+
+        mem_path = getattr(getattr(manager, "memory", None), "path", None)
+        if mem_path is None:
+            return "unknown"
+        return str(delete_state_status(mem_path, str(project_id or ""))
+                   or "unknown")
+    except Exception as exc:
+        return "unknown:" + _reverify_type_name(exc)
+
+
+def _reverify_base_of(manager, project_id: str, proposal_id: str) -> tuple[str, bool, str]:
+    """納品記録の base_commit (無ければ書き出し記録の base_ref)。
+
+    戻り値: (base_value, readable, detail)。読めないときは readable=False とし、
+    値を補完しない (fail-closed)。記録が無いときは ("", True, "no-record")。
+    """
+    pid = str(project_id or "")
+    target = str(proposal_id or "")
+    try:
+        rows = list_deliveries(manager, target)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return ("", False, _reverify_type_name(exc))
+    except Exception as exc:
+        return ("", False, _reverify_type_name(exc))
+    if not isinstance(rows, list):
+        return ("", False, "TypeError")
+    latest = rows[-1] if rows else None
+    if latest is None:
+        try:
+            from app import capability_export as _export
+
+            exported = _export.get_export(manager, target)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return ("", False, _reverify_type_name(exc))
+        except Exception as exc:
+            return ("", False, _reverify_type_name(exc))
+        if exported is None:
+            return ("", True, "no-record")
+        recorded = str(exported.get("base_ref") or "")
+        if recorded == "":
+            return ("", True, "no-record")
+        return (recorded, True, "export")
+    if not isinstance(latest, dict):
+        return ("", False, "TypeError")
+    recorded = str(latest.get("base_commit") or "")
+    if recorded == "":
+        return ("", True, "no-record")
+    return (recorded, True, "delivery")
+
+
+def _reverify_outcome_of(result: dict) -> str:
+    """verify_proposal の結果を通知の outcome に分ける。
+
+    「確認に失敗した場合」(stale 以外の ok:false) と「基準を満たさない場合」
+    (ok:true かつ verified:false) を同じ分岐で扱わない。stale は専用分岐。
+    """
+    if not isinstance(result, dict):
+        return "unreadable"
+    if result.get("stale") is True or str(result.get("status") or "") == "stale":
+        return "stale"
+    if result.get("ok") is True and result.get("verified") is True:
+        return "verified"
+    if result.get("ok") is True and result.get("verified") is False:
+        return "still_remaining"
+    return "unreadable"
+
+
+def _list_delivered_targets(manager) -> tuple[list[dict], list[dict]]:
+    """全PJの delivered の提案を列挙する。1PJの失敗で他を止めない。
+
+    戻り値: (targets, read_errors)。targets は {project_id, proposal_id} の列。
+    削除中 (deleted/purged) は除き、削除状態が不明 (unknown) のPJは対象外にし
+    read_errors へ残す (消さない・正常扱いにしない)。
+    """
+    from app import capability_gap as _gap
+
+    memory = getattr(manager, "memory", None)
+    if memory is None:
+        raise ValueError("manager.memory がありません")
+    try:
+        rows = memory.list_projects()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        raise ValueError("PJ一覧を確認できません:" + _reverify_type_name(exc))
+    if not isinstance(rows, list):
+        raise ValueError("PJ一覧を確認できません:TypeError")
+    pids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("PJ一覧の形式を確認できません:TypeError")
+        pid = row.get("id")
+        if pid is None or str(pid) == "":
+            raise ValueError("PJ一覧のIDを確認できません:ValueError")
+        pids.append(str(pid))
+    pids.sort()
+    targets: list[dict] = []
+    read_errors: list[dict] = []
+    for pid in pids:
+        state_text = _reverify_delete_state(manager, pid)
+        if state_text in ("deleted", "purged"):
+            continue
+        if state_text != "active" and state_text != "restored":
+            read_errors.append({"proposal_id": "",
+                                "reason": "PJの削除状態を確認できないため対象外にしました:"
+                                + state_text[:64]})
+            continue
+        try:
+            rows = _gap.list_proposals(manager, pid, status="delivered")
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            read_errors.append({"proposal_id": "",
+                                "reason": "提案一覧を確認できません:"
+                                + _reverify_type_name(exc)})
+            continue
+        except Exception as exc:
+            read_errors.append({"proposal_id": "",
+                                "reason": "提案一覧を確認できません:"
+                                + _reverify_type_name(exc)})
+            continue
+        if not isinstance(rows, list):
+            read_errors.append({"proposal_id": "",
+                                "reason": "提案一覧の形式を確認できません:"
+                                          "TypeError"})
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                read_errors.append({"proposal_id": "",
+                                    "reason": "提案の形式を確認できません:"
+                                              "TypeError"})
+                continue
+            target = str(row.get("proposal_id") or "")
+            if target == "":
+                read_errors.append({"proposal_id": "",
+                                    "reason": "提案IDを確認できません:"
+                                              "ValueError"})
+                continue
+            targets.append({"project_id": pid, "proposal_id": target})
+    targets.sort(key=lambda item: (str(item.get("project_id") or ""),
+                                   str(item.get("proposal_id") or "")))
+    return (targets, read_errors)
+
+
+def reverify_delivered(manager, actor: str) -> dict:
+    """D-4 反映後の再判定 (人が押したときだけ呼ぶ。一般機構)。
+
+    全PJの delivered の提案のうち、現在の基準版が納品記録の base_commit
+    (または記録された基準) と異なるものだけを対象に、既存の verify_proposal
+    を1件ずつ呼ぶ。1件の失敗で他を止めない。verify_proposal の既存の挙動
+    (再判定のみで、能力を自動で有効にしない・計画を書き換えない) は変えない。
+    基準版を読めないときは全体を ok:false とし、何も verified にしない。
+    """
+    from app import capability_export as _export
+    from app import watchtower as _watch
+
+    actor_name = str(actor or "").strip()
+    if not actor_name:
+        raise ValueError("actor is required")
+    try:
+        current_base = _export.get_base_ref()
+    except (OSError, ValueError) as exc:
+        return {"ok": False,
+                "reason": "基準版を確認できないため何も再判定しません:"
+                          + _reverify_type_name(exc),
+                "checked": 0, "verified": 0, "still_remaining": 0,
+                "stale": 0, "skipped_same_base": 0, "errors": []}
+    except Exception as exc:
+        return {"ok": False,
+                "reason": "基準版を確認できないため何も再判定しません:"
+                          + _reverify_type_name(exc),
+                "checked": 0, "verified": 0, "still_remaining": 0,
+                "stale": 0, "skipped_same_base": 0, "errors": []}
+    current_base = str(current_base or "")
+    if current_base == "" or current_base == "unknown":
+        return {"ok": False,
+                "reason": "基準版を確認できないため何も再判定しません:"
+                          "ValueError",
+                "checked": 0, "verified": 0, "still_remaining": 0,
+                "stale": 0, "skipped_same_base": 0, "errors": []}
+    try:
+        targets, read_errors = _list_delivered_targets(manager)
+    except ValueError as exc:
+        return {"ok": False,
+                "reason": "提案一覧を確認できないため何も再判定しません:"
+                          + str(exc)[-64:],
+                "checked": 0, "verified": 0, "still_remaining": 0,
+                "stale": 0, "skipped_same_base": 0, "errors": []}
+    checked = 0
+    verified = 0
+    still_remaining = 0
+    stale = 0
+    skipped_same_base = 0
+    errors: list[dict] = []
+    for item in read_errors:
+        errors.append({"proposal_id": str(item.get("proposal_id") or ""),
+                       "reason": str(item.get("reason") or "確認できず")[:200]})
+    for item in targets:
+        pid = str(item.get("project_id") or "")
+        target = str(item.get("proposal_id") or "")
+        recorded, readable, _detail = _reverify_base_of(manager, pid, target)
+        if not readable:
+            errors.append({"proposal_id": target,
+                           "reason": "納品記録を確認できないため再判定しません:"
+                                     + _detail[:64]})
+            continue
+        if recorded != "" and recorded == current_base:
+            skipped_same_base += 1
+            continue
+        try:
+            result = verify_proposal(manager, pid, target, actor=actor_name)
+        except ValueError as exc:
+            errors.append({"proposal_id": target,
+                           "reason": "再判定できません:" + str(exc)[:160]})
+            continue
+        except (sqlite3.Error, OSError) as exc:
+            errors.append({"proposal_id": target,
+                           "reason": "再判定できません:"
+                                     + _reverify_type_name(exc)})
+            continue
+        except Exception as exc:
+            errors.append({"proposal_id": target,
+                           "reason": "再判定できません:"
+                                     + _reverify_type_name(exc)})
+            continue
+        checked += 1
+        outcome = _reverify_outcome_of(result)
+        if outcome == "verified":
+            verified += 1
+        elif outcome == "still_remaining":
+            still_remaining += 1
+        elif outcome == "stale":
+            stale += 1
+        else:
+            errors.append({"proposal_id": target,
+                           "reason": "再判定の結果を確認できません:"
+                                     "ValueError"})
+            continue
+        # 通知 (既存の watchtower 関数の呼ぶ追加のみ。冪等キーで重複させない)。
+        # 通知の書込失敗は握りつぶさず errors に残す。
+        try:
+            _watch.record_capability_event(manager, pid, target,
+                                           current_base, outcome)
+        except ValueError as exc:
+            errors.append({"proposal_id": target,
+                           "reason": "通知を記録できません:" + str(exc)[:160]})
+        except (sqlite3.Error, OSError) as exc:
+            errors.append({"proposal_id": target,
+                           "reason": "通知を記録できません:"
+                                     + _reverify_type_name(exc)})
+        except Exception as exc:
+            errors.append({"proposal_id": target,
+                           "reason": "通知を記録できません:"
+                                     + _reverify_type_name(exc)})
+    return {"ok": True, "checked": int(checked), "verified": int(verified),
+            "still_remaining": int(still_remaining), "stale": int(stale),
+            "skipped_same_base": int(skipped_same_base),
+            "base_ref": current_base, "errors": errors}

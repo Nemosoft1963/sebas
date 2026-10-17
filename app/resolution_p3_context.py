@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+
+LOGGER = logging.getLogger(__name__)
 
 _ELIGIBLE_CAUSES = frozenset({
     "execution_failure",
@@ -50,7 +53,9 @@ def _registered_source_hashes(manager, project_id: str) -> dict | None:
     """{source_ref候補: 現行ハッシュ}。検証不能なら None(降格側に倒す)。"""
     try:
         files = manager.memory.list_context_files(str(project_id or ""), include_content=False)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(None=原本を確認できず。呼び出し側は加点なしに倒す)。
+        LOGGER.warning("resolution_p3 source hashes failed: %s", type(exc).__name__)
         return None
     hashes: dict[str, str] = {}
     for item in files or []:
@@ -71,13 +76,17 @@ def _rag_candidates(exp_memory, project: str, query: str) -> list[dict]:
     from app.plan_case_reference import SEARCH_CANDIDATE_LIMIT
     try:
         search_ids = exp_memory.build_index().search(pid, str(query or "")[:6000], SEARCH_CANDIDATE_LIMIT)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す([]=候補なし。呼び出し側は適格なしに倒す)。
+        LOGGER.warning("resolution_p3 rag candidates search failed: %s", type(exc).__name__)
         return []
     rows: list[dict] = []
     for rid in list(dict.fromkeys([str(v) for v in (search_ids or [])]))[:SEARCH_CANDIDATE_LIMIT]:
         try:
             row = exp_memory.store.get(pid, rid)
-        except Exception:
+        except Exception as exc:
+            # F3a: 失敗をログに残す(当該候補を飛ばす=加点対象にしない。不明を混ぜない)。
+            LOGGER.warning("resolution_p3 rag candidate row failed: %s", type(exc).__name__)
             continue
         if row is None:
             rows.append({"id": rid, "project": "__other__", "status": "unknown"})
@@ -204,8 +213,9 @@ def collect_p3_context(manager, project_id: str, row: dict) -> dict:
             for key in ("message", "reason_code"):
                 if gate.get(key):
                     query_parts.append(str(gate[key]))
-        except Exception:
-            pass
+        except Exception as exc:
+            # F3a: 失敗をログに残す(基本クエリで継続。証拠欠けを適格扱いにしない)。
+            LOGGER.warning("resolution_p3 query parts failed: %s", type(exc).__name__)
         query = " ".join(p for p in query_parts if p)[:6000] or criterion_id or task_key
         try:
             rows = _rag_candidates(exp_memory, pid, query)
@@ -216,11 +226,15 @@ def collect_p3_context(manager, project_id: str, row: dict) -> dict:
                     continue
                 try:
                     states[rid] = exp_memory.store.get_index_state(pid, rid)
-                except Exception:
+                except Exception as exc:
+                    # F3a: 失敗をログに残す(索引未確認=None=不採用側に倒す)。
+                    LOGGER.warning("resolution_p3 index state failed: %s", type(exc).__name__)
                     states[rid] = None
             assessed = _elig.assess_rows(exp_memory, pid, input_version, source_hash,
                                          rows, states, None)
         except Exception as exc:
+            # F3a: 失敗をログに残す(適格なし。失敗を適格扱いにしない)。
+            LOGGER.warning("resolution_p3 assess failed: %s", type(exc).__name__)
             assessed = {"eligible": [], "rejected": [],
                         "summary_ja": "RAG適格性の評価に失敗したため適格事例なし(%s)" % type(exc).__name__,
                         "notes": [_elig.SUMMARY_NOTE, _elig.HYPOTHESIS_NOTE, _elig.NO_ELIGIBLE_NOTE]}
@@ -241,7 +255,8 @@ def collect_p3_context(manager, project_id: str, row: dict) -> dict:
                        "risk_note_ja": _ranking.RISK_NOTE, "cause": cause}
     try:
         stored_candidates, trials, error_code = _triz_stored_candidates(manager, pid, task_key)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("resolution_p3 triz stored failed: %s", type(exc).__name__)
         stored_candidates, trials, error_code = ([], {}, "")
     if stored_candidates or str(error_code or ""):
         try:
@@ -250,6 +265,7 @@ def collect_p3_context(manager, project_id: str, row: dict) -> dict:
                 source_hashes=_registered_source_hashes(manager, pid),
                 trials=trials, error_code=error_code)
         except Exception as exc:
+            LOGGER.warning("resolution_p3 rank failed: %s", type(exc).__name__)
             ranked_view = {"ranked": [], "excluded": [],
                            "note_ja": "候補順位の評価に失敗したため順位を主張しない(%s)" % type(exc).__name__,
                            "risk_note_ja": _ranking.RISK_NOTE}

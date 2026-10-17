@@ -210,8 +210,10 @@ def test_delivery_verify_routes_and_no_send(tmp_path, monkeypatch):
             in routes)
     assert ("/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/verify"
             in routes)
-    # 8本のまま (既存5本 + submitted/delivery/verify。順序は問わない)。
-    gap_routes = sorted({p for p in routes if "capability-gaps" in p})
+    # 9本 (既存5本 + submitted/delivery/verify + D-1b package。順序は問わない)。
+    # D-4 の /api/capability-gaps/reverify はPJ配下ではないため対象外。
+    gap_routes = sorted({p for p in routes if "/api/projects/" in p
+                         and "capability-gaps" in p})
     assert sorted(gap_routes) == sorted([
         "/api/projects/{project_id}/capability-gaps",
         "/api/projects/{project_id}/capability-gaps/propose",
@@ -221,6 +223,7 @@ def test_delivery_verify_routes_and_no_send(tmp_path, monkeypatch):
         "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/submitted",
         "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/delivery",
         "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/verify",
+        "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/package",
     ]), gap_routes
     # export応答にファイル本文が無い・Jenkinsへ送信しない旨がある。
     import app.capability_gap as gap

@@ -666,6 +666,24 @@ def is_ocr_adoptable(
     return False
 
 
+def _bundle_field_page_no(item: Mapping[str, Any]) -> int:
+    """bundle の fields の page_no。欠落・不正は例外(1に寄せない・照合をずらさない)。"""
+    value = item.get("page_no")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("field page_no is missing")
+    if isinstance(value, bool):
+        raise ValueError("field page_no is invalid")
+    if isinstance(value, bool):
+        raise ValueError("field page_no is invalid")
+    try:
+        page_no = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("field page_no is invalid")
+    if page_no < 1:
+        raise ValueError("field page_no is invalid")
+    return page_no
+
+
 def payload_from_ocr_bundle(bundle: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not bundle or not bundle.get("run"):
         return None
@@ -690,13 +708,19 @@ def payload_from_ocr_bundle(bundle: Mapping[str, Any] | None) -> dict[str, Any] 
             "height": row.get("height") or 0,
             "blocks": blocks,
         })
+    # A bundle without valid page records cannot substantiate OCR adoption.
+    if not pages or any(isinstance(row.get("page"), bool) or
+                        not isinstance(row.get("page"), int) or row["page"] < 1
+                        for row in pages):
+        return None
     fields = []
     for item in bundle.get("fields") or []:
         fields.append({
             "name": item.get("name") or "",
             "value": item.get("value_text") or "",
             "type": item.get("value_type") or "string",
-            "page": item.get("page_no") or 1,
+            # F2c fail-closed: page_no 欠落を 1 で補わない(照合をずらさない)。
+            "page": _bundle_field_page_no(item),
             "block_id": item.get("block_id") or "",
             "value_state": item.get("validation_status") or "value",
         })
@@ -709,7 +733,7 @@ def payload_from_ocr_bundle(bundle: Mapping[str, Any] | None) -> dict[str, Any] 
             "context_file_id": str(run.get("context_file_id") or ""),
             "filename": "",
             "sha256": str(run.get("source_sha256") or ""),
-            "page_count": max(1, len(pages) or 1),
+            "page_count": len(pages),
         },
         "engine": {},
         "pages": pages,

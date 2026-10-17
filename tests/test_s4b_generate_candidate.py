@@ -558,7 +558,8 @@ def test_api_tick_run_and_concurrent_ticks(tmp_path, domain, monkeypatch):
     monkeypatch.setattr(web, "orchestrator", manager)
     client = TestClient(web.app, raise_server_exceptions=False)
     enabled = client.post(f"/api/projects/{pid}/autopilot/enable",
-                          json={"actor": "架空担当", "reason": "架空理由"})
+                          json={"actor": "架空担当", "reason": "架空理由",
+                                "gate_override_reason": "C-4関門の未達を理由付きで無視します"})
     assert enabled.status_code == 200
     ticked = client.post(f"/api/projects/{pid}/autopilot/tick",
                          json={"actor": "架空担当"})

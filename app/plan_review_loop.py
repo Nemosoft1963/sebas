@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
 import time
 import uuid
 
@@ -357,19 +358,23 @@ def _current(manager, pid: str):
 
 
 def _lease_get(manager, pid: str) -> dict | None:
+    # F2a fail-closed: 読取不能を「lease無し」(None)と見て二重実行しない。
+    # 広い except をやめ、想定できる失敗は例外で返し呼び出し側が止まる。
     try:
         return _store(manager).get(pid, "auto_loop_lease", pid)
-    except Exception:
-        return None
+    except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+        raise ValueError(f"leaseを確認できないため開始できません:{type(exc).__name__}") from exc
 
 
 def _lease_set(manager, pid: str, row: dict | None) -> None:
     store = _store(manager)
     if row is None:
         # ReviewStore has no delete; expire immediately.
+        # F2a fail-closed: 解除失敗は握りつぶさず狭い例外で記録する。
+        # 残存leaseは開始を阻む側(停止側)に保つ。
         try:
             store.put(pid, "auto_loop_lease", pid, {"run_id": "", "expires": 0})
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
             pass
         return
     store.put(pid, "auto_loop_lease", pid, row)
@@ -616,12 +621,14 @@ def start_run(manager, pid: str, actor: str, providers: list[str],
     }
     _store(manager).put(pid, "auto_loop", run["id"], run)
     _lease_set(manager, pid, {"run_id": run["id"], "expires": run["deadline"], "actor": actor})
+    # F2a fail-closed: 開始監査の失敗は握りつぶさず記録する(開始成功と区別できる)。
     try:
         manager.memory.add_event(pid, "auto_loop_started", "計画自動評価ループの外部送信範囲とAI役割を承認しました",
                                  detail=canonical({"run_id": run["id"], "providers": selected,
                                                    "packet_hash": run["packet_hash"]}))
-    except Exception:
-        pass
+    except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+        run["audit_error"] = type(exc).__name__
+        _save(manager, run)
     return public_view(run)
 
 
@@ -633,7 +640,11 @@ def cancel_run(manager, pid: str, run_id: str, actor: str) -> dict:
     run["stop_reason"] = f"利用者 {actor} が取り消しました。以後の外部呼出は行いません"
     run["stop_kind"] = "cancelled"
     _save(manager, run)
-    lease = _lease_get(manager, pid) or {}
+    # F2a: lease確認不能でも取消表示は返す。残存leaseは開始を阻む(停止側)。
+    try:
+        lease = _lease_get(manager, pid) or {}
+    except ValueError:
+        lease = {}
     if lease.get("run_id") == run_id:
         _lease_set(manager, pid, None)
     return public_view(run)
@@ -661,6 +672,7 @@ def _check_pinned(manager, pid: str, run: dict) -> tuple:
         raise ValueError("計画版が変わりました。現行版で新規開始してください")
     if str(contract.get("content_hash") or "") != str(run.get("goal_contract_hash") or ""):
         raise ValueError("GoalContractが変わりました。現行版で新規開始してください")
+    # F2a fail-closed: lease確認不能は「他が保持」と見て二重実行せず停止する。
     lease = _lease_get(manager, pid) or {}
     if lease.get("run_id") not in ("", str(run.get("id"))):
         raise ValueError("他のauto-loopがこのPJのleaseを保持しています")
@@ -733,7 +745,7 @@ async def _call_gemini(manager, pid: str, run: dict, prompt: str, purpose: str) 
             manager.memory.add_event(pid, "auto_loop_provider_error",
                                      "Geminiの呼出に失敗しました",
                                      detail=canonical({"run_id": run["id"], **failure}))
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
             pass
         raise ValueError(f"Gemini呼出に失敗したため停止しました({category})") from exc
     if purpose == "organize":
@@ -1038,6 +1050,7 @@ def _remap_base(manager, pid: str, run_id: str) -> tuple:
     if str(contract.get("content_hash") or "") != str(run.get("goal_contract_hash") or ""):
         raise ValueError("409: GoalContractが変わりました。新規確認してください")
     if str(run.get("packet_hash") or "") and signature:
+        # F2a fail-closed: packet照合の読取不能は通過させず停止する。
         try:
             from app.goal_review import ReviewStore as _ReviewStore
 
@@ -1047,8 +1060,8 @@ def _remap_base(manager, pid: str, run_id: str) -> tuple:
                 raise ValueError("409: packetが変わりました。新規確認してください")
         except ValueError:
             raise
-        except Exception:
-            pass
+        except (OSError, RuntimeError, AttributeError, KeyError, TypeError, sqlite3.Error) as exc:
+            raise ValueError(f"packetを確認できないため対応付け直しできません:{type(exc).__name__}") from exc
     rounds = [r for r in (run.get("rounds") or []) if isinstance(r, dict)]
     if not rounds:
         raise ValueError("保存済みレビューがありません")
@@ -1058,6 +1071,7 @@ def _remap_base(manager, pid: str, run_id: str) -> tuple:
         raise ValueError("保存済みレビューがありません")
     # レビュー指紋: ラン保存時の第1回レビューと現行ReviewStoreの保存レビューを照合する。
     # ラン内コピー同士の比較では改変を検出できないため、外部の保存レビューと突き合わせる。
+    # F2a fail-closed: 保存レビューの読取不能は通過させず停止する。
     try:
         from app.goal_review import ReviewStore as _ReviewStore2
 
@@ -1075,8 +1089,8 @@ def _remap_base(manager, pid: str, run_id: str) -> tuple:
             raise ValueError("409: レビューが変わりました。新規確認してください")
     except ValueError:
         raise
-    except Exception:
-        pass
+    except (OSError, RuntimeError, AttributeError, KeyError, TypeError, sqlite3.Error) as exc:
+        raise ValueError(f"保存レビューを確認できないため対応付け直しできません:{type(exc).__name__}") from exc
     return run, mission, snapshot, signature, contract, first, parsed
 
 
@@ -1090,6 +1104,14 @@ def remap_preview(manager, pid: str, run_id: str) -> dict:
     saved_fp = fingerprint([str(first.get("plan_signature") or ""),
                             canonical(first.get("reviews") or [])])
     current_fp = fingerprint([signature, canonical(parsed)])
+    # F2a fail-closed: ラウンド欠落を 1 で補完せず不明として停止する(増分0・1回扱いにしない)。
+    raw_round = first.get("round")
+    if raw_round is None:
+        raise ValueError("保存レビューのラウンドを確認できないため対応付け直しできません")
+    try:
+        round_no = int(raw_round)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("保存レビューのラウンドを確認できないため対応付け直しできません") from exc
     return {
         "run_id": run.get("id"),
         "project_id": pid,
@@ -1097,7 +1119,7 @@ def remap_preview(manager, pid: str, run_id: str) -> dict:
         "goal_contract_hash": str(contract.get("content_hash") or ""),
         "packet_hash": str(first.get("packet_hash") or run.get("packet_hash") or ""),
         "review_fingerprint_match": saved_fp == current_fp,
-        "round": int(first.get("round") or 1),
+        "round": round_no,
         "review_source": str(first.get("review_source") or ""),
         "status": str(first.get("status") or ""),
         "external_calls": 0,
@@ -1193,6 +1215,7 @@ async def remap_run(manager, pid: str, run_id: str, actor: str = "",
         parsed = first.get("reviews") or []
         if not parsed:
             raise ValueError("保存済みレビューがありません")
+        # F2a fail-closed: packet照合の読取不能は通過させず停止する。
         try:
             from app.goal_review import ReviewStore as _ReviewStore
 
@@ -1202,13 +1225,14 @@ async def remap_run(manager, pid: str, run_id: str, actor: str = "",
                 raise ValueError("409: packetが変わりました。新規確認してください")
         except ValueError:
             raise
-        except Exception:
-            pass
+        except (OSError, RuntimeError, AttributeError, KeyError, TypeError, sqlite3.Error) as exc:
+            raise ValueError(f"packetを確認できないため対応付け直しできません:{type(exc).__name__}") from exc
         saved_fp = fingerprint([str(first.get("plan_signature") or ""),
                                 canonical(first.get("reviews") or [])])
         review_fp = fingerprint([signature, canonical(parsed)])
         if saved_fp != review_fp:
             raise ValueError("409: レビューが変わりました。新規確認してください")
+        # F2a fail-closed: 保存レビューの読取不能は通過させず停止する。
         try:
             from app.goal_review import ReviewStore as _ReviewStore3
 
@@ -1226,8 +1250,8 @@ async def remap_run(manager, pid: str, run_id: str, actor: str = "",
                 raise ValueError("409: レビューが変わりました。新規確認してください")
         except ValueError:
             raise
-        except Exception:
-            pass
+        except (OSError, RuntimeError, AttributeError, KeyError, TypeError, sqlite3.Error) as exc:
+            raise ValueError(f"保存レビューを確認できないため対応付け直しできません:{type(exc).__name__}") from exc
         table = build_issue_bindings(parsed, contract, snapshot,
                                      plan_signature=signature,
                                      goal_contract_hash=str(contract.get("content_hash") or ""),
@@ -1273,6 +1297,8 @@ async def remap_run(manager, pid: str, run_id: str, actor: str = "",
         if int(run.get("verification_rounds") or 0) != rounds_before:
             raise ValueError("検証回数が変わったため中断しました")
         run = _save(manager, run)
+        # F2a fail-closed: 対応付け直しの監査失敗は握りつぶさず記録し、成功偽装しない。
+        # 外部呼出0・検証回数不変は維持する。
         try:
             already = False
             events = (manager.memory.get_mission(pid) or {}).get("events") or []
@@ -1285,8 +1311,9 @@ async def remap_run(manager, pid: str, run_id: str, actor: str = "",
                                          "保存済み指摘を対応付け直しました(外部送信なし)",
                                          detail=canonical({"run_id": run_id,
                                                            "bindings": len(table["bindings"])}))
-        except Exception:
-            pass
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            run["audit_error"] = type(exc).__name__
+            run = _save(manager, run)
         return public_view(run)
 
 
@@ -1309,6 +1336,7 @@ def _stop_guard_tick(manager, pid: str, run: dict) -> tuple[dict, dict | None]:
 
     履歴を書くのはランのティックだけ。新しい署名・新しい入力・人の選択があれば解除。
     戻り値: (guard, flat_record)。guard["repeating"] が True なら停止する。
+    F2a fail-closed: 履歴追記の失敗は握りつぶさず記録する(成功偽装しない)。
     """
     from app.stop_classifier import append_history, classify_stop, guard_auto_tick
 
@@ -1325,8 +1353,8 @@ def _stop_guard_tick(manager, pid: str, run: dict) -> tuple[dict, dict | None]:
     idem = "tick:" + _hashlib.sha256("|".join(key_parts).encode()).hexdigest()[:32]
     try:
         append_history(manager, pid, flat, actor="auto-tick", idempotency_key=idem)
-    except Exception:
-        pass
+    except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+        guard["history_error"] = type(exc).__name__
     guard["history"] = guard.get("history") or []
     return guard, flat
 
@@ -1359,13 +1387,19 @@ async def _run_locked(manager, pid: str, run_id: str) -> dict:
         run["stop_reason"] = "同じ停止の繰り返しのため自動ランを停止しました"
         run["stop_kind"] = "stopped"
         _save(manager, run)
-        lease = _lease_get(manager, pid) or {}
+        # F2a fail-closed: lease確認不能でも停止表示は返す。解除不能の残存leaseは
+        # 開始側を阻む(停止側)に保つ。
+        try:
+            lease = _lease_get(manager, pid) or {}
+        except ValueError:
+            lease = {}
         if lease.get("run_id") == run_id:
             _lease_set(manager, pid, None)
         try:
             manager.memory.add_event(pid, "auto_loop_stopped", "同じ停止の繰り返しのため自動ランを停止しました",
                                      detail=canonical({"run_id": run_id}))
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError,
+                sqlite3.Error):
             pass
         return public_view(run)
 
@@ -1374,13 +1408,18 @@ async def _run_locked(manager, pid: str, run_id: str) -> dict:
         run["stop_reason"] = reason[:1000]
         run["stop_kind"] = kind
         _save(manager, run)
-        lease = _lease_get(manager, pid) or {}
+        # F2a fail-closed: lease確認不能でも停止表示は返す。残存leaseは開始を阻む。
+        try:
+            lease = _lease_get(manager, pid) or {}
+        except ValueError:
+            lease = {}
         if lease.get("run_id") == run_id:
             _lease_set(manager, pid, None)
         try:
             manager.memory.add_event(pid, "auto_loop_stopped", reason[:500],
                                      detail=canonical({"run_id": run_id}))
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError,
+                sqlite3.Error):
             pass
         return public_view(run)
 
@@ -1494,7 +1533,11 @@ async def _run_locked(manager, pid: str, run_id: str) -> dict:
             run["state"] = "awaiting_human"
             run["stop_reason"] = ""
             run = _save(manager, run)
-            lease = _lease_get(manager, pid) or {}
+            # F2a: lease確認不能でも承認待ち表示は返す。残存leaseは開始を阻む。
+            try:
+                lease = _lease_get(manager, pid) or {}
+            except ValueError:
+                lease = {}
             if lease.get("run_id") == run_id:
                 _lease_set(manager, pid, None)
             return public_view(run)

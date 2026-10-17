@@ -320,7 +320,15 @@ def reuse_decisions(envelope, old_envelope, snapshot=None):
         if not _vehicles_valid(rule.get('allocations'), vehicles):
             envelope['assignments'].append(dict(rule, status='invalid'))
             continue
-        envelope['assignments'].append(dict(rule, status=rule.get('status') or 'active'))
+        # F3a: status欠落(None)は上部ループで有効と判定済みの場合のみ。明示的に有効化し、
+        # 未判定のものをactiveに読み替えない(判定は上部の not in (None,'active') 分岐が担う)。
+        current_status = rule.get('status')
+        if current_status is None:
+            envelope['assignments'].append(dict(rule, status='active'))
+        elif current_status == 'active':
+            envelope['assignments'].append(dict(rule, status='active'))
+        else:
+            envelope['assignments'].append(dict(rule, status='invalid'))
     data.setdefault('decision_log', []).append(dict(action='reuse_decisions', reused=len(reused), unresolved=len(stale)))
     drop_assumed_zero_when_actual(data['records'], data['decision_log'], allocated_only=True)
     return reused

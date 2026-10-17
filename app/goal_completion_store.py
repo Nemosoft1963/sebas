@@ -300,7 +300,17 @@ class GoalCompletionStore:
 
     def put_contract(self, project_id: str, payload: dict, status: str, sources: dict | None = None) -> dict:
         sources = sources or {}
-        version = int(payload.get("version") or 1)
+        # F2b fail-closed: 版の欠落・不正を 1 で補完しない。欠落=不明として
+        # 呼び出し側で止まる(曖昧な版での上書き・重複を防ぐ)。
+        raw_version = payload.get("version")
+        if raw_version is None or (isinstance(raw_version, str) and not raw_version.strip()):
+            raise ValueError("contract version is required")
+        try:
+            version = int(raw_version)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"contract version is invalid: {raw_version!r}") from exc
+        if version <= 0:
+            raise ValueError(f"contract version is invalid: {raw_version!r}")
         with self.connect() as db:
             if status == "active":
                 db.execute(

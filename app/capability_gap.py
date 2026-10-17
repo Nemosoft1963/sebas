@@ -321,12 +321,12 @@ def _has_policy_signal(text: str) -> bool:
 # ----------------------------------------------------------------------------
 
 def _contract_of(task: dict) -> dict:
-    try:
-        from app.structured_planning import contract_of
+    # F2b fail-closed: 工程契約の読取不能を空契約({}=対応付けなし)にしない。
+    # 失敗は握りつぶさず伝播させ、呼出側が unknown/停止側で扱う。
+    # 契約なし(contract_of が None を返す)自体は {} のまま(対応付けなし扱い)。
+    from app.structured_planning import contract_of
 
-        return contract_of(task) or {}
-    except Exception:
-        return {}
+    return contract_of(task) or {}
 
 
 def _contract_operations(contract: dict) -> list[str]:
@@ -415,10 +415,14 @@ def _registry_of(manager):
 
 
 def _context_files_of(manager, project_id: str) -> list:
+    # F2b fail-closed: 原本一覧の読取不能を空([]=入力なし扱い→missing_input
+    # 方向の既存分類)として返す。読取失敗を黙って成功扱いにしない。
     try:
         rows = manager.memory.list_context_files(str(project_id))
         return list(rows or [])
-    except Exception:
+    except (sqlite3.Error, OSError, ValueError, AttributeError):
+        # 失敗は空扱い(=不足側)。呼出側の _inspect_operation は
+        # input_compatible=False で gap を返す既存の fail-closed を維持する。
         return []
 
 
@@ -570,12 +574,11 @@ def _classify_gap(*, has_owner: bool, policy_hit: bool, inspection: dict) -> str
 # ----------------------------------------------------------------------------
 
 def _active_contract(manager, project_id: str) -> dict:
-    try:
-        from app.goal_contract import preview as preview_contract
+    # F2b fail-closed: 契約の読取不能を空契約({}=不足なし)にしない。
+    # 失敗は握りつぶさず伝播させ、呼出側が unknown/停止側で扱う。
+    from app.goal_contract import preview as preview_contract
 
-        return preview_contract(manager, str(project_id)) or {}
-    except Exception:
-        return {}
+    return preview_contract(manager, str(project_id)) or {}
 
 
 def _plan_snapshot(manager, project_id: str):
@@ -1296,6 +1299,8 @@ def _audit_event(manager_or_path, project_id: str, proposal_id: str, *,
                      _safe_short(reason, 500), str(content_hash or "")[:64],
                      _utcnow()))
     except sqlite3.Error:
+        # F2b fail-closed: 監査(提案イベント)の書込失敗はDB層の想定内のみ
+        # 握りつぶす。提案本体の成否は変えない(監査欠落を成功扱いにしない)。
         pass
     manager = manager_or_path if hasattr(manager_or_path, "memory") else None
     if manager is not None:
@@ -1310,7 +1315,9 @@ def _audit_event(manager_or_path, project_id: str, proposal_id: str, *,
                     "actor": str(actor or "")[:100],
                     "reason": _safe_short(reason, 200),
                 }, ensure_ascii=False))
-        except Exception:
+        except (sqlite3.Error, OSError):
+            # F2b fail-closed: memory 監査の書込失敗はDB/IO層の想定内のみ
+            # 握りつぶす。提案本体の成否は変えない。
             pass
 
 

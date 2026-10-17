@@ -26,9 +26,10 @@ function gapCountText(count,confirmed){
 }
 async function fetchJson(url,options){
  const r=await fetch(url,options);
- const d=await r.json().catch(()=>({}));
+ const d=await r.json().catch((parseErr)=>{if(r.ok)throw Error('応答を取得失敗しました。再読み込みしてください');return null;});
  if(!r.ok){
-  const detail=typeof d.detail==='string'?d.detail:String((d&&d.detail&&d.detail.message)||d.reason||('HTTP '+r.status));
+  const dd=(d&&typeof d==='object')?d:{};
+  const detail=typeof dd.detail==='string'?dd.detail:String((dd&&dd.detail&&dd.detail.message)||dd.reason||('HTTP '+r.status));
   const err=Error(detail||('HTTP '+r.status));err.status=r.status;throw err;
  }
  return d;
@@ -40,6 +41,19 @@ function apiReview(pid,proposalId,reviewer,reason){return fetchJson('/api/projec
 function apiExport(pid,proposalId,actor){return fetchJson('/api/projects/'+encodeURIComponent(pid)+'/capability-gaps/proposals/'+encodeURIComponent(proposalId)+'/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({actor:actor})});}
 function apiSubmit(pid,proposalId,actor,memo){return fetchJson('/api/projects/'+encodeURIComponent(pid)+'/capability-gaps/proposals/'+encodeURIComponent(proposalId)+'/submitted',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({actor:actor,memo:memo||''})});}
 function apiVerify(pid,proposalId,actor){return fetchJson('/api/projects/'+encodeURIComponent(pid)+'/capability-gaps/proposals/'+encodeURIComponent(proposalId)+'/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({actor:actor})});}
+function apiReverify(actor){return fetchJson('/api/capability-gaps/reverify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({actor:actor})}).then(d=>{if(!d||d.ok!==true)throw Error('再判定を確認できませんでした');return d;});}
+function reverifySummaryText(out){
+ if(!out||typeof out!=='object')return '再判定を確認できませんでした';
+ const parts=[];
+ parts.push('確認'+String(out.checked||0)+'件');
+ if(typeof out.verified!=='undefined')parts.push('解消'+String(out.verified||0)+'件');
+ if(typeof out.still_remaining!=='undefined')parts.push('残件'+String(out.still_remaining||0)+'件');
+ if(typeof out.stale!=='undefined')parts.push('古い版'+String(out.stale||0)+'件');
+ if(typeof out.skipped_same_base!=='undefined')parts.push('同じ基準版のため対象外'+String(out.skipped_same_base||0)+'件');
+ const errs=Array.isArray(out.errors)?out.errors:[];
+ if(errs.length)parts.push('確認できず'+String(errs.length)+'件');
+ return '再判定しました（'+parts.join('・')+'）。結果は見張りの通知パネルで確認できます。';
+}
 function updateOverviewGap(missingCount,confirmed,hasMissing){
  const node=document.getElementById('workflowOverviewGap');
  if(node)node.textContent=gapCountText(missingCount,confirmed);
@@ -69,11 +83,12 @@ function mount(){
   const actorLabel=addText(box,'label','担当者名（必須。本人認証ではありません）');actorLabel.htmlFor='capabilityGapActor';
   const actor=document.createElement('input');actor.id='capabilityGapActor';actor.placeholder='操作する人の名前';actor.maxLength=100;box.append(actor);
   const proposeBtn=document.createElement('button');proposeBtn.type='button';proposeBtn.id='capabilityGapPropose';proposeBtn.textContent='不足機能を確認する（ローカルで作成）';
+  const reverifyBtn=document.createElement('button');reverifyBtn.type='button';reverifyBtn.id='capabilityGapReverify';reverifyBtn.textContent='納品済みを再判定';
   const status=document.createElement('p');status.id='capabilityGapStatus';status.setAttribute('role','status');
   const listHost=document.createElement('div');listHost.id='capabilityGapList';
   const detailHost=document.createElement('div');detailHost.id='capabilityGapDetail';
   const delivery=document.createElement('p');delivery.id='capabilityGapDeliveryNote';delivery.textContent='納品の入力は画面では行いません。送付記録と再判定だけをこの画面で行い、実装完了・検証済みの有効化は再判定でのみ行います。';
-  box.append(proposeBtn,status,listHost,detailHost,delivery);
+  box.append(proposeBtn,reverifyBtn,status,listHost,detailHost,delivery);
   anchor.append(box);
   let epoch=0;
   function selected(){return currentPid();}
@@ -116,6 +131,17 @@ function mount(){
     await load(true);
    }catch(e){status.textContent=e.message||'作成できませんでした';proposeBtn.disabled=false;return;}
    proposeBtn.disabled=false;
+  };
+  reverifyBtn.onclick=async()=>{
+   const name=(actor.value||'').trim();
+   if(!name){status.textContent='担当者名を入力してください';return;}
+   reverifyBtn.disabled=true;status.textContent='再判定中…';
+   try{
+    const out=await apiReverify(name);
+    status.textContent=reverifySummaryText(out);
+    await load(true);
+   }catch(e){status.textContent=e.message||'再判定できませんでした';reverifyBtn.disabled=false;return;}
+   reverifyBtn.disabled=false;
   };
   const sel=document.getElementById('projectSelect');
   if(sel)sel.addEventListener('change',()=>{load(true);});
@@ -301,5 +327,5 @@ function renderDetailEditor(host,statusNode,proposal,pid,mode){
  }
 }
 if(typeof document!=='undefined')mount();
-if(typeof module!=='undefined')module.exports={STATUS_JA,PERMISSION_JA,statusJa,permissionJa,buttonStateFor,gapCountText};
+if(typeof module!=='undefined')module.exports={STATUS_JA,PERMISSION_JA,statusJa,permissionJa,buttonStateFor,gapCountText,apiReverify,reverifySummaryText};
 })();

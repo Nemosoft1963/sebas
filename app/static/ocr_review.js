@@ -391,7 +391,7 @@ function init(){
   if(!selectedRunId)return;
   try{
    const response=await fetch('/api/projects/'+encodeURIComponent(project)+'/ocr/'+encodeURIComponent(selectedRunId)+'/evidence/'+encodeURIComponent(fieldId));
-   const body=await response.json().catch(()=>({}));
+   const body=await response.json().catch((parseErr)=>{throw Error('根拠を取得できず。再読み込みしてください');});
    if(!response.ok)throw Error(apiError(body,'根拠を取得できません'));
    const page=Number(body.page||item&&item.page||currentPage||1);
    const size=pageSizes[page]||{};
@@ -404,7 +404,7 @@ function init(){
  async function loadArtifactText(name){
   const response=await fetch('/api/projects/'+encodeURIComponent(project)+'/ocr/'+encodeURIComponent(selectedRunId)+'/artifacts/'+encodeURIComponent(name));
   if(!response.ok){
-   const body=await response.json().catch(()=>({}));
+   const body=await response.json().catch((parseErr)=>{throw Error(name+' を取得できず。再読み込みしてください');});
    throw Error(apiError(body,name+' を取得できません'));
   }
   if(name.endsWith('.json'))return response.json();
@@ -431,14 +431,14 @@ function init(){
   el('ocrRagConfirm').checked=false;
   try{
    const statusRes=await fetch('/api/projects/'+encodeURIComponent(project)+'/ocr/'+encodeURIComponent(runId));
-   const view=await statusRes.json().catch(()=>({}));
+   const view=await statusRes.json().catch((parseErr)=>{throw Error('OCR状態を取得できず。再読み込みしてください');});
    if(!statusRes.ok)throw Error(apiError(view,'OCR状態を取得できません'));
    runView=view;
    renderBadges(view);
    applyActionState(view);
    const jsonData=await loadArtifactText('ocr_result.json');
    payload=jsonData;
-   const source=jsonData&&jsonData.source||{};
+   const source=(jsonData&&jsonData.source)||{};
    pageCount=Number(source.page_count||(jsonData.pages||[]).length||1);
    if(pageCount<1)pageCount=1;
    for(const page of jsonData.pages||[]){
@@ -457,10 +457,12 @@ function init(){
      payload.checks=(validation&&validation.checks)||[];
     }catch(_err){
      payload.checks=[];
+     el('ocrCheckList').replaceChildren();
+     el('ocrCheckList').textContent='検算結果を確認できず。再読み込みしてください';
     }
    }
    renderFields();
-   renderChecks();
+   if(payload.checks.length)renderChecks();
    showPage(1);
   }catch(err){
    if(el('ocrActionResult'))el('ocrActionResult').textContent='';
@@ -543,8 +545,8 @@ function init(){
     headers:{'Content-Type':'application/json','Idempotency-Key':key},
     body:JSON.stringify({idempotency_key:key,user_requested_original_match:true})
    });
-   const body=await response.json().catch(()=>({}));
-   if(response.status===409&&body&&body.detail&&body.detail.error_code==='feature_disabled'){
+   const body=await response.json().catch((parseErr)=>{throw Error('OCR要求の応答を確認できず。再読み込みしてください');});
+   if(response.status===409&&(body&&body.detail&&body.detail.error_code==='feature_disabled')){
     featureDisabled=true;
     el('ocrFeatureStatus').textContent='OCR機能は無効です';
     el('ocrFeatureStatus').className='ocr-status-line error';
@@ -565,7 +567,7 @@ function init(){
    headers:{'Content-Type':'application/json'},
    body:JSON.stringify(body||{})
   });
-  const data=await response.json().catch(()=>({}));
+  const data=await response.json().catch((parseErr)=>{throw Error('OCR操作の応答を確認できず。再読み込みしてください');});
   if(!response.ok)throw Error(apiError(data,'操作に失敗しました'));
   return data;
  }
@@ -580,22 +582,25 @@ function init(){
   }
   try{
    const response=await fetch('/api/projects/'+encodeURIComponent(pid)+'/context-files');
-   const body=await response.json().catch(()=>([]));
+   const body=await response.json().catch((parseErr)=>{throw Error('ファイル一覧を取得できず。再読み込みしてください');});
    if(ticket!==epoch)return;
    if(!response.ok)throw Error(apiError(body,'ファイル一覧を取得できません'));
    const rows=Array.isArray(body)?body:[];
    const enriched=[];
+   let ocrStatusErrors=0;
    for(const file of rows){
     const item={...file,latestRun:null};
     try{
      const ocrRes=await fetch('/api/projects/'+encodeURIComponent(pid)+'/context-files/'+encodeURIComponent(file.id)+'/ocr');
-     const ocrBody=await ocrRes.json().catch(()=>({}));
+     const ocrBody=await ocrRes.json().catch((parseErr)=>{throw Error('OCR状態を取得できず');});
      if(ticket!==epoch)return;
      if(ocrRes.ok){
-      const runs=ocrBody.runs||[];
+      const runs=(ocrBody&&ocrBody.runs)||[];
       item.latestRun=runs[0]||null;
+     }else{
+      ocrStatusErrors+=1;
      }
-    }catch(_err){}
+    }catch(_err){ocrStatusErrors+=1;}
     enriched.push(item);
    }
    if(ticket!==epoch)return;
@@ -604,7 +609,7 @@ function init(){
    const withRun=enriched.filter(file=>file.latestRun);
    const failedRuns=withRun.filter(file=>file.latestRun.ocr_status==='failed').length;
    const pending=withRun.filter(file=>file.latestRun.adoption_status==='unapproved'&&file.latestRun.ocr_status!=='failed').length;
-   el('ocrPanelStatus').textContent=enriched.length+'件のファイル'+(withRun.length?' ／ OCR '+withRun.length+'件: 承認済み・却下など '+(withRun.length-pending-failedRuns)+' ／ 未承認 '+pending+(failedRuns?' ／ OCR失敗 '+failedRuns:''):'');
+   el('ocrPanelStatus').textContent=enriched.length+'件のファイル'+(withRun.length?' ／ OCR '+withRun.length+'件: 承認済み・却下など '+(withRun.length-pending-failedRuns)+' ／ 未承認 '+pending+(failedRuns?' ／ OCR失敗 '+failedRuns:''):'')+(ocrStatusErrors?' ／ OCR状態を確認できず '+ocrStatusErrors+'件':'');
    el('ocrPanelStatus').className='ocr-status-line';
    if(featureDisabled){
     el('ocrFeatureStatus').textContent='OCR機能は無効です';

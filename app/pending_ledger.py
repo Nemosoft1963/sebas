@@ -5,7 +5,10 @@ workflow-readiness / next-action / 概要カードの判定を同一台帳から
 """
 from __future__ import annotations
 
+import logging
 import time
+
+LOGGER = logging.getLogger(__name__)
 
 
 KIND_PLAN_ISSUE = "plan_issue"
@@ -100,7 +103,9 @@ def _safe_mission(manager, pid: str) -> dict:
     try:
         mission = manager.memory.get_mission(pid)
         return dict(mission) if isinstance(mission, dict) else {}
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す。{}は「確認できず」(plan_stateはunknown側)。
+        LOGGER.warning("pending_ledger _safe_mission failed: %s", type(exc).__name__)
         return {}
 
 
@@ -120,7 +125,9 @@ def _safe_issues(manager, pid: str, signature: str) -> list:
 
         rows = issues_for(manager, pid, signature)
         return [dict(x) if isinstance(x, dict) else {"text": str(x)} for x in (rows or [])]
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す。Noneは「確認できず」(issues_unavailable=True)。0件にしない。
+        LOGGER.warning("pending_ledger _safe_issues failed: %s", type(exc).__name__)
         return None
 
 
@@ -131,7 +138,9 @@ def _safe_store_row(manager, pid: str, kind: str, signature: str):
         store = ReviewStore(manager.memory.path)
         row = store.get(pid, kind, signature)
         return dict(row) if isinstance(row, dict) else None
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す。Noneは「確認できず」(呼び出し側がunverified/unknown側)。
+        LOGGER.warning("pending_ledger _safe_store_row failed: %s", type(exc).__name__)
         return None
 
 
@@ -139,7 +148,9 @@ def _safe_actions(manager, pid: str) -> list:
     try:
         rows = manager.memory.list_actions(pid)
         return [dict(x) for x in (rows or []) if isinstance(x, dict)]
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す。Noneは「確認できず」(件数をNoneにし0件にしない)。
+        LOGGER.warning("pending_ledger _safe_actions failed: %s", type(exc).__name__)
         return None
 
 

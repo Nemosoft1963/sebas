@@ -6,12 +6,15 @@ human_result は由来であり適用条件ではない。金額は保存・再�
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from app.goal_review import ReviewStore
+
+LOGGER = logging.getLogger(__name__)
 
 RECIPE_STATUSES = ('verified', 'disabled', 'revoked', 'needs_revalidation')
 ALLOWED_RECIPE_ADAPTERS = frozenset({
@@ -158,6 +161,20 @@ class ExtractionResult:
         }
 
 
+def _recipe_version(recipe) -> int:
+    """F3a: 版の既定値。欠落(None)は1、0・負・非数値は不明として拒否(1に化けさせない)。"""
+    raw = (recipe or {}).get("version") if isinstance(recipe, dict) else None
+    if raw is None or raw == "":
+        return 1
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("recipe version が不明です(版を確認できません)")
+    if value <= 0:
+        raise ValueError("recipe version が不明です(版を確認できません)")
+    return value
+
+
 def normalize_recipe(recipe) -> dict:
     if isinstance(recipe, RecipeSpec):
         return recipe.to_dict()
@@ -172,7 +189,7 @@ def normalize_recipe(recipe) -> dict:
     row['applicability'] = default_applicability(**(row.get('applicability') or {}))
     row['validation_contract'] = default_validation_contract(**(row.get('validation_contract') or {}))
     row.setdefault('recipe_id', row.get('experience_id') or provenance.get('human_result') or '')
-    row.setdefault('version', 1)
+    row['version'] = _recipe_version(row)
     row.setdefault('adapters', [])
     row.setdefault('mapping_rules', [])
     row.setdefault('allocation_rules', [])
@@ -252,7 +269,9 @@ def columns_of(source, raw=None, content=''):
                             labels.append(packed)
             book.close()
             return list(dict.fromkeys(labels))
-        except Exception:
+        except Exception as exc:
+            # F3a: 失敗をログに残す。[]は「列を確認できず」(呼び出し側は加点・一致扱いにしない)。
+            LOGGER.warning("executable_recipes columns_of failed: %s", type(exc).__name__)
             return []
     return []
 
@@ -331,7 +350,7 @@ def match_recipe(recipe, source_snapshot) -> MatchResult:
     recipe = normalize_recipe(recipe)
     snapshot = dict(source_snapshot or {})
     recipe_id = recipe.get('recipe_id') or ''
-    version = recipe.get('version') or 1
+    version = _recipe_version(recipe)
     reasons = []
     status = recipe.get('status')
     if status == 'revoked':
@@ -398,7 +417,7 @@ def execute_recipe(recipe, docs, months, *, zero=False, source_hash='', snapshot
 
     recipe = normalize_recipe(recipe)
     recipe_id = recipe.get('recipe_id') or ''
-    version = recipe.get('version') or 1
+    version = _recipe_version(recipe)
     match = match_recipe(recipe, snapshot or {})
     if not match.matched:
         return ExtractionResult(

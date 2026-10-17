@@ -6,7 +6,7 @@ async function api(path,body,method){
  const m=method||(body===undefined?'GET':'POST');
  const opt=m==='GET'?{}:{method:m,headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})};
  const r=await fetch('/api/projects/'+encodeURIComponent(currentPid())+'/lifecycle'+path,opt);
- const d=await r.json().catch(()=>({}));
+ const d=await r.json().catch((parseErr)=>{throw Error('初期化の応答を確認できず。再読み込みしてください');});
  if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:String((d&&d.detail&&d.detail.message)||d.reason||('HTTP '+r.status)));
  return d;
 }

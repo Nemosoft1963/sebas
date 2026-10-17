@@ -608,13 +608,18 @@ def revoke_result(manager,pid,signature,reviewer,notes):
         store.put(pid,'executable_recipe',signature,recipe)
     ExperienceStore(Path(manager.memory.path).parent/'experience_memory'/'experience.sqlite3').review(pid,row['experience_id'],'revoked',reviewer,notes,0)
     # P1-A: 撤回時は正本で即時不採用とし索引から削除する。検索結果の再照合は維持される。
+    # F2a fail-closed: 索引削除の失敗を握りつぶさず記録する(取消成功と区別できる)。
     try:
         from app.experience_memory import configured_memory
         setting=configured_memory(manager.memory.path,pid)
         if setting:
             setting[0].remove_from_index(pid,row['experience_id'],reviewer,notes)
-    except Exception:
-        pass
+            row['index_removal'] = 'removed'
+        else:
+            row['index_removal'] = 'rag_disabled'
+    except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+        row['index_removal'] = f'failed:{type(exc).__name__}'
+        store.put(pid,'result',signature,row)
     return row
 
 
@@ -662,7 +667,9 @@ def execution_gate(manager,pid):
                 return {"blocked": True,
                         "reason": _gap.get("reason") or "不足機能の提案が残っているため実行承認できません"}
         except Exception:
-            pass
+            # F2a fail-closed: 不足機能の確認に失敗したら不明=停止側に倒す(通過させない)。
+            return {"blocked": True,
+                    "reason": "不足機能の確認に失敗したため実行承認できません"}
         return {'blocked':False,'reason':''}
     except ValueError as exc:
         text=str(exc)

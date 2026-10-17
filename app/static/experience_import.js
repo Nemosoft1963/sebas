@@ -268,7 +268,7 @@ function init(){
     })
    });
 
-   const data=await response.json().catch(()=>({}));
+   const data=await response.json().catch((parseErr)=>{throw Error('応答を取得失敗しました。再読み込みしてください');});
 
    if(response.status===409){
     const detail=data&&data.detail;
@@ -315,7 +315,7 @@ function init(){
  async function apiFetch(path,options){
   project=selectedProject();
   const response=await fetch('/api/projects/'+encodeURIComponent(project)+path,options);
-  const data=await response.json().catch(()=>({}));
+  const data=await response.json().catch((parseErr)=>{throw Error('応答を取得失敗しました。再読み込みしてください');});
   return {response,data};
  }
 

@@ -226,12 +226,16 @@ def _safe_external_evidence(manager, project_id: str) -> dict:
 
 
 def _safe_sources_readable(manager, project_id: str, mission: dict) -> bool:
+    # F2b fail-closed: 原本の読取確認に失敗したら False(=読めない→停止分類側)。
+    # 想定外の例外は握りつぶさず伝播させ、成功扱いにしない。
     try:
         from app.vehicle_workflow import digest, sources
 
         digest(sources(manager, project_id))
         return True
-    except Exception:
+    except (sqlite3.Error, OSError, ValueError, AttributeError, TypeError, KeyError):
+        # 読取不能は False(不明→source_unreadable 方向)。呼出側は
+        # readable=False を証拠不足として分類する既存の fail-closed を維持。
         return False
 
 
@@ -813,11 +817,15 @@ def _trial_evidence_server_side(manager, project_id: str, row: dict) -> dict | N
                 from app.recovery_record import _verify_run_artifact
 
                 _verify_run_artifact(manager, project_id, run)
-            except Exception:
+            except (ValueError, OSError, KeyError, TypeError):
+                # F2b fail-closed: 証拠検証に失敗した run は試験合格の根拠に
+                # しない(次候補へ。成功扱いにしない)。
                 continue
             return {"kind": "p2_run", "run_id": str(run.get("run_id") or ""),
                     "artifact_hash": str(run.get("artifact_hash") or "")}
-    except Exception:
+    except (sqlite3.Error, OSError, ValueError, AttributeError, TypeError, KeyError):
+        # F2b fail-closed: 隔離試験の記録読取不能は試験なし(None)として扱い、
+        # trial_passed への進行を許さない。
         pass
     try:
         from app.recovery_record import list_records
@@ -828,7 +836,8 @@ def _trial_evidence_server_side(manager, project_id: str, row: dict) -> dict | N
             if bool(record.get("business_passed")) or bool(record.get("rerun_passed")):
                 return {"kind": "recovery", "recovery_id": str(record.get("id") or ""),
                         "state": str(record.get("state") or "")}
-    except Exception:
+    except (sqlite3.Error, OSError, ValueError, AttributeError, TypeError, KeyError):
+        # F2b fail-closed: 回復記録の読取不能も試験なし(None)として扱う。
         pass
     return None
 
@@ -1144,13 +1153,15 @@ def summary(manager, project_id: str) -> dict:
 
 
 def _statements(manager, project_id: str) -> dict[str, str]:
+    # F2b fail-closed: 契約文面の読取不能は空({}=未結合表示)。成功扱いにしない。
     try:
         from app.goal_contract import preview as contract_preview
 
         contract = contract_preview(manager, project_id) or {}
         return {str(x.get("criterion_id") or ""): str(x.get("statement") or "")
                 for x in contract.get("criteria") or [] if x.get("criterion_id")}
-    except Exception:
+    except (sqlite3.Error, OSError, ValueError, AttributeError, TypeError, KeyError):
+        # 読めない条件文面は未結合として表示し、解決済み扱いにしない。
         return {}
 
 

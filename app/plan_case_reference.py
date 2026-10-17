@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
 
 # 上限を定数で固定する(条件あたり3件・事例あたり400字)。
 MAX_CASES_PER_CRITERION = 3
@@ -180,6 +183,8 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
     plan_signature = str(plan_signature or "").strip()
     extra = dict(extra_context or {})
     # L3: 論理削除中・削除状態が確認できないPJは計画・RAG参照から除外する。
+    # F3a: 削除判定自体の失敗は「参照不可」で返し、黙って継続しない。
+    _l3_unknown = False
     try:
         from app.project_delete import is_deleted_or_unknown as _l3_is_deleted
         _mem = None
@@ -191,7 +196,8 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
             if _root is not None:
                 from pathlib import Path as _Path
                 _mem = _Path(str(_root)).parent / "memory" / "conversations.db"
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_case_reference L3 mem resolve failed: %s", type(exc).__name__)
             _mem = None
         if _mem is not None:
             try:
@@ -211,10 +217,31 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
                             "reason": "論理削除中または削除状態を確認できないため参照不可(状態を確定できません)",
                         })
                     return result_none
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as exc:
+                # F3a: 削除判定の失敗は「参照不可」(黙って継続しない)。
+                LOGGER.warning("plan_case_reference L3 check failed: %s", type(exc).__name__)
+                _l3_unknown = True
+        else:
+            _l3_unknown = True
+    except Exception as exc:
+        LOGGER.warning("plan_case_reference L3 import failed: %s", type(exc).__name__)
+        _l3_unknown = True
+    if _l3_unknown:
+        result_unknown: dict = {
+            "project": project,
+            "plan_version": plan_version,
+            "plan_signature": plan_signature,
+            "input_version": input_version,
+            "note": "参考（達成証拠ではない）。" + REFERENCE_DISCLAIMER,
+            "criteria": [],
+        }
+        for entry in items:
+            result_unknown["criteria"].append({
+                "criterion_id": entry["criterion_id"], "statement": entry["statement"],
+                "status": STATUS_UNAVAILABLE, "references": [],
+                "reason": "削除状態を確認できないため参照不可(状態を確定できません)",
+            })
+        return result_unknown
     result: dict = {
         "project": project,
         "plan_version": plan_version,
@@ -233,7 +260,9 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
         return result
     try:
         ensure_table(exp_memory.store)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(全条件unavailable=根拠欠けを明示)。
+        LOGGER.warning("plan_case_reference ensure_table failed: %s", type(exc).__name__)
         for entry in items:
             result["criteria"].append({
                 "criterion_id": entry["criterion_id"], "statement": entry["statement"],
@@ -244,11 +273,15 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
     try:
         from app.experience_memory import current_index_identity
         current_identity = current_index_identity(exp_memory.config)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(identity不明=旧索引の可能性。個別行で不採用側に倒す)。
+        LOGGER.warning("plan_case_reference index identity failed: %s", type(exc).__name__)
         current_identity = ""
     try:
         eligible_ids = {r["id"] for r in exp_memory.verified_rows_for_index(project)}
     except Exception as exc:
+        # F3a: 失敗をログに残す(正本照合不能=全条件unavailable。計画生成は継続し根拠欠けを明示)。
+        LOGGER.warning("plan_case_reference verified_rows failed: %s", type(exc).__name__)
         for entry in items:
             _persist_marker(exp_memory, project, plan_version, plan_signature,
                             entry["criterion_id"], STATUS_UNAVAILABLE,
@@ -265,6 +298,8 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
         try:
             search_ids = exp_memory.build_index().search(project, query[:6000], SEARCH_CANDIDATE_LIMIT)
         except Exception as exc:
+            # F3a: 失敗をログに残す(unavailableを記録し計画生成は継続。根拠欠けを明示)。
+            LOGGER.warning("plan_case_reference search failed: %s", type(exc).__name__)
             _persist_marker(exp_memory, project, plan_version, plan_signature, cid,
                             STATUS_UNAVAILABLE,
                             "検索に失敗したため利用不可(%s)。計画生成は継続する。" % type(exc).__name__)
@@ -275,8 +310,9 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
             })
             try:
                 exp_memory.store.audit_retrieval(project, query, [], "plan_case_reference_unavailable")
-            except Exception:
-                pass
+            except Exception as exc:
+                # F3a: 監査の失敗をログに残す(検索結果自体はunavailableで返す。監査欠落を成功扱いにしない)。
+                LOGGER.warning("plan_case_reference audit failed: %s", type(exc).__name__)
             continue
         if not search_ids:
             _persist_marker(exp_memory, project, plan_version, plan_signature, cid,
@@ -288,8 +324,9 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
             })
             try:
                 exp_memory.store.audit_retrieval(project, query, [], "plan_case_reference_no_case")
-            except Exception:
-                pass
+            except Exception as exc:
+                # F3a: 監査の失敗をログに残す(結果自体はno_case。監査欠落を成功扱いにしない)。
+                LOGGER.warning("plan_case_reference audit failed: %s", type(exc).__name__)
             continue
         evaluated: list[dict] = []
         used_count = 0
@@ -308,7 +345,9 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
             applies = _decode_json(row.get("applicability"), {})
             try:
                 state = exp_memory.store.get_index_state(project, rid)
-            except Exception:
+            except Exception as exc:
+                # F3a: 失敗をログに残す(索引未確認=不採用側に倒す)。
+                LOGGER.warning("plan_case_reference index state failed: %s", type(exc).__name__)
                 state = None
             verdict, used_or_rejected, reason = _evaluate_row(
                 row, evidence, applies, input_version, extra, eligible_ids, state, current_identity)
@@ -333,8 +372,9 @@ def get_case_references(exp_memory, project: str, criteria, input_version: str,
             exp_memory.store.audit_retrieval(
                 project, query, [e["case_id"] for e in evaluated if e["used_or_rejected"] == "used"],
                 "plan_case_reference")
-        except Exception:
-            pass
+        except Exception as exc:
+            # F3a: 監査の失敗をログに残す(結果自体は返す。監査欠落を成功扱いにしない)。
+            LOGGER.warning("plan_case_reference audit failed: %s", type(exc).__name__)
         used = [e for e in evaluated if e["used_or_rejected"] == "used"]
         status = STATUS_REFERENCED if used else STATUS_REJECTED
         reason = "" if used else "候補はあったが適用条件の不一致等のため不採用"
@@ -359,8 +399,9 @@ def _persist_rows(exp_memory, project: str, plan_version: int, plan_signature: s
                     item.get("case_hash", ""), item.get("applicability_verdict", ""),
                     item.get("used_or_rejected", ""), str(item.get("reason", ""))[:2000],
                     str(item.get("excerpt", ""))[:2000], now))
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 監査保存の失敗をログに残す(結果自体は返す。欠けた監査を成功扱いにしない)。
+        LOGGER.warning("plan_case_reference persist failed: %s", type(exc).__name__)
 
 
 def _persist_marker(exp_memory, project: str, plan_version: int, plan_signature: str,
@@ -410,7 +451,9 @@ def current_input_version(manager, project_id: str, mission: dict | None = None)
                 "instruction_messages")},
             "files": sorted(inputs, key=lambda f: f["id"]),
         })
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(""=入力版を確認できず。呼び出し側は完全一致で不採用側に倒す)。
+        LOGGER.warning("plan_case_reference input version failed: %s", type(exc).__name__)
         return ""
 
 
@@ -425,7 +468,9 @@ def collect_for_current_plan(manager, project_id: str, criteria_input=None,
     pid = str(project_id or "").strip()
     try:
         mission = manager.memory.get_mission(pid)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(計画生成は呼び出し側が止めないが根拠欠けを明示)。
+        LOGGER.warning("plan_case_reference collect mission failed: %s", type(exc).__name__)
         return {"project": pid, "plan_version": 0, "plan_signature": "",
                 "note": "参考（達成証拠ではない）。" + REFERENCE_DISCLAIMER, "criteria": []}
     next_version = int(mission.get("plan_version") or 0) + 1
@@ -441,16 +486,19 @@ def collect_for_current_plan(manager, project_id: str, criteria_input=None,
                 preview = _gc.preview(manager, pid)
                 raw = (preview or {}).get("criteria") or []
                 criteria = normalize_criteria(raw)
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_case_reference collect contract failed: %s", type(exc).__name__)
                 criteria = []
         if not criteria:
             try:
                 from app.structured_planning import extract_criteria as _extract
                 statements = _extract(mission.get("goal") or "", mission.get("success_criteria") or "")
                 criteria = normalize_criteria(statements)
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_case_reference collect criteria failed: %s", type(exc).__name__)
                 criteria = []
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_case_reference collect normalize failed: %s", type(exc).__name__)
         criteria = []
     # 現行の入力版は計画生成を包む memory_scope と一致させる(自己申告値は信用しない)。
     input_version = ""
@@ -465,7 +513,9 @@ def collect_for_current_plan(manager, project_id: str, criteria_input=None,
             setting = configured_memory(manager.memory.path, pid)
             if setting is not None:
                 exp_memory, _mode = setting
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(後続で決定的に復元するため、ここでは継続)。
+        LOGGER.warning("plan_case_reference collect memory failed: %s", type(exc).__name__)
         exp_memory = None
     if exp_memory is None:
         try:
@@ -473,7 +523,8 @@ def collect_for_current_plan(manager, project_id: str, criteria_input=None,
             setting = _configured(manager.memory.path, pid)
             if setting is not None:
                 exp_memory, _mode = setting
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_case_reference collect memory retry failed: %s", type(exc).__name__)
             exp_memory = None
     if not input_version:
         # memory_scope外(テスト等の直接呼出し)では mission+原本から決定的に復元する。
@@ -497,13 +548,16 @@ def collect_for_current_plan(manager, project_id: str, criteria_input=None,
             value = mission.get(key)
             if value and key not in extra:
                 extra[key] = value
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 失敗をログに残す(追加条件なしで継続。不明条件は不採用側に倒す)。
+        LOGGER.warning("plan_case_reference collect extra failed: %s", type(exc).__name__)
     signature = plan_signature_for(pid, next_version, input_version, criteria)
     try:
         return get_case_references(exp_memory, pid, criteria, input_version,
                                    next_version, signature, extra)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(全条件unavailable。計画生成は止めないが根拠欠けを明示)。
+        LOGGER.warning("plan_case_reference collect references failed: %s", type(exc).__name__)
         out = {"project": pid, "plan_version": next_version, "plan_signature": signature,
                "input_version": input_version,
                "note": "参考（達成証拠ではない）。" + REFERENCE_DISCLAIMER, "criteria": []}
@@ -522,12 +576,15 @@ def current_view(memory_path, project_id: str, plan_version: int) -> dict:
     pid = str(project_id or "").strip()
     try:
         setting = configured_memory(memory_path, pid)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(下のunavailable分岐で根拠欠けを明示)。
+        LOGGER.warning("plan_case_reference current_view memory failed: %s", type(exc).__name__)
         setting = None
     if setting is None:
         try:
             _state = _l3_delete_state(memory_path, pid)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_case_reference current_view L3 failed: %s", type(exc).__name__)
             _state = "unknown"
         if _state == "unknown":
             suffix = "削除状態を確認できないため利用不可(状態を確定できません)。"
@@ -541,8 +598,9 @@ def current_view(memory_path, project_id: str, plan_version: int) -> dict:
     exp_memory, _mode = setting
     try:
         ensure_table(exp_memory.store)
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 失敗をログに残す(全行unavailable。no_caseにせず根拠欠けを明示)。
+        LOGGER.warning("plan_case_reference current_view table failed: %s", type(exc).__name__)
     rows: list[dict] = []
     signatures: list[str] = []
     try:
@@ -552,7 +610,9 @@ def current_view(memory_path, project_id: str, plan_version: int) -> dict:
                     "SELECT * FROM plan_case_references WHERE project=? AND plan_version=? "
                     "ORDER BY criterion_id, case_id",
                     (pid, int(plan_version or 0))).fetchall()
-            except Exception:
+            except Exception as exc:
+                # F3a: 失敗をログに残す(空=参照なしにせず、下でunavailable扱いに倒す)。
+                LOGGER.warning("plan_case_reference current_view fetch failed: %s", type(exc).__name__)
                 fetched = []
             for row in fetched:
                 item = dict(row)
@@ -576,7 +636,9 @@ def current_view(memory_path, project_id: str, plan_version: int) -> dict:
                         # 事例本文は最小限で返し、達成証拠としては表示しない。
                         "excerpt": str(item.get("excerpt", ""))[:MAX_CASE_CHARS],
                     })
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(空=参照なしにせず、下でunavailable扱いに倒す)。
+        LOGGER.warning("plan_case_reference current_view read failed: %s", type(exc).__name__)
         rows = []
     by_criterion: dict[str, list[dict]] = {}
     for item in rows:

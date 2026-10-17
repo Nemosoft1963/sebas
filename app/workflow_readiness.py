@@ -247,7 +247,13 @@ def _vehicle_view(manager, pid, mission) -> dict:
     if not applicable(mission):
         return view
     view['applicable'] = True
-    envelope = load_input(manager, pid)
+    try:
+        envelope = load_input(manager, pid)
+    except (ValueError, OSError, AttributeError, TypeError, KeyError):
+        # F2b関連の漏れ(計画外の理由を明記): envelope(入力証拠)の読取不能も
+        # 要確認として残す。load_input 失敗を正常扱い・黙殺しない(fail-closed)。
+        view['needs_review'] = True
+        return view
     view['envelope'] = envelope
     data = (envelope or {}).get('data') or {}
     issues = list((data.get('auto_extraction') or {}).get('issues') or [])
@@ -293,7 +299,10 @@ def _vehicle_view(manager, pid, mission) -> dict:
             path = str(output.get('path') or '')
             try:
                 target = resolve(manager, pid, path)
-            except Exception:
+            except (ValueError, OSError, AttributeError, TypeError, KeyError):
+                # F2b fail-closed: 成果物の解決不能を黙って飛ばさず、
+                # 要確認として残す(正常扱いにしない)。
+                view['needs_review'] = True
                 continue
             if not target.exists():
                 continue
@@ -302,7 +311,10 @@ def _vehicle_view(manager, pid, mission) -> dict:
             if path.endswith('.json'):
                 try:
                     body = read_json(target)
-                except Exception:
+                except (ValueError, OSError, AttributeError, TypeError, KeyError):
+                    # F2b fail-closed: 検証成果物の読取不能を黙って飛ばさず、
+                    # 要確認として残す(証拠不明→検証済みにしない)。
+                    view['needs_review'] = True
                     continue
                 if body.get('status') == 'needs_review' or body.get('issues'):
                     view['needs_review'] = True

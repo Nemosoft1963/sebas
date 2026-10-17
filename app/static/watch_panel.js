@@ -1,7 +1,7 @@
 (()=>{'use strict';
 function addText(parent,tag,text,className){const node=document.createElement(tag);node.textContent=text==null?'':String(text);if(className)node.className=className;parent.append(node);return node;}
 const SEVERITY_JA={info:'お知らせ',attention:'注意',alert:'要確認'};
-const KIND_JA={stop_appeared:'停止の出現',stop_changed:'停止の変化',stop_cleared:'停止の解消',criteria_progress:'達成条件の変化',autopilot_failed:'自走の失敗',read_failed:'読み取り不能',read_recovered:'読み取り回復',new_project:'新規PJ',project_removed:'PJの消失'};
+const KIND_JA={stop_appeared:'停止の出現',stop_changed:'停止の変化',stop_cleared:'停止の解消',criteria_progress:'達成条件の変化',autopilot_failed:'自走の失敗',read_failed:'読み取り不能',read_recovered:'読み取り回復',new_project:'新規PJ',project_removed:'PJの消失',capability_verified:'不足の解消',capability_still_remaining:'不足の残件',capability_stale:'古い提案'};
 const DECISION_KIND_JA={goal_plan_create:'目標と計画の作成',plan_approval:'計画承認',issue_binding:'指摘の採否',fact_confirm:'業務事実の確認',proposal_confirm:'不足機能の提案の確認',instruction_output:'指示の出力',evidence_confirm:'証拠の確認',unknown_confirm:'確認できず'};
 function severityText(severity){const s=String(severity||'');if(Object.prototype.hasOwnProperty.call(SEVERITY_JA,s))return SEVERITY_JA[s];return '確認できず';}
 function kindText(kind){const s=String(kind||'');if(Object.prototype.hasOwnProperty.call(KIND_JA,s))return KIND_JA[s];return '確認できず';}

@@ -148,26 +148,41 @@ def delete_state_status(memory_path: str | Path, project_id: str) -> str:
     pid = str(project_id)
     try:
         path = delete_db_path(memory_path)
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
+        LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+        return "unknown"
     except Exception as exc:
+        # F2c fail-closed: パス解決の想定外失敗も unknown(停止側)に倒す。
         LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
         return "unknown"
     try:
         if not path.exists():
-            # サイドカーDBが存在しないことは「未削除」(active)であり unknown ではない。
-            # 既存テストの monkeypatch 対象 (is_deleted) との互換のため、
-            # DBが無い場合だけ is_deleted の差し替え結果を尊重する。
+            # F2c fail-closed: DB無し時の is_deleted 確認不能は active にしない。
+            # DBが無い場合だけ is_deleted の差し替え結果を尊重するのは既存テスト互換の
+            # ためであり、確認不能(例外)時は unknown(停止側)に倒す。
             try:
                 if bool(is_deleted(memory_path, project_id)):
                     return "deleted"
-            except Exception:
-                pass
+            except (OSError, sqlite3.Error, ValueError, TypeError,
+                    AttributeError, KeyError, RuntimeError) as exc:
+                LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+                return "unknown"
+            except Exception as exc:
+                LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+                return "unknown"
             return "active"
         try:
             db = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
             db.row_factory = sqlite3.Row
-        except Exception as exc:
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, RuntimeError) as exc:
             if not path.exists():
                 return "active"
+            LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+            return "unknown"
+        except Exception as exc:
+            # F2c fail-closed: 想定外の接続失敗は unknown(停止側)に倒す。
+            # active 返却はDB無し・行無しの正常系のみに限る。
             LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
             return "unknown"
         try:
@@ -178,7 +193,12 @@ def delete_state_status(memory_path: str | Path, project_id: str) -> str:
                 row = db.execute(
                     "SELECT * FROM project_delete_states WHERE project_id=?",
                     (pid,)).fetchone()
+            except (OSError, sqlite3.Error, ValueError, TypeError,
+                    AttributeError, RuntimeError) as exc:
+                LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+                return "unknown"
             except Exception as exc:
+                # F2c fail-closed: 想定外の読取失敗も unknown(停止側)に倒す。
                 LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
                 return "unknown"
             if row is None:
@@ -186,22 +206,44 @@ def delete_state_status(memory_path: str | Path, project_id: str) -> str:
             state = str(dict(row).get("state") or "")
             return state if state in ("deleted", "purged", "restored") else "unknown"
         finally:
+            # F2c fail-closed: close 失敗は握りつぶさず記録するが、読み取った
+            # 状態判定自体は変えない(close の成否は削除状態の判定材料にしない)。
             try:
                 db.close()
+            except (OSError, sqlite3.Error, ValueError, TypeError,
+                    AttributeError, RuntimeError) as exc:
+                LOGGER.warning("project delete state close failed: %s", type(exc).__name__)
             except Exception as exc:
-                LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
-                return "unknown"
+                LOGGER.warning("project delete state close failed: %s", type(exc).__name__)
+    except (OSError, sqlite3.Error, ValueError, TypeError,
+            AttributeError, KeyError, RuntimeError) as exc:
+        LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+        return "unknown"
     except Exception as exc:
+        # F2c fail-closed: 外側の想定外失敗も unknown(停止側)に倒す。
         LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
         return "unknown"
 
 
 def is_deleted_or_unknown(memory_path: str | Path, project_id: str) -> bool:
-    """deleted/purged/unknown のとき True (fail-closed 用)。"""
+    """deleted/purged/unknown のとき True (fail-closed 用)。
+
+    F2c: 状態判定の失敗は True(停止側)。判定失敗を active(False)にしない。
+    想定外の例外も unknown 扱い(停止側)に倒し、型名だけをログに残す。
+    失敗は型名だけをログに残し、パスや内部情報は出さない。
+    """
     try:
-        return delete_state_status(memory_path, project_id) in ("deleted", "purged", "unknown")
-    except Exception:
-        return True
+        status = delete_state_status(memory_path, project_id)
+    except (OSError, sqlite3.Error, ValueError, TypeError,
+            AttributeError, KeyError, RuntimeError) as exc:
+        LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+        status = "unknown"
+    except Exception as exc:
+        # F2c fail-closed: 想定外の判定失敗も unknown(停止側)に倒す。
+        # ログに残すため握りつぶしではない。
+        LOGGER.warning("project delete state unreadable: %s", type(exc).__name__)
+        status = "unknown"
+    return status in ("deleted", "purged", "unknown")
 
 
 def list_deleted(memory_path: str | Path) -> list[dict[str, Any]]:
@@ -519,13 +561,8 @@ def request_delete(memory_path: str | Path, project_id: str, *,
                     "restore_hint": f"退避 {backup.get('backup_id')} は検証済みです。原因解消後に再実行してください",
                     "code": "DELETE_FAILED"}
         ret = get_retention_days(retention_days)
-        _set_state(memory_path, pid, "deleted", actor=actor_name,
-                   backup_id=str(backup.get("backup_id") or ""),
-                   manifest_sha256=str(backup.get("manifest_sha256") or ""),
-                   retention_days=ret)
-        _record_op(memory_path, pid, "delete", key, "ok", str(reason or "")[:500])
-        with _token_lock:
-            _tokens.pop(hashlib.sha256(str(preview_token).encode()).hexdigest(), None)
+        # F2c fail-closed: 監査の記録失敗を握りつぶさず、操作を失敗として返す。
+        # 状態を確定する前に監査し、失敗時は deleted にしない(成功を返さない)。
         try:
             from app.memory.short_term import ShortTermMemory
             mem = ShortTermMemory(Path(memory_path))
@@ -535,8 +572,26 @@ def request_delete(memory_path: str | Path, project_id: str, *,
                                              "actor": actor_name,
                                              "reason": str(reason or "")[:500]},
                                             ensure_ascii=False))
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            _record_op(memory_path, pid, "delete", key, "failed",
+                       f"audit failed: {type(exc).__name__}")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=str(backup.get("backup_id") or ""),
+                       manifest_sha256=str(backup.get("manifest_sha256") or ""),
+                       fail_reason="監査の記録に失敗したため削除を確定しません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "監査の記録に失敗したため削除を確定しません",
+                    "code": "AUDIT_FAILED",
+                    "backup_id": backup.get("backup_id")}
+        _set_state(memory_path, pid, "deleted", actor=actor_name,
+                   backup_id=str(backup.get("backup_id") or ""),
+                   manifest_sha256=str(backup.get("manifest_sha256") or ""),
+                   retention_days=ret)
+        _record_op(memory_path, pid, "delete", key, "ok", str(reason or "")[:500])
+        with _token_lock:
+            _tokens.pop(hashlib.sha256(str(preview_token).encode()).hexdigest(), None)
         st = get_delete_state(memory_path, pid)
         from app.project_lifecycle_registry import collect_external_items
         externals = collect_external_items(memory_path, pid)
@@ -644,6 +699,8 @@ def restore_deleted(memory_path: str | Path, project_id: str, *,
                    manifest_sha256=str(st.get("manifest_sha256") or ""),
                    retention_days=int(st.get("retention_days") or DEFAULT_RETENTION_DAYS))
         _record_op(memory_path, pid, "restore", key, "ok", "")
+        # F2c fail-closed: 監査の記録失敗を握りつぶさず、操作を失敗として返す。
+        # restored の状態確定後に監査するが、失敗時は復元成功を返さない。
         try:
             from app.memory.short_term import ShortTermMemory
             mem = ShortTermMemory(Path(memory_path))
@@ -651,8 +708,18 @@ def restore_deleted(memory_path: str | Path, project_id: str, *,
                           f"論理削除から復元: backup={backup_id}",
                           detail=json.dumps({"backup_id": backup_id, "actor": actor_name},
                                             ensure_ascii=False))
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            _record_op(memory_path, pid, "restore", key, "failed",
+                       f"audit failed: {type(exc).__name__}")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="監査の記録に失敗したため復元を確定しません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "監査の記録に失敗したため復元を確定しません",
+                    "code": "AUDIT_FAILED"}
         out_state = get_delete_state(memory_path, pid)
         return {"ok": True, "delete_state": out_state, "restored_rows": manifest.get("total_rows"),
                 "verified": True,
@@ -951,16 +1018,26 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
         except (OSError, ValueError):
             _ws_rel = ""
         removed = _purge_all_data(memory_path, pid, workspace_root, _ws_rel)
-        # Stage 2-B (追加のみ): export_packages/history は kind=other のため
-        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
-        # 実ファイルは _purge_all_data のWorkspace削除で当該PJスコープごと消える。
+        # F2c fail-closed: 補助purgeの失敗を握りつぶさず、失敗として返す。
+        # 当該PJの残存がありうるため完全削除の成功を返さない。
         try:
             from app.capability_export import purge_export_packages as _purge_exports
             _expurged = _purge_exports(memory_path, pid, workspace_root=None)
             removed["gap:export_packages"] = int((_expurged or {}).get("export_packages") or 0)
             removed["gap:export_history"] = int((_expurged or {}).get("export_history") or 0)
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            LOGGER.warning("aux purge export failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed", "aux purge export failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="接続表の完全削除に失敗しました:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "接続表の完全削除に失敗しました",
+                    "code": "AUX_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
         # Stage 2-D (追加のみ): gap_deliveries/verifications は kind=other のため
         # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
         try:
@@ -968,8 +1045,19 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
             _dpurged = _purge_deliveries(memory_path, pid)
             removed["gap:gap_deliveries"] = int((_dpurged or {}).get("gap_deliveries") or 0)
             removed["gap:gap_verifications"] = int((_dpurged or {}).get("gap_verifications") or 0)
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            LOGGER.warning("aux purge delivery failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed", "aux purge delivery failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="納品記録の完全削除に失敗しました:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "納品記録の完全削除に失敗しました",
+                    "code": "AUX_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
         # Stage 4-C (追加のみ): domain_pack_selection/events は kind=other のため
         # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
         # 選択は記録のみであり、実行の振り分けは変えない。
@@ -980,8 +1068,19 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
                 (_ppurged or {}).get("domain_pack_selection") or 0)
             removed["pack:domain_pack_events"] = int(
                 (_ppurged or {}).get("domain_pack_events") or 0)
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            LOGGER.warning("aux purge pack failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed", "aux purge pack failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="分野記録の完全削除に失敗しました:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "分野記録の完全削除に失敗しました",
+                    "code": "AUX_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
         # Stage3 (追加のみ): autopilot_config/ticks は kind=other のため
         # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
         try:
@@ -989,8 +1088,19 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
             _apurged = _purge_autopilot(memory_path, pid)
             removed["autopilot:autopilot_config"] = int((_apurged or {}).get("autopilot_config") or 0)
             removed["autopilot:autopilot_ticks"] = int((_apurged or {}).get("autopilot_ticks") or 0)
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            LOGGER.warning("aux purge autopilot failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed", "aux purge autopilot failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="自走記録の完全削除に失敗しました:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "自走記録の完全削除に失敗しました",
+                    "code": "AUX_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
         # C-1/C-2 (追加のみ): watch_snapshots/events は kind=other のため
         # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
         try:
@@ -1035,6 +1145,63 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
             return {"ok": False,
                     "reason": "夜間実行の記録を完全削除できません",
                     "code": "NIGHTRUN_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # C-4 (追加のみ): shadow_records/label_history/overrides は kind=other の
+        # ため _purge_all_data では触れない。当該PJ行だけ消す
+        # (他PJに影響しない)。history は project_id で消える行だけ消す。
+        try:
+            from app.shadow_mode import purge_project_shadow as _purge_shadow
+            _spurged = _purge_shadow(memory_path, pid)
+            if not isinstance(_spurged, dict) or not all(
+                    key in _spurged for key in ("shadow_records",
+                                                "shadow_label_history",
+                                                "shadow_overrides")):
+                raise ValueError("shadow purge result unavailable")
+            removed["shadow:shadow_records"] = int(
+                _spurged["shadow_records"])
+            removed["shadow:shadow_label_history"] = int(
+                _spurged["shadow_label_history"])
+            removed["shadow:shadow_overrides"] = int(
+                _spurged["shadow_overrides"])
+        except Exception as exc:
+            LOGGER.warning("shadow purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed",
+                       "shadow purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="影の記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "影の記録を完全削除できません",
+                    "code": "SHADOW_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # E-1/E-2 (追加のみ): ledger_snapshots/decisions は kind=other の
+        # ため _purge_all_data では触れない。台帳はPJごとの行を持たないが、
+        # detail にPJ IDを含む場合は匿名化する (他PJに影響しない)。
+        try:
+            from app.outcome_ledger import purge_project_ledger as _purge_ledger
+            _lpurged = _purge_ledger(memory_path, pid)
+            if not isinstance(_lpurged, dict) or not all(
+                    key in _lpurged for key in ("ledger_snapshots",
+                                                "ledger_suggestion_decisions")):
+                raise ValueError("ledger purge result unavailable")
+            removed["ledger:ledger_snapshots"] = int(
+                _lpurged["ledger_snapshots"])
+            removed["ledger:ledger_suggestion_decisions"] = int(
+                _lpurged["ledger_suggestion_decisions"])
+        except Exception as exc:
+            LOGGER.warning("ledger purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed",
+                       "ledger purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="成果台帳の記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "成果台帳の記録を完全削除できません",
+                    "code": "LEDGER_PURGE_FAILED", "removed": removed,
                     "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
         orphans = list_orphans_after_legacy_delete(memory_path, pid, workspace_root)
         if orphans.get("orphan_count"):

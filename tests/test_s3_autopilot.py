@@ -714,9 +714,24 @@ def test_api_autopilot_crud_and_readonly(tmp_path, monkeypatch):
     assert client.post(f"/api/projects/{pid}/autopilot/enable",
                        json={"actor": "架空担当"}).status_code == 422
     enabled = client.post(f"/api/projects/{pid}/autopilot/enable",
-                          json={"actor": "架空担当", "reason": "架空理由"})
+                          json={"actor": "架空担当", "reason": "架空理由",
+                                "gate_override_reason": "C-4関門の未達を理由付きで無視します"})
     assert enabled.status_code == 200
     assert enabled.json()["enabled"] is True
+    # C-4: Web経路の有効化は影モードの関門を通る。影の記録が無い
+    # 新規PJは関門未達のため、オーバーライド理由なしでは409になる。
+    # 上の有効化は理由付きの無視として記録される。
+    gated = client.post(f"/api/projects/{pid}/autopilot/disable",
+                        json={"actor": "架空担当", "reason": "架空理由"})
+    assert gated.status_code == 200
+    blocked = client.post(f"/api/projects/{pid}/autopilot/enable",
+                          json={"actor": "架空担当", "reason": "架空理由"})
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["gate"]["passed"] is False
+    re_enabled = client.post(f"/api/projects/{pid}/autopilot/enable",
+                             json={"actor": "架空担当", "reason": "架空理由",
+                                   "gate_override_reason": "C-4関門の未達を理由付きで無視します"})
+    assert re_enabled.status_code == 200
     # tick (1ティック) と dry_run
     _seed_missing_coverage(manager, pid)
     ticked = client.post(f"/api/projects/{pid}/autopilot/tick",

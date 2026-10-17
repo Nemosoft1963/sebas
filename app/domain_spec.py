@@ -25,6 +25,7 @@ ID は validate_spec() で拒否する。
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import sqlite3
 import threading
@@ -39,6 +40,8 @@ from app.capability_gap import (
     _contract_operations,
 )
 from app.capability_registry import DEFINITIONS
+
+LOGGER = logging.getLogger(__name__)
 
 SCHEMA = "sebas.domain-spec/v1"
 
@@ -517,7 +520,10 @@ def _task_contract(task: dict):
         from app.structured_planning import contract_of
 
         return contract_of(task)
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す。Noneは「判定不能」(呼び出し側がunknown側に倒す)。
+        # 契約なし(contract_ofがNone)を読取不能と混同しない。
+        LOGGER.warning("domain_spec _task_contract failed: %s", type(exc).__name__)
         return None
 
 
@@ -557,8 +563,11 @@ def _task_external_operations(contract: dict) -> list[str]:
     found: list[str] = []
     try:
         operations = _contract_operations(contract) or []
-    except Exception:
-        return []
+    except Exception as exc:
+        # F3a: 失敗をログに残し伝播する(空リストで「外部作用なし」にしない)。
+        # _check_taskは広いexceptでunknownに倒すため、ここで握りつぶさない。
+        LOGGER.warning("domain_spec _task_external_operations failed: %s", type(exc).__name__)
+        raise
     for operation in operations:
         if operation in _EXTERNAL_TASK_OPERATIONS and operation not in found:
             found.append(operation)
@@ -913,13 +922,17 @@ def _check_secret(*values: object) -> str:
     """秘密混入の疑いがあれば種別ラベル、なければ空文字。値は返さない。"""
     try:
         from app.plan_review_loop import contains_secret
-    except Exception:
-        return ""
+    except Exception as exc:
+        # F3a: import失敗を握りつぶして空文字(検査済み扱い)にしない。呼び出し側は
+        # select_pack/clear_packで記録を拒否する(秘密検査不能=安全側)。
+        LOGGER.warning("domain_spec _check_secret import failed: %s", type(exc).__name__)
+        return "検査不能"
     for value in values:
         try:
             label = contains_secret(str(value or ""))
-        except Exception:
+        except Exception as exc:
             # 検査自体が失敗したら安全側に倒す (記録しない)。
+            LOGGER.warning("domain_spec _check_secret check failed: %s", type(exc).__name__)
             return "検査不能"
         if label:
             return str(label)

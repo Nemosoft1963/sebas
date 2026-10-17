@@ -666,11 +666,16 @@ async def resume(manager, project_id: str, executor=None, retry_limit: int = MAX
                             retry_count=attempts, retry_limit=retry_limit)
                 # P4 re-evaluation hook: additive. Its failure never removes the
                 # completion record itself (but never marks resolved either).
+                # F2a fail-closed: 再評価の失敗は握りつぶさず狭い例外で記録する。
                 try:
                     _post_completion_reevaluation(
                         manager, project_id, key, {**row, "task_key": key})
-                except Exception:
-                    pass
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+                    row["reeval_error"] = type(exc).__name__
+                    _save(manager, project_id, key, ih, idem, artifact_hash=str(evidence["artifact_hash"]),
+                          run_id=run_id, status="completed", evidence=json.dumps(proof, ensure_ascii=False),
+                          retry_count=attempts, retry_limit=retry_limit,
+                          failure_kind="", error=f"reeval_failed:{type(exc).__name__}")
                 completed[key] = {**row, "task_key": key}
                 task_completed.add(key)
                 executed.append(key)

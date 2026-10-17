@@ -332,7 +332,9 @@ class ShortTermMemory:
             for it in items:
                 try:
                     state = _l3_delete_state(self.path, str(it.get("id") or ""))
-                except Exception:
+                except Exception as exc:
+                    # F3a: 確認不能をログに残す(「確認できず」としてunknown扱い=表示側)。
+                    LOGGER.warning("project list delete state check failed: %s", type(exc).__name__)
                     state = "unknown"
                 if state in ("deleted", "purged"):
                     continue
@@ -341,7 +343,9 @@ class ShortTermMemory:
                     LOGGER.warning("project list delete state unknown")
                 kept.append(it)
             items = kept
-        except Exception:
+        except Exception as exc:
+            # F3a: 外側の確認不能もログに残す(フィルタ不能=全件表示側に倒す。削除済みを見せない保証はしない)。
+            LOGGER.warning("project list delete filter failed: %s", type(exc).__name__)
             pass
         return items
 

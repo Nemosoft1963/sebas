@@ -3,13 +3,13 @@ function addText(parent,tag,text,className){const node=document.createElement(ta
 function currentPid(){return (document.getElementById('projectSelect')||{}).value||'';}
 async function apiGet(path){
  const r=await fetch('/api/projects/'+encodeURIComponent(currentPid())+'/lifecycle'+path);
- const d=await r.json().catch(()=>({}));
+ const d=await r.json().catch((parseErr)=>{throw Error('削除状態を確認できず。再読み込みしてください');});
  if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:String((d&&d.detail&&d.detail.message)||d.reason||('HTTP '+r.status)));
  return d;
 }
 async function apiPost(path,body){
  const r=await fetch('/api/projects/'+encodeURIComponent(currentPid())+'/lifecycle'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
- const d=await r.json().catch(()=>({}));
+ const d=await r.json().catch((parseErr)=>{throw Error('削除操作の応答を確認できず。再読み込みしてください');});
  if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:String((d&&d.detail&&d.detail.message)||d.reason||('HTTP '+r.status)));
  return d;
 }
@@ -40,7 +40,7 @@ async function loadDeleted(host){
  host.replaceChildren();addText(host,'p','削除済み一覧を読込中…');
  try{
   const r=await fetch('/api/projects/deleted/list');
-  const d=await r.json().catch(()=>({}));
+  const d=await r.json().catch((parseErr)=>{throw Error('削除済み一覧を取得できず。再読み込みしてください');});
   if(!r.ok)throw Error('HTTP '+r.status);
   const rows=(d&&d.deleted)||[];
   host.replaceChildren();
@@ -61,10 +61,10 @@ async function loadDeleted(host){
      try{
       const pid=currentPid();
       const rr=await fetch('/api/projects/'+encodeURIComponent(g.project_id)+'/lifecycle/delete-restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({actor:actor,idempotency_key:'ui-restore-'+String(Date.now())})});
-      const out=await rr.json().catch(()=>({}));
+      const out=await rr.json().catch((parseErr)=>{throw Error('復元の応答を確認できず。再読み込みしてください');});
       if(!rr.ok)throw Error(typeof out.detail==='string'?out.detail:String(out.reason||('HTTP '+rr.status)));
       if(statusEl)statusEl.textContent='復元しました。件数とハッシュが退避と一致しました。';
-      if(String(g.project_id)===pid){try{location.reload();}catch(e){}}
+      if(String(g.project_id)===pid){try{location.reload();}catch(e){if(statusEl)statusEl.textContent='復元しました。ただし画面の再読み込みに失敗しました。ページを手動で再読み込みしてください。';}}
       await loadDeleted(host);
      }catch(e){if(statusEl)statusEl.textContent=e.message||'復元できませんでした';}
     };

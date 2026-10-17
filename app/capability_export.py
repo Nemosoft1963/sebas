@@ -116,7 +116,8 @@ def get_base_ref(app_root: str | Path | None = None) -> str:
         try:
             h = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
-            continue
+            # A partial source tree is not a trustworthy base revision.
+            return "unknown"
         digest.update(path.name.encode("utf-8"))
         digest.update(b":")
         digest.update(h.encode("utf-8"))
@@ -182,7 +183,9 @@ def _connect(manager_or_path):
                 from app.capability_gap import _ensure_tables as _ensure_gap
 
                 _ensure_gap(db)
-            except Exception:
+            except sqlite3.Error:
+                # F2b fail-closed: 2-A表の確保失敗はDB層の想定内のみ許容し、
+                # 想定外は握りつぶさず伝播させる(成功・0件扱いにしない)。
                 pass
             _ensure_export_tables(db)
         yield db
@@ -446,6 +449,231 @@ def _read_file_bytes(path: Path) -> bytes | None:
         return path.read_bytes()
     except OSError:
         return None
+
+
+#: D-1b 指示パッケージの取得APIが読む3点 (固定。順序は決定的)。
+PACKAGE_FILENAMES = ("instruction.json", "REQUEST.md", "manifest.json")
+
+
+def _package_file_error_ja(kind: str, name: str, type_name: str) -> str:
+    base = str(kind or "確認できず")
+    target = str(name or "不明なファイル")
+    suffix = str(type_name or "Error")
+    if "欠" in base or "missing" in base.lower():
+        return f"指示パッケージが欠けています({target})。空や成功にしません:{suffix}"
+    if "読" in base or "read" in base.lower():
+        return f"指示パッケージを読めません({target})。空や成功にしません:{suffix}"
+    return f"{base}({target}):{suffix}"
+
+
+def _package_within(parent_resolved: Path, candidate: Path) -> bool:
+    """候補パスが親配下に収まるか (絶対パス・.. の逸脱を拒否)。"""
+    try:
+        candidate.relative_to(parent_resolved)
+        return True
+    except ValueError:
+        return False
+
+
+def read_package(manager, project_id: str, proposal_id: str) -> dict:
+    """D-1b 指示パッケージの取得 (読み取り専用。一般機構)。
+
+    状態が export_ready/submitted の提案だけ対象。書き出し済みの3点全文と
+    base_ref・各SHA-256を返す。返す前に必ず検証する (マニフェスト対実測・
+    content_hash一致・収容パス)。1つでも検証できなければ ok:false と理由
+    (日本語・型名まで) を返し、中身は返さない (fail-closed)。
+    何も書き込まない (状態・監査・ファイル不変。DBは読取接続のみ)。
+    """
+    from app.capability_gap import get_proposal
+
+    pid = str(project_id or "")
+    target_id = str(proposal_id or "")
+    if pid == "":
+        return {"ok": False, "reason": "project_id が必要です:ValueError"}
+    if not is_safe_proposal_id(target_id):
+        return {"ok": False, "reason": "proposal_id が不正です:ValueError"}
+    try:
+        proposal = get_proposal(manager, target_id)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return {"ok": False,
+                "reason": f"提案を確認できません:{type(exc).__name__}"}
+    if proposal is None or str(proposal.get("project_id") or "") != pid:
+        return {"ok": False, "reason": "提案が見つかりません:ValueError"}
+    status = str(proposal.get("status") or "")
+    if status not in ("export_ready", "submitted"):
+        return {"ok": False,
+                "reason": f"状態 {status} では指示パッケージを取得できません:"
+                          "ValueError"}
+    content_hash = str(proposal.get("content_hash") or "")
+    if content_hash == "":
+        return {"ok": False,
+                "reason": "提案の内容ハッシュを確認できません:ValueError"}
+    try:
+        exported = get_export(manager, target_id)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return {"ok": False,
+                "reason": f"書き出し記録を確認できません:{type(exc).__name__}"}
+    if exported is None:
+        return {"ok": False,
+                "reason": "書き出し記録がありません。空や成功にしません:"
+                          "ValueError"}
+    if str(exported.get("project_id") or "") != pid:
+        return {"ok": False, "reason": "提案が見つかりません:ValueError"}
+    if str(exported.get("content_hash") or "") != content_hash:
+        return {"ok": False,
+                "reason": "提案の内容ハッシュと書き出し記録が一致しません。"
+                          "空や成功にしません:ValueError"}
+    base_ref = str(exported.get("base_ref") or "")
+    if base_ref == "":
+        return {"ok": False,
+                "reason": "基準版を確認できません。空や成功にしません:"
+                          "ValueError"}
+    try:
+        scope = _resolve_scope_dir(manager, pid)
+    except ValueError as exc:
+        return {"ok": False, "reason": f"{exc}:ValueError"}
+    except (OSError, AttributeError) as exc:
+        return {"ok": False,
+                "reason": f"出力先を確認できません:{type(exc).__name__}"}
+    parent, final, _rel = _package_paths(scope, target_id)
+    if parent.is_symlink():
+        return {"ok": False,
+                "reason": "出力先の親がシンボリックリンクのため拒否します:ValueError"}
+    try:
+        parent_resolved = parent.resolve()
+    except OSError as exc:
+        return {"ok": False,
+                "reason": f"出力先を確認できません:{type(exc).__name__}"}
+    # パスの逸脱を拒否 (..・絶対パス・シンボリックリンク)。
+    if final.is_symlink():
+        return {"ok": False,
+                "reason": "出力先がシンボリックリンクのため拒否します。"
+                          "空や成功にしません:ValueError"}
+    try:
+        final_resolved = final.resolve()
+    except OSError as exc:
+        return {"ok": False,
+                "reason": f"出力先を確認できません:{type(exc).__name__}"}
+    if not _package_within(parent_resolved, final_resolved):
+        return {"ok": False,
+                "reason": "出力先が書き出し先の外のため拒否します。"
+                          "空や成功にしません:ValueError"}
+    if final_resolved.name != target_id:
+        return {"ok": False,
+                "reason": "出力先の名前が提案と一致しません。"
+                          "空や成功にしません:ValueError"}
+    raw: dict[str, bytes] = {}
+    for name in PACKAGE_FILENAMES:
+        candidate = final / name
+        if candidate.is_symlink():
+            return {"ok": False,
+                    "reason": "シンボリックリンクのファイルのため拒否します"
+                              f"({name})。空や成功にしません:ValueError"}
+        try:
+            candidate_resolved = candidate.resolve()
+        except OSError as exc:
+            return {"ok": False, "reason": _package_file_error_ja(
+                "読めません", name, type(exc).__name__)}
+        if not _package_within(final_resolved, candidate_resolved):
+            return {"ok": False,
+                    "reason": f"書き出し先の外のファイルのため拒否します({name})。"
+                              "空や成功にしません:ValueError"}
+        try:
+            if not candidate.is_file():
+                return {"ok": False, "reason": _package_file_error_ja(
+                    "欠けています", name, "ValueError")}
+            data = candidate.read_bytes()
+        except OSError as exc:
+            return {"ok": False, "reason": _package_file_error_ja(
+                "読めません", name, type(exc).__name__)}
+        raw[name] = data
+    try:
+        manifest = json.loads(raw["manifest.json"].decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        return {"ok": False,
+                "reason": "マニフェストを読めません。空や成功にしません:"
+                          + type(exc).__name__}
+    except ValueError as exc:
+        return {"ok": False,
+                "reason": "マニフェストの形式を確認できません。空や成功にしません:"
+                          + type(exc).__name__}
+    if not isinstance(manifest, dict):
+        return {"ok": False,
+                "reason": "マニフェストの形式を確認できません。空や成功にしません:"
+                          "TypeError"}
+    files_map = manifest.get("files")
+    if not isinstance(files_map, dict):
+        return {"ok": False,
+                "reason": "マニフェストにファイル一覧がありません。空や成功にしません:"
+                          "ValueError"}
+    if str(manifest.get("proposal_id") or "") != target_id:
+        return {"ok": False,
+                "reason": "マニフェストの提案が一致しません。空や成功にしません:"
+                          "ValueError"}
+    computed: dict[str, str] = {}
+    for name in PACKAGE_FILENAMES:
+        computed[name] = _sha256_bytes(raw[name])
+    if (str(files_map.get("instruction.json") or "") != computed["instruction.json"]
+            or str(files_map.get("REQUEST.md") or "")
+            != computed["REQUEST.md"]):
+        return {"ok": False,
+                "reason": "マニフェストのハッシュと実ファイルが一致しません。"
+                          "空や成功にしません:ValueError"}
+    if str(exported.get("instruction_sha256") or "") != computed["instruction.json"]:
+        return {"ok": False,
+                "reason": "書き出し記録と実ファイルが一致しません"
+                          "(instruction.json)。空や成功にしません:ValueError"}
+    if str(exported.get("request_sha256") or "") != computed["REQUEST.md"]:
+        return {"ok": False,
+                "reason": "書き出し記録と実ファイルが一致しません(REQUEST.md)。"
+                          "空や成功にしません:ValueError"}
+    if str(exported.get("manifest_sha256") or "") != computed["manifest.json"]:
+        return {"ok": False,
+                "reason": "書き出し記録と実ファイルが一致しません(manifest.json)。"
+                          "空や成功にしません:ValueError"}
+    try:
+        instruction = json.loads(raw["instruction.json"].decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        return {"ok": False,
+                "reason": "指示ファイルを読み取れません。空や成功にしません:"
+                          + type(exc).__name__}
+    except ValueError as exc:
+        return {"ok": False,
+                "reason": "指示ファイルの形式を確認できません。空や成功にしません:"
+                          + type(exc).__name__}
+    if not isinstance(instruction, dict):
+        return {"ok": False,
+                "reason": "指示ファイルの形式を確認できません。空や成功にしません:"
+                          "TypeError"}
+    if str(instruction.get("proposal_id") or "") != target_id:
+        return {"ok": False,
+                "reason": "指示ファイルの提案が一致しません。空や成功にしません:"
+                          "ValueError"}
+    if str(instruction.get("content_hash") or "") != content_hash:
+        return {"ok": False,
+                "reason": "指示ファイルの内容ハッシュが提案と一致しません。"
+                          "空や成功にしません:ValueError"}
+    texts: dict[str, str] = {}
+    for name in PACKAGE_FILENAMES:
+        try:
+            texts[name] = raw[name].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return {"ok": False,
+                    "reason": _package_file_error_ja(
+                        "読めません", name, type(exc).__name__)}
+    # 応答に秘密値・内部の絶対パスを入れない (相対名とハッシュのみ)。
+    return {
+        "ok": True,
+        "proposal_id": target_id,
+        "status": status,
+        "base_ref": base_ref,
+        "files": {"instruction.json": texts["instruction.json"],
+                     "REQUEST.md": texts["REQUEST.md"],
+                     "manifest.json": texts["manifest.json"]},
+        "sha256": {"instruction.json": computed["instruction.json"],
+                      "REQUEST.md": computed["REQUEST.md"],
+                      "manifest.json": computed["manifest.json"]},
+    }
 
 
 def _cleanup_tmp(tmp: Path) -> None:

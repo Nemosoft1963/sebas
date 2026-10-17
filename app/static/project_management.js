@@ -10,7 +10,7 @@ const add=(parent,tag,value,className)=>{
 const currentPid=()=>String((byId('projectSelect')||{}).value||'');
 async function request(url,options){
   const response=await fetch(url,options);
-  const body=await response.json().catch(()=>({}));
+  const body=await response.json().catch((parseErr)=>{throw Error('状態を取得できず。再読み込みしてください');});
   if(!response.ok){
     const detail=body.detail;
     throw Error(typeof detail==='string'?detail:String((detail&&detail.message)||body.reason||('HTTP '+response.status)));

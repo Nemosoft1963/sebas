@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from app.triz_common import validate_problem
 from app.vehicle_workflow import digest, resolve, write_json
+
+LOGGER = logging.getLogger(__name__)
 
 # 設計書 第7章の状態機械。artifact_trials_complete / encoding 復元を業務成功としない。
 TRIZ_STATES = (
@@ -279,8 +282,9 @@ def save_vehicle_failure(manager, pid, task, error, library_items=None) -> dict:
             pid, 'automatic_triz', '車両失敗からTRIZ課題を保存（業務回復ではない）',
             task['id'], json.dumps({'path': str(path), 'status': result['status']}, ensure_ascii=False),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 監査の失敗をログに残す(保存JSON自体は成功。監査欠落を成功扱いにしない)。
+        LOGGER.warning("automatic_triz save_vehicle_failure audit failed: %s", type(exc).__name__)
     return result
 
 
@@ -566,8 +570,9 @@ async def on_failure(manager, pid, task, error):
                 task['id'], json.dumps({'path': str(path), 'status': result['status'],
                                         'exclusion_code': exclusion['code']}, ensure_ascii=False),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # F3a: 監査の失敗をログに残す(保存JSON自体は成功。監査欠落を成功扱いにしない)。
+            LOGGER.warning("automatic_triz on_failure audit failed: %s", type(exc).__name__)
         return result
     resources = [x for x in manager.memory.list_context_files(pid, include_content=True) if x.get('source') != 'memo']
     problem = frame(mission, task, error, resources)

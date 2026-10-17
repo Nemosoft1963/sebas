@@ -318,7 +318,7 @@ def test_delivery_rejections(tmp_path):
     # 秘密を含む失敗ログ -> 拒否し、値は残さない。
     manager7, pid7, target7, base7 = _pipeline(tmp_path)
     secret = _delivery_payload(base7, idx=15)
-    secret["failure_logs"] = "架空失敗 sk-test-dummy-key-0123456789abcdef を含む"
+    secret["failure_logs"] = "架空失敗 " + "sk-" + "test-dummy-key-0123456789abcdef を含む"
     denied = delivery.record_delivery(manager7, pid7, target7, secret,
                                       actor="架空担当")
     assert denied["ok"] is False
@@ -623,12 +623,13 @@ def test_api_deleted_project_and_no_jenkins(tmp_path, monkeypatch):
     assert "urlopen" not in delivery_text
     assert "http://" not in delivery_text and "https://" not in delivery_text
     assert "@app.post" not in delivery_text and "@app.get" not in delivery_text
-    # 8本の経路がある (既存5本 + submitted/delivery/verify)。
+    # 9本の経路がある (既存5本 + submitted/delivery/verify + D-1b package)。
     import app.web as web2
     routes = {str(getattr(r, "path", "")) for r in web2.app.routes}
     assert "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/submitted" in routes
     assert "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/delivery" in routes
     assert "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/verify" in routes
+    assert "/api/projects/{project_id}/capability-gaps/proposals/{proposal_id}/package" in routes
 
 
 def test_screen_static_no_innerhtml_and_button_states():

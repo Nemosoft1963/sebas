@@ -43,10 +43,11 @@ async def tick(manager):
     for pid,signature,row in rows:
         if row.get('status')!='waiting_budget' or row.get('next_at',0)>time.time():continue
         # L3: 論理削除中・削除状態が確認できないPJは自動評価ループから除外する (新規実行しない)。
+        # F2a fail-closed: 確認不能は除外(停止側)に倒す。狭い例外だけ受け、通過させない。
         try:
             if _l3_is_deleted is not None and _l3_is_deleted(manager.memory.path, pid):
                 continue
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError):
             continue
         try:
             mission=manager.memory.get_mission(pid)
@@ -64,7 +65,7 @@ async def tick(manager):
                 row['next_at']=budget.get('reset_at',time.time()+3600);store.put(pid,'plan_queue',signature,row);continue
             row['attempts']=row.get('attempts',0)+1;row['status']='running';store.put(pid,'plan_queue',signature,row)
             await review_plan(manager,pid,signature,row['public_summary'],True,row.get('task_id'))
-        except Exception as exc:
+        except (ValueError, TypeError, RuntimeError, KeyError, OSError) as exc:
             if (store.get(pid,'plan_queue',signature) or {}).get('status')=='cancelled':continue
             row.update(status='waiting_budget',next_at=time.time()+3600,last_error=type(exc).__name__)
             store.put(pid,'plan_queue',signature,row)
@@ -96,6 +97,8 @@ def recover_interrupted(store):
 async def loop(manager):
     recover_interrupted(ReviewStore(manager.memory.path))
     while True:
+        # F2a: デーモンの継続判定は狭い例外だけ受ける。tick失敗は成功にしない。
         try:await tick(manager)
-        except Exception:pass
+        except (ValueError, TypeError, RuntimeError, OSError, KeyError):
+            pass
         await asyncio.sleep(30)

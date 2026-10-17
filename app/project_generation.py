@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -26,6 +27,8 @@ from app.project_lifecycle_registry import (
     count_all,
     resolve_db_path,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 GENERATION_FORMAT = "l2-generation/1"
 PREVIEW_TOKEN_TTL_SEC = 10 * 60
@@ -913,8 +916,9 @@ def initialize_project(memory_path: str | Path, project_id: str, mode: str, *,
                                              "backup_id": backup.get("backup_id"),
                                              "input_version": new_input_version},
                                             ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as exc:
+            # F3a: 監査の失敗をログに残す(世代確定自体は成功。監査欠落を成功扱いにしない)。
+            LOGGER.warning("project_generation initialize audit failed: %s", type(exc).__name__)
         return {"ok": True, "generation_id": gid, "generation": new_gen_no,
                 "mode": mode, "backup_id": backup.get("backup_id"),
                 "manifest_sha256": backup.get("manifest_sha256"),
@@ -1049,8 +1053,9 @@ def restore_generation(memory_path: str | Path, project_id: str, backup_id: str,
                           detail=json.dumps({"generation_id": gid, "backup_id": safe,
                                              "current_backup_id": cur_backup.get("backup_id")},
                                             ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as exc:
+            # F3a: 監査の失敗をログに残す(復元確定自体は成功。監査欠落を成功扱いにしない)。
+            LOGGER.warning("project_generation restore audit failed: %s", type(exc).__name__)
         return {"ok": True, "generation_id": gid, "generation": new_gen_no,
                 "restored_backup_id": safe,
                 "current_backup_id": cur_backup.get("backup_id"),

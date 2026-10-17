@@ -109,7 +109,8 @@ def from_mission(mission: dict, manager=None, project_id: str = "") -> dict:
                 "test_method": item["test_method"],
                 "required_evidence": list(item.get("required_evidence") or []),
                 "human_decision_required": bool(item.get("human_decision_required")),
-                "weight": float(item.get("weight") or 1),
+                # F2c fail-closed: weight 欠落・0 は 1 で補わない(配分をずらさない)。
+                "weight": _criterion_weight(item.get("weight")),
                 "source_spans": _spans(goal + "\n" + success, item.get("topics") or []),
                 "exec_task_keys": list(item.get("exec_task_keys") or []),
                 "verify_task_keys": list(item.get("verify_task_keys") or []),
@@ -156,6 +157,25 @@ def from_mission(mission: dict, manager=None, project_id: str = "") -> dict:
     payload["retention"] = inspect_retention(mission, payload)
     payload["content_hash"] = content_hash(payload)
     return payload
+
+
+def _criterion_weight(raw: Any) -> float:
+    """契約の重み。欠落・0・負・非数値は例外(1で補わない・配分をずらさない)。
+
+    文字列の "1.2" は既存の float() 互換として受け入れる(挙動を弱めない)。
+    bool は重みとして受け入れない。
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise ValueError("criterion weight is missing")
+    if isinstance(raw, bool):
+        raise ValueError("criterion weight is invalid")
+    try:
+        weight = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("criterion weight is invalid")
+    if not (weight > 0) or weight != weight or weight in (float("inf"), float("-inf")):
+        raise ValueError("criterion weight is invalid")
+    return weight
 
 
 def _spans(text: str, topics: list[str]) -> list[dict]:

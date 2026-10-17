@@ -2,6 +2,7 @@
 from __future__ import annotations
 import csv
 import io
+import logging
 import re
 import unicodedata
 from collections import defaultdict
@@ -9,6 +10,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Literal
+
+LOGGER = logging.getLogger(__name__)
 
 CATEGORIES = ('revenue', 'payroll', 'insurance', 'fuel', 'toll', 'lease', 'other')
 VERSION = 'vehicle-auto-v1'
@@ -1541,7 +1544,9 @@ def prepare(manager,pid,mission):
         item=manager.memory.get_context_file(pid,source['id']);raw=item.get('original_data');content=item.get('content','')
         if raw and Path(source['filename']).suffix.lower() not in ('.xlsx','.xlsm'):
             try:content=extract_context_file(source['filename'],bytes(raw)).content
-            except Exception:pass
+            except Exception as exc:
+                # F3a: 失敗をログに残す(原文のまま継続。復元候補扱いにしない)。
+                LOGGER.warning("vehicle_auto context extract failed: %s", type(exc).__name__)
         docs.append((source,bytes(raw) if raw else None,content))
     months=requested_months(mission);zero=authorized_zero(mission)
     from app.capability_registry import ocr_feature_enabled

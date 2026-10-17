@@ -14,7 +14,11 @@ artifact_trial_passed ≠ business_recovered を維持する)。
 """
 from __future__ import annotations
 
+import logging
+
 from app.automatic_triz import ALLOWED_ADAPTER_FUNCTIONS, KNOWN_P0_ERROR_CODES
+
+LOGGER = logging.getLogger(__name__)
 
 RISK_NOTE = (
     "順位は隔離試験の対象順であり、採用・成功を意味しない。"
@@ -98,7 +102,9 @@ def _is_registered_capability(capability: str) -> bool:
         from app.triz_adapters import CAPABILITIES
         entry = CAPABILITIES.get(cap) or {}
         return bool(entry.get("available"))
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(False=未登録扱いで降格。登録済み扱いにしない)。
+        LOGGER.warning("triz_candidate_ranking capability check failed: %s", type(exc).__name__)
         return False
 
 

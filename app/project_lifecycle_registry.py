@@ -409,6 +409,42 @@ def build_registry() -> list[RegistryEntry]:
             backup_method="nightrun-sidecar-preserved",
             delete_method_declared="C3-nightrun-purge (purge_project_nightrun)",
         ))
+    # C-4: 影モード (サイドカーSQLite: *.shadow.sqlite3 の
+    # shadow_records / shadow_label_history / shadow_overrides)。kind は同様に
+    # "other" とし、件数テストの対象外にする。網羅性検証では table 名で登録扱いに
+    # なる。shadow_label_history はPJごとの行を持つが、record_id経由の従属であり
+    # purge時は project_id で消える行だけ消す (他PJに影響しない)。退避は
+    # sidecar-preserved (行複写対象外)、PJ初期化では記録を変えず
+    # (reset_for_generation)、完全削除では purge_project_shadow で当該PJ行を
+    # 消す。IDと状態のみ。秘密・原本本文を入れない。
+    for _t in ("shadow_records", "shadow_label_history", "shadow_overrides"):
+        entries.append(RegistryEntry(
+            name=f"shadow:{_t}", kind="other", db_label="shadow",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="shadow_mode の影の記録(*.shadow.sqlite3)。"
+                        "追記のみ。実行はしない。IDと状態のみ",
+            backup_method="shadow-sidecar-preserved",
+            delete_method_declared="C4-shadow-purge (purge_project_shadow)",
+        ))
+    # E-1/E-2: 成果台帳 (サイドカーSQLite: *.ledger.sqlite3 の
+    # ledger_snapshots / ledger_suggestion_decisions)。kind は同様に
+    # "other" とし、件数テストの対象外にする。網羅性検証では table 名で
+    # 登録扱いになる。台帳はPJごとの行を持たないが、detail にPJ IDを
+    # 含む場合は、完全削除時に匿名化または削除する
+    # (purge_project_ledger)。退避は sidecar-preserved (行複写対象外)、
+    # PJ初期化では記録を変えず (reset_for_generation)。記録は人が押した
+    # ときだけ。定期スレッド・スケジューラは作らない。IDと件数のみ。
+    for _t in ("ledger_snapshots", "ledger_suggestion_decisions"):
+        entries.append(RegistryEntry(
+            name=f"ledger:{_t}", kind="other", db_label="ledger",
+            table=_t, project_column="",
+            shared_with_other_projects=False,
+            description="outcome_ledger の成果台帳(*.ledger.sqlite3)。"
+                        "追記のみ。PJごとの行は持たない",
+            backup_method="ledger-sidecar-preserved",
+            delete_method_declared="E-ledger-purge (purge_project_ledger)",
+        ))
     return entries
 
 
@@ -467,6 +503,10 @@ def resolve_db_path(memory_path: str | Path, db_label: str) -> Path | None:
         return mem.with_name(mem.name + ".watch.sqlite3")
     if db_label == "nightrun":
         return mem.with_name(mem.name + ".nightrun.sqlite3")
+    if db_label == "shadow":
+        return mem.with_name(mem.name + ".shadow.sqlite3")
+    if db_label == "ledger":
+        return mem.with_name(mem.name + ".ledger.sqlite3")
     return None
 
 

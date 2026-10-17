@@ -1,11 +1,14 @@
 """Local, version-bound feedback -> amendment -> re-review workflow."""
 import asyncio
 import json
+import logging
 import re
 import threading
 import time
 import uuid
 from contextvars import ContextVar
+
+LOGGER = logging.getLogger(__name__)
 
 PLANNING_FEEDBACK = ContextVar("planning_feedback", default=None)
 from copy import deepcopy
@@ -65,8 +68,9 @@ def _binder_version() -> str:
         from app.plan_review_loop import ISSUE_BINDING_VERSION as _v
         if isinstance(_v, str) and _v:
             return _v
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 失敗をログに残す(既定版で継続するが、proposal_keyに版が残り混同しない)。
+        LOGGER.warning("plan_feedback binder version failed: %s", type(exc).__name__)
     return "issue-binding-v1"
 
 
@@ -79,7 +83,9 @@ def _proposal_review_id(manager, pid, signature) -> str:
         packet_id = fingerprint(packet) if packet else ''
         return fingerprint([canonical(plan_review.get('reviews') or []),
                             canonical(feedback.get('issues') or []), str(packet_id)])
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(署名だけの指紋=提案の重複抑止が弱まる。欠けたことを残す)。
+        LOGGER.warning("plan_feedback proposal review id failed: %s", type(exc).__name__)
         return fingerprint([str(signature or '')])
 
 
@@ -97,8 +103,10 @@ def _ensure_proposal_key_table(store) -> None:
             if 'claimed_at' not in cols:
                 try:
                     db.execute('ALTER TABLE proposal_keys ADD COLUMN claimed_at REAL')
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # F3a: 失敗をログに残す(外側はValueErrorで失敗にし、重複候補を生まない)。
+                    LOGGER.warning("plan_feedback proposal key alter failed: %s", type(exc).__name__)
+                    raise
     except Exception as exc:
         raise ValueError('修正案キーDBの準備に失敗しました。再試行してください') from exc
 
@@ -116,7 +124,9 @@ def _claim_proposal_key(store, pid, proposal_key, signature) -> bool:
                 row = db.execute('SELECT claimed_at,candidate_id FROM proposal_keys WHERE project=? AND proposal_key=?',
                                  (pid, proposal_key)).fetchone()
                 age = time.time() - float(row[0] or 0) if row and row[0] else 0
-            except Exception:
+            except Exception as exc:
+                # F3a: 失敗をログに残す(age=0=古い確保の再利用をしない。重複生成を防ぐ側)。
+                LOGGER.warning("plan_feedback proposal key age failed: %s", type(exc).__name__)
                 age = 0
             if age > 300 and row and not row[1]:
                 db.execute("DELETE FROM proposal_keys WHERE project=? AND proposal_key=? AND (candidate_id IS NULL OR candidate_id='')", (pid, proposal_key))
@@ -140,8 +150,9 @@ def _release_proposal_key(store, pid, proposal_key, *, force=False) -> None:
             else:
                 db.execute("DELETE FROM proposal_keys WHERE project=? AND proposal_key=? AND (candidate_id IS NULL OR candidate_id='')",
                            (pid, proposal_key))
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 失敗をログに残す(解放失敗=残存leaseは開始を阻む側。成功扱いにしない)。
+        LOGGER.warning("plan_feedback release proposal key failed: %s", type(exc).__name__)
 
 
 def _remember_proposal_key(store, pid, proposal_key, signature, candidate_id) -> bool:
@@ -164,7 +175,9 @@ def _remember_proposal_key(store, pid, proposal_key, signature, candidate_id) ->
 def _existing_candidate_for_key(store, pid, signature, proposal_key):
     try:
         row = store.get(pid, 'revision', signature) or {}
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(None=既存候補を確認できず。新規生成側に進み重複抑止は弱まる。欠けたことを残す)。
+        LOGGER.warning("plan_feedback existing candidate check failed: %s", type(exc).__name__)
         return None
     if row.get('proposal_key') == proposal_key and row.get('status') in ('draft', 'applied'):
         return row
@@ -181,14 +194,16 @@ def _record_replay(manager, pid, signature, row) -> dict:
             updated['last_replayed'] = time.time()
             store.put(pid, 'revision', signature, updated)
             row = updated
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 失敗をログに残す(保存済み行をそのまま返し、replay_count欠けを成功扱いにしない)。
+        LOGGER.warning("plan_feedback record replay save failed: %s", type(exc).__name__)
     count = int((row or {}).get('replay_count') or 0)
     try:
         manager.memory.add_event(pid, 'plan_feedback_proposal_replayed', '同一内容の修正案要求を既存候補で応答しました',
                                  detail=canonical({'signature': signature, 'candidate_id': (row or {}).get('candidate_id') or '', 'replay_count': count}))
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 監査の失敗をログに残す(結果自体は返す。監査欠落を成功扱いにしない)。
+        LOGGER.warning("plan_feedback record replay audit failed: %s", type(exc).__name__)
     return row
 
 
@@ -197,8 +212,10 @@ def _task_order_for(snapshot, detail):
         if detail:
             return [str(s.get('id') or '') for s in (detail.get('steps') or []) if isinstance(s, dict) and str(s.get('id') or '')]
         return [str(t.get('task_key') or '') for t in (snapshot.get('tasks') or []) if isinstance(t, dict) and str(t.get('task_key') or '')]
-    except Exception:
-        return []
+    except Exception as exc:
+        # F3a: 失敗をログに残し伝播する([]=被覆なしで通さない。呼び出し側はValueErrorで失敗)。
+        LOGGER.warning("plan_feedback task order failed: %s", type(exc).__name__)
+        raise ValueError('工程順序を確認できませんでした') from exc
 
 
 def _bind_issues_for_matrix(manager, pid, signature, issues, snapshot):
@@ -861,8 +878,9 @@ async def _propose_locked(manager,pid,signature,tid=None,*,_generation=False,ide
             latest = store.get(pid, 'revision', signature) or {}
             if latest.get('job_id') == job['id'] and latest.get('status') == 'generating':
                 row = latest
-        except Exception:
-            pass
+        except Exception as exc2:
+            # F3a: 失敗をログに残す(保存済み行の再取得欠け。既存rowで失敗記録に進む)。
+            LOGGER.warning("plan_feedback propose latest failed: %s", type(exc2).__name__)
         row.update(status='error',error=str(exc)[:1000]);store.put(pid,'revision',signature,row)
         _release_proposal_key(store,pid,proposal_key)
         finish_job(store,pid,job['id'],'failed',blocking_error=str(exc)[:1000])
@@ -889,15 +907,19 @@ def _unexpected_issue_ids(new_snapshot, old_snapshot) -> list:
     """再評価用: 新旧の達成条件IDの後退(消失)だけを列挙する。追加は許す。"""
     try:
         from app.structured_planning import contract_of as _contract_of
-    except Exception:
-        return []
+    except Exception as exc:
+        # F3a: 失敗をログに残す([]=後退なしで通さない。呼び出し側は独立検査で見る)。
+        LOGGER.warning("plan_feedback unexpected ids import failed: %s", type(exc).__name__)
+        raise ValueError('達成条件の後退を確認できませんでした') from exc
     old_ids: set[str] = set()
     for task in (old_snapshot or {}).get('tasks') or []:
         if not isinstance(task, dict):
             continue
         try:
             contract = _contract_of(task) or {}
-        except Exception:
+        except Exception as exc:
+            # F3a: 失敗をログに残す(読めない工程は後退検出不能=残項目にせず、呼び出し側の独立検査で見る)。
+            LOGGER.warning("plan_feedback unexpected ids old failed: %s", type(exc).__name__)
             contract = {}
         for cid in (contract.get('criterion_ids') or []):
             if str(cid):
@@ -908,7 +930,8 @@ def _unexpected_issue_ids(new_snapshot, old_snapshot) -> list:
             continue
         try:
             contract = _contract_of(task) or {}
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback unexpected ids new failed: %s", type(exc).__name__)
             contract = {}
         for cid in (contract.get('criterion_ids') or []):
             if str(cid):
@@ -932,7 +955,8 @@ def _dependency_problems(new_snapshot, detail=None) -> list:
                         return [f"forward_dependency:{parent}"]
                 seen.add(str(step.get('id') or ''))
             return []
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback dependency detail failed: %s", type(exc).__name__)
             return ['detail_dependency_check_failed']
     try:
         tasks = [t for t in (new_snapshot or {}).get('tasks') or [] if isinstance(t, dict)]
@@ -971,7 +995,8 @@ def _dependency_problems(new_snapshot, detail=None) -> list:
             if _visit(node):
                 return ['circular_dependency']
         return []
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback dependency check failed: %s", type(exc).__name__)
         return ['dependency_check_failed']
 
 
@@ -981,7 +1006,9 @@ def _validate_plan_issues(tasks, expected):
         from app.structured_planning import validate_plan as _validate_plan
         result = _validate_plan({'tasks': tasks or []}, expected)
         return sorted(result.get('issues') or [])
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(検査不能=1件残項目。適用を通さない)。
+        LOGGER.warning("plan_feedback validate plan failed: %s", type(exc).__name__)
         return ['validate_plan_failed']
 
 
@@ -1005,7 +1032,8 @@ def _independent_check_problems(manager, pid, old_snapshot, new_snapshot, *, is_
         return problems
     except ValueError as exc:
         return ['independent:' + str(exc)[:200]]
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback independent check failed: %s", type(exc).__name__)
         return ['independent_check_failed']
 
 
@@ -1052,7 +1080,8 @@ def local_reevaluate_applied_plan(manager, pid, *, source_signature, new_signatu
         }
         if gate_error:
             remaining.append('coverage:' + str(gate_error)[:200])
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback reevaluate coverage failed: %s", type(exc).__name__)
         remaining.append('coverage:check_failed')
     try:
         target = new_detail if new_detail is not None else (None if detail is None else detail)
@@ -1060,7 +1089,8 @@ def local_reevaluate_applied_plan(manager, pid, *, source_signature, new_signatu
         if dep_problems:
             remaining.extend('dependencies:' + str(x)[:160] for x in dep_problems[:4])
         evidence['dependencies'] = {'problems': len(dep_problems)}
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback reevaluate dependencies failed: %s", type(exc).__name__)
         remaining.append('dependencies:check_failed')
     try:
         if detail is None:
@@ -1070,7 +1100,8 @@ def local_reevaluate_applied_plan(manager, pid, *, source_signature, new_signatu
             evidence['criteria_retention'] = {'missing': missing[:8]}
         else:
             evidence['criteria_retention'] = {'detail': True}
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback reevaluate retention failed: %s", type(exc).__name__)
         remaining.append('criteria_retention:check_failed')
     try:
         is_rebuild = any(isinstance(a, dict) and a.get('disposition') in {'rebuild_vehicle', 'rebuild_generic'}
@@ -1086,14 +1117,16 @@ def local_reevaluate_applied_plan(manager, pid, *, source_signature, new_signatu
                 if not ok:
                     remaining.append('independent_checks:detail_operations_invalid')
                 evidence['independent_checks'] = {'problems': 0 if ok else 1}
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_feedback reevaluate detail failed: %s", type(exc).__name__)
                 remaining.append('independent_checks:check_failed')
         else:
             problems = _independent_check_problems(manager, pid, old_snapshot, new_snapshot, is_rebuild=is_rebuild)
             if problems:
                 remaining.extend(str(x)[:200] for x in problems[:4])
             evidence['independent_checks'] = {'problems': len(problems)}
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback reevaluate independent failed: %s", type(exc).__name__)
         remaining.append('independent_checks:check_failed')
     passed = not remaining
     return {
@@ -1181,7 +1214,9 @@ def _budget_unchanged(before, after) -> bool:
             return True
         return (int(before.get('used_calls') or 0) == int(after.get('used_calls') or 0)
                 and int(before.get('remaining_calls') or 0) == int(after.get('remaining_calls') or 0))
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(False=予算を確認できず。呼び出し側は適用を失敗にし外部評価を増やさない)。
+        LOGGER.warning("plan_feedback budget compare failed: %s", type(exc).__name__)
         return False
 
 
@@ -1197,7 +1232,9 @@ def _total_review_rounds(store, pid) -> int | None:
             if isinstance(payload, dict):
                 total += len(payload.get('reviews') or [])
         return total
-    except Exception:
+    except Exception as exc:
+        # F3a: 失敗をログに残す(None=件数を確認できず。呼び出し側は適用を失敗にし外部評価を増やさない)。
+        LOGGER.warning("plan_feedback total rounds failed: %s", type(exc).__name__)
         return None
 
 
@@ -1223,15 +1260,18 @@ def _fail_apply(manager, pid, store, signature, row, reason, *,
         failed['local_reevaluation'] = local_reevaluation
     try:
         store.put(pid, 'revision', signature, failed)
-    except Exception:
-        pass
+    except Exception as exc:
+        # F3a: 失敗をログに残す(適用失敗の記録欠け。巻き戻し自体は済み。成功扱いにしない)。
+        LOGGER.warning("plan_feedback fail apply save failed: %s", type(exc).__name__)
     try:
         budget_after = review_budget(manager, pid)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback fail apply budget failed: %s", type(exc).__name__)
         budget_after = {}
     try:
         rounds_after = len((store.get(pid, 'plan', signature) or {}).get('reviews') or [])
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback fail apply rounds failed: %s", type(exc).__name__)
         rounds_after = rounds_before
     try:
         manager.memory.add_event(pid, 'plan_feedback_apply_failed', str(reason)[:500],
@@ -1242,8 +1282,8 @@ def _fail_apply(manager, pid, store, signature, row, reason, *,
                                                    'external_sends_delta': 0,
                                                    'rounds_before': rounds_before, 'rounds_after': rounds_after,
                                                    'budget_before': budget_before, 'budget_after': budget_after}))
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.warning("plan_feedback fail apply audit failed: %s", type(exc).__name__)
     raise ValueError(str(reason)[:1000])
 
 
@@ -1269,7 +1309,8 @@ def _carry_unresolved_from_reevaluation(manager, pid, target_signature, source_s
             existing.add(item_id)
             items.append(item_id)
         store.put(pid, 'feedback', target_signature, row)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback carry unresolved failed: %s", type(exc).__name__)
         items = []
     return items
 
@@ -1371,7 +1412,8 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
                 updated['apply_replay_count'] = count
                 updated['last_apply_replayed'] = time.time()
                 store.put(pid, 'revision', signature, updated)
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_feedback apply replay save failed: %s", type(exc).__name__)
                 count = int(pre_row.get('apply_replay_count') or 0)
             try:
                 manager.memory.add_event(pid, 'plan_feedback_apply_replayed', '同一候補の二重適用を既存結果で応答しました',
@@ -1379,8 +1421,9 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
                                                            'candidate_id': candidate_id,
                                                            'new_signature': pre_row.get('new_signature') or '',
                                                            'apply_replay_count': count}))
-            except Exception:
-                pass
+            except Exception as exc:
+                # F3a: 監査の失敗をログに残す(二重適用自体は例外で拒否。監査欠落を成功扱いにしない)。
+                LOGGER.warning("plan_feedback apply replay audit failed: %s", type(exc).__name__)
             raise ValueError('反映対象の修正案がありません。再読込してください')
         mission, snapshot, detail = current(manager, pid, signature, tid)
         if pid in manager.planning_projects and not _generation:
@@ -1392,19 +1435,23 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
         # 適用前の外部評価の状態を記録し、適用後に増えていないことを実測で監査する。
         try:
             from app.plan_review_loop import VERIFICATION_LIMIT as _LOOP_LIMIT
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply loop limit failed: %s", type(exc).__name__)
             _LOOP_LIMIT = 2
         try:
             budget_before = review_budget(manager, pid)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply budget before failed: %s", type(exc).__name__)
             budget_before = {}
         try:
             rounds_before = _total_review_rounds(store, pid)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply rounds before failed: %s", type(exc).__name__)
             rounds_before = 0
         try:
             external_limit_before = _LOOP_LIMIT
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply limit before failed: %s", type(exc).__name__)
             external_limit_before = 2
         # 適用前の計画行を確保し、失敗時はここへ戻す(原子性)。
         restore_plan = _capture_plan_rows(manager, pid) if detail is None else None
@@ -1449,12 +1496,14 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
         }
         try:
             store.put(pid, 'applied_plan', signature, old_plan_record)
-        except Exception:
-            pass
+        except Exception as exc:
+            # F3a: 失敗をログに残す(旧版監査の欠け。適用自体は継続し、新旧署名で追跡可)。
+            LOGGER.warning("plan_feedback apply old plan save failed: %s", type(exc).__name__)
         if not new_signature or new_signature == signature:
             try:
                 latest = store.get(pid, 'revision', signature) or applied
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_feedback apply latest failed: %s", type(exc).__name__)
                 latest = applied
             _fail_apply(manager, pid, store, signature, latest,
                         '適用後の計画署名が変わりませんでした。差分が計画へ反映されていないため元に戻しました',
@@ -1465,12 +1514,14 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
         try:
             new_snapshot, _actual = plan_snapshot(manager, pid, selected_detail(manager, pid, tid))
             new_detail = selected_detail(manager, pid, tid) if tid else None
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply snapshot failed: %s", type(exc).__name__)
             new_snapshot, new_detail = None, None
         if new_snapshot is None:
             try:
                 latest = store.get(pid, 'revision', signature) or applied
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_feedback apply latest failed: %s", type(exc).__name__)
                 latest = applied
             _fail_apply(manager, pid, store, signature, latest,
                         '適用後の計画を取得できませんでした。元に戻しました',
@@ -1487,14 +1538,15 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
             latest = store.get(pid, 'revision', signature) or {}
             latest['local_reevaluation'] = reevaluation
             store.put(pid, 'revision', signature, latest)
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply reevaluation save failed: %s", type(exc).__name__)
         if not reevaluation.get('passed'):
             remaining = list(reevaluation.get('remaining') or [])
             _carry_unresolved_from_reevaluation(manager, pid, signature, signature, remaining)
             try:
                 latest = store.get(pid, 'revision', signature) or applied
-            except Exception:
+            except Exception as exc:
+                LOGGER.warning("plan_feedback apply latest failed: %s", type(exc).__name__)
                 latest = applied
             _fail_apply(manager, pid, store, signature, latest,
                         'ローカル再評価が不合格のため元に戻しました。残項目: ' + ' / '.join(remaining[:3])[:300],
@@ -1504,15 +1556,18 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
                         rounds_before=rounds_before, new_signature=new_signature)
         try:
             budget_after = review_budget(manager, pid)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply budget after failed: %s", type(exc).__name__)
             budget_after = {}
         try:
             rounds_after = _total_review_rounds(store, pid)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply rounds after failed: %s", type(exc).__name__)
             rounds_after = 0
         try:
             from app.plan_review_loop import VERIFICATION_LIMIT as _LOOP_LIMIT_AFTER
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply loop limit after failed: %s", type(exc).__name__)
             _LOOP_LIMIT_AFTER = 2
         # 適用の前後で外部評価のラウンド数・外部AI呼出の予算が増えていないことを
         # 実測で検証し、その結果を記録する。固定の0を書くだけにしない。
@@ -1521,19 +1576,21 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
         measured_budget_kept = True
         try:
             measured_rounds_delta = int(rounds_after or 0) - int(rounds_before or 0)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply rounds delta failed: %s", type(exc).__name__)
             measured_rounds_delta = 0
         try:
             measured_budget_kept = _budget_unchanged(budget_before, budget_after)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply budget kept failed: %s", type(exc).__name__)
             measured_budget_kept = False
         if measured_rounds_delta != 0 or not measured_budget_kept:
             try:
                 latest = store.get(pid, 'revision', signature) or {}
                 latest['local_reevaluation'] = reevaluation
                 store.put(pid, 'revision', signature, latest)
-            except Exception:
-                pass
+            except Exception as exc:
+                LOGGER.warning("plan_feedback apply reevaluation save failed: %s", type(exc).__name__)
             _fail_apply(manager, pid, store, signature, latest,
                         '適用中に外部評価の使用量が増えました。元に戻しました',
                         local_reevaluation=reevaluation,
@@ -1552,8 +1609,8 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
                           external_budget_kept=bool(measured_budget_kept),
                           external_limit=external_limit_before)
             store.put(pid, 'revision', signature, stored)
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply stored save failed: %s", type(exc).__name__)
         try:
             new_row = store.get(pid, 'applied_revision', new_signature) or {}
             new_row.update(source_signature=signature, candidate_id=candidate_id,
@@ -1564,8 +1621,8 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
                            external_budget_kept=bool(measured_budget_kept),
                            external_limit=external_limit_before)
             store.put(pid, 'applied_revision', new_signature, new_row)
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply new row save failed: %s", type(exc).__name__)
         measured = {'external_sends_delta': measured_external_delta,
                     'external_rounds_delta': measured_rounds_delta,
                     'external_budget_kept': bool(measured_budget_kept),
@@ -1586,8 +1643,8 @@ def apply(manager,pid,signature,candidate_id,tid=None,*,_generation=False):
                                   'rounds_after': rounds_after,
                                   'budget_before': budget_before,
                                   'budget_after': budget_after}))
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning("plan_feedback apply audit failed: %s", type(exc).__name__)
         result = dict(result)
         result.update(new_signature=new_signature,
                       local_reevaluation=reevaluation,
@@ -1607,7 +1664,8 @@ def _apply_replay(manager, pid, signature, row) -> dict:
         store = ReviewStore(manager.memory.path)
         store.put(pid, 'revision', signature, updated)
         row = updated
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("plan_feedback apply replay helper save failed: %s", type(exc).__name__)
         count = int((row or {}).get('apply_replay_count') or 0)
     try:
         manager.memory.add_event(pid, 'plan_feedback_apply_replayed', '同一候補の二重適用を既存結果で応答しました',
@@ -1615,8 +1673,8 @@ def _apply_replay(manager, pid, signature, row) -> dict:
                                                    'candidate_id': (row or {}).get('candidate_id') or '',
                                                    'new_signature': (row or {}).get('new_signature') or '',
                                                    'apply_replay_count': count}))
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.warning("plan_feedback apply replay helper audit failed: %s", type(exc).__name__)
     return {
         'status': 'awaiting_review',
         'signature': (row or {}).get('new_signature') or '',

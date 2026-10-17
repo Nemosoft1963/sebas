@@ -198,8 +198,19 @@ class ExperienceMemory:
         try:
             rows = [r for r in self.verified_rows_for_index(project) if r['id'] != rid]
             self.build_index().sync(rows, project)
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            # F2c fail-closed: 索引削除の失敗を握りつぶさず記録し、例外で返す。
+            # removed=True(削除済み)を返さない。呼び出し側(goal_review.revoke_result)
+            # が index_removal=failed として記録し、取消成功と区別できる。
+            try:
+                self.store.set_index_state(project, rid, 'failed',
+                                           type(exc).__name__,
+                                           current_index_identity(self.config))
+            except (OSError, sqlite3.Error, ValueError, TypeError,
+                    AttributeError, KeyError, RuntimeError):
+                pass
+            raise
         self.store.delete_index_state(project, rid)
         return {'id': rid, 'removed': True}
 
@@ -316,11 +327,15 @@ def memory_scope(memory, project, input_version, *, mode='shadow', external_allo
 
 def configured_memory(memory_path, project):
     # L3: 論理削除中・削除状態が確認できないPJはRAG・検索の対象から除外する (新規実行しない)。
+    # F2c fail-closed: 削除確認の失敗は除外(None・停止側)を保ち狭い例外にする。
+    # 削除確認の失敗は None(検索不可)であり、未登録の検索可能扱いにしない。
+    # 呼び出し側は None=無効として扱うため、既存のAPI・UIの期待を壊さない。
     try:
         from app.project_delete import is_deleted_or_unknown as _l3_is_deleted
         if _l3_is_deleted(memory_path, project):
             return None
-    except Exception:
+    except (OSError, sqlite3.Error, ValueError, TypeError,
+            AttributeError, KeyError, RuntimeError):
         return None
     path=Path(memory_path).parent/'experience_memory.json'
     if not path.exists():return None
@@ -479,7 +494,15 @@ def _build_lesson(fields: dict[str, str], fallback: str) -> str:
 def convert_success_case_item(item: dict) -> dict:
     if not isinstance(item, dict):
         raise ValueError("item must be an object")
-    kind = item.get("kind") or "success"
+    # F2c fail-closed: kind の欠落(None/空文字)は従来どおり 'success' 扱いだが、
+    # 0/False 等の falsy は補完せず拒否する(種別の誤分類をしない)。
+    raw_kind = item.get("kind")
+    if raw_kind is None or (isinstance(raw_kind, str) and not raw_kind.strip()):
+        kind = "success"
+    elif isinstance(raw_kind, str):
+        kind = raw_kind
+    else:
+        raise ValueError("unsupported kind: %r" % (raw_kind,))
     if kind != "success":
         raise ValueError("unsupported kind: %s" % kind)
     content = item.get("content") or ""
@@ -688,8 +711,8 @@ def import_success_cases(memory_path, project, export_items, proof="成功事例
             ev = json.loads(row["evidence"]) if isinstance(row["evidence"], str) else row["evidence"]
             if isinstance(ev, dict) and ev.get("content_sha256"):
                 seen_hashes.add(ev["content_sha256"])
-        except Exception:
-            pass
+        except (ValueError, TypeError, AttributeError, KeyError):
+            continue
 
     registered = 0
     skipped_duplicate = 0
@@ -703,8 +726,10 @@ def import_success_cases(memory_path, project, export_items, proof="成功事例
     for row in existing:
         try:
             ev = json.loads(row["evidence"]) if isinstance(row["evidence"], str) else row["evidence"]
-        except Exception:
-            ev = {}
+        except (ValueError, TypeError, AttributeError, KeyError):
+            # F2c fail-closed: 既存証拠の読取不能は空扱いにせず重複判定を止める。
+            # 未登録を登録済みにしない(成功として数えない)。
+            raise
         if not isinstance(ev, dict):
             ev = {}
         h = str(ev.get("content_sha256") or "").strip() or hashlib.sha256(row["content"].encode()).hexdigest()
@@ -780,7 +805,8 @@ def import_success_cases(memory_path, project, export_items, proof="成功事例
                         applies_patch = converted.get("applicability", {}) if isinstance(converted.get("applicability"), dict) else {}
                         supplemented = _p1_supplement_existing(
                             store, project, existing_row["id"], verified_original, applies_patch, str(actor).strip())
-                    except Exception:
+                    except (OSError, sqlite3.Error, ValueError, TypeError,
+                            AttributeError, KeyError, RuntimeError):
                         supplemented = False
                     skipped_duplicate += 1
                     original_registered[idx] = "supplemented" if supplemented else ("reused" if original_state in ("registered", "reused") else "none")

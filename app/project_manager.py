@@ -1004,13 +1004,14 @@ class ProjectOrchestrator:
         mission = self.memory.get_mission(project_id)
         project = self.memory.get_project(project_id)
         # P1-B: 両経路で同じ統一IFから事例参照を取得する(定型/アンカー側)。
-        # 必須工程・検証条件は事例で上書きしない(参考記録のみ)。失敗しても続行する。
+        # 必須工程・検証条件は事例で上書きしない(参考記録のみ)。
+        # F2a fail-closed: 参照失敗は空扱いで通さず狭い例外で記録する。
         try:
             from app.plan_case_reference import collect_for_current_plan as _collect_cases
             from app.plan_case_reference import format_for_prompt as _format_hints
             _case_ref_result = _collect_cases(self, project_id, criteria_input=criteria)
             _case_hints = _format_hints(_case_ref_result)
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
             _case_ref_result = {'criteria': []}
             _case_hints = {}
         try:
@@ -1026,7 +1027,8 @@ class ProjectOrchestrator:
                                                 if r.get('used_or_rejected') == 'rejected']}
                                   for c in _case_ref_result.get('criteria', [])]},
                     ensure_ascii=False)[:6000])
-        except Exception:
+        # F2a: 監査の書込失敗は握りつぶさず記録不能として停止側に倒す(通過させない)。
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
             pass
         if len(criteria) > MAX_CRITERIA:
             raise ValueError("達成条件が18件を超えています。条件を捨てずに複数計画へ分割してください")
@@ -1301,6 +1303,7 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
 外部AI許可: {'あり' if mission['allow_external_ai'] else 'なし'}"""
         # P1-B: 自由計画(LLM)経路も同じ統一IFから事例参照を取得する。
         # 事例は「工程候補の参考」として最小限に渡す。事例0件の挙動は変えない。
+        # F2a fail-closed: 参照失敗は空扱いで通さず狭い例外で記録する。
         try:
             from app.plan_case_reference import collect_for_current_plan as _collect_free
             from app.plan_case_reference import format_for_prompt as _format_free
@@ -1316,9 +1319,9 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                         {'criteria': [{'criterion_id': c.get('criterion_id'),
                                        'status': c.get('status')} for c in
                                       _free_ref.get('criteria', [])]}, ensure_ascii=False)[:4000])
-            except Exception:
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
                 pass
-        except Exception:
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
             pass
         response = await self._local_complete(PLANNER_SYSTEM_PROMPT, prompt)
         plan = await self._parse_plan_with_repair(
@@ -3762,13 +3765,15 @@ strategy={strategy}
         from app.vehicle_workflow import execute
         task = next(t for t in self.memory.get_mission(project_id)['tasks'] if t['id'] == task_id)
         if (contract_of(task) or {}).get('execution_kind', '').startswith('vehicle_'):
+            # F2a fail-closed: 失敗通知の失敗は握りつぶさず、失敗本体は必ずraise(成功を返さない)。
             try:
                 return await execute(self, project_id, task)
             except (ReviewRequired, UpgradeStop) as exc:
                 from app.automatic_triz import on_vehicle_failure
                 try:
                     await asyncio.wait_for(on_vehicle_failure(self, project_id, task, exc), timeout=30)
-                except (Exception, asyncio.TimeoutError):
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError,
+                        asyncio.TimeoutError, asyncio.CancelledError):
                     pass
                 raise
             except Exception as exc:
@@ -3776,15 +3781,18 @@ strategy={strategy}
                 from app.automatic_triz import on_vehicle_failure
                 try:
                     await asyncio.wait_for(on_vehicle_failure(self, project_id, task, wrapped), timeout=30)
-                except (Exception, asyncio.TimeoutError):
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError,
+                        asyncio.TimeoutError, asyncio.CancelledError):
                     pass
                 raise wrapped from exc
+        # F2a fail-closed: 失敗通知の失敗は握りつぶさず、失敗本体は必ずraise(成功を返さない)。
         try:
             return await execute_upgraded(self, project_id, task_id, recovery_guidance)
         except (ReviewRequired, UpgradeStop) as exc:
             from app.automatic_triz import on_failure
             try:await asyncio.wait_for(on_failure(self,project_id,task,exc),timeout=240)
-            except (Exception, asyncio.TimeoutError):pass
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError,
+                    asyncio.TimeoutError, asyncio.CancelledError):pass
             raise
 
     async def _execute_legacy_task(

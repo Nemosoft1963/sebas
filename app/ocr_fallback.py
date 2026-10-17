@@ -151,6 +151,35 @@ def replacement_control_rate(text: str) -> float:
     return bad / len(text)
 
 
+def _field_page_no(raw: Mapping[str, Any]) -> int:
+    """fields の page_no。欠落・不正は例外(1ページ目に寄せない・照合をずらさない)。"""
+    value = raw.get("page_no")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("field page_no is missing")
+    try:
+        page_no = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("field page_no is invalid")
+    if page_no < 1:
+        raise ValueError("field page_no is invalid")
+    return page_no
+
+
+def _validate_page_count(page_count: Any) -> int:
+    """page_count の欠落・0・負・非数値は例外(1で補わない・被覆判定をずらさない)。"""
+    if page_count is None or (isinstance(page_count, str) and not page_count.strip()):
+        raise ValueError("page_count is missing")
+    if isinstance(page_count, bool):
+        raise ValueError("page_count is invalid")
+    try:
+        value = int(page_count)
+    except (TypeError, ValueError):
+        raise ValueError("page_count is invalid")
+    if value < 1:
+        raise ValueError("page_count is invalid")
+    return value
+
+
 def _page_no(page: Mapping[str, Any], index: int) -> int:
     raw = page.get("page", page.get("page_no", index + 1))
     try:
@@ -1214,7 +1243,8 @@ def run_ocr_fallback(
     engine = dict(DEFAULT_ENGINE)
     engine["parameters_hash"] = parameters_hash
     sha = (expected_sha256 or "").strip().lower().replace("sha256:", "")
-    pages_count = max(1, min(int(page_count or 1), MAX_PAGES))
+    # F2c fail-closed: page_count の欠落・0 は 1 で補わない(被覆判定をずらさない)。
+    pages_count = max(1, min(_validate_page_count(page_count), MAX_PAGES))
     execution_key = make_execution_key(sha or "empty", engine_id, parameters_hash)
     def persist_run(**kwargs: Any) -> tuple[dict[str, Any], bool]:
         if store is None:
@@ -1355,7 +1385,8 @@ def run_ocr_fallback(
                         "name": item["name"],
                         "value": item.get("value_text") or "",
                         "type": item.get("value_type") or "string",
-                        "page": item.get("page_no") or 1,
+                        # F2c fail-closed: page_no 欠落を 1 で補わない(照合をずらさない)。
+                        "page": _field_page_no(item),
                         "block_id": item.get("block_id") or "p1-b001",
                         "value_state": item.get("validation_status") or "value",
                     }

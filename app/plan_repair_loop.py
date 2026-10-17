@@ -802,10 +802,16 @@ def repair_gate_summary(manager, project_id: str) -> dict:
 
 
 def approval_gate(manager, project_id: str) -> None:
-    """既存の計画承認/実行開始の判定へ接続する。弱めない方向(追加ブロック)のみ。"""
+    """既存の計画承認/実行開始の判定へ接続する。弱めない方向(追加ブロック)のみ。
+
+    F3a: 修復ループの状態を確認できないときは素通りせず停止側に倒す。
+    """
     try:
         summary = repair_gate_summary(manager, project_id)
-    except Exception:
-        return
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "plan_repair approval gate check failed: %s", type(exc).__name__)
+        raise ValueError("修復ループの状態を確認できないため実行できません") from exc
     if summary.get("blocking"):
         raise ValueError(str(summary.get("reason") or "修復ループ未完了のため実行できません"))

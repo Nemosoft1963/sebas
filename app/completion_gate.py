@@ -13,11 +13,15 @@ REASON_HUMAN = "HUMAN_ACCEPTANCE_MISSING"
 REASON_HASH_DRIFT = "HUMAN_ACCEPTANCE_HASH_DRIFT"
 
 
+_HASH_UNREADABLE = "unknown:unreadable"
+
+
 def _generic_artifact_hash(manager, project_id: str, mission: dict) -> str:
     from app.structured_planning import contract_of
     from app.vehicle_workflow import digest, resolve
 
     artifacts = []
+    unreadable = False
     for task in mission.get("tasks") or []:
         for output in (contract_of(task) or {}).get("outputs") or []:
             path = str(output.get("path") or "")
@@ -25,15 +29,26 @@ def _generic_artifact_hash(manager, project_id: str, mission: dict) -> str:
                 continue
             try:
                 target = resolve(manager, project_id, path)
-            except Exception:
+            except (ValueError, OSError, AttributeError, TypeError, KeyError) as exc:
+                # F2b fail-closed: 成果物の解決不能を読めたものだけのハッシュに
+                # しない。読取不能項目は不明ハッシュとして混ぜ、達成・通過の
+                # 根拠(被覆あり)にしない。
+                unreadable = True
+                artifacts.append((path, f"{_HASH_UNREADABLE}:{type(exc).__name__}"))
                 continue
             try:
                 if target.is_file() and target.stat().st_size > 0:
                     artifacts.append((path, digest(target.read_bytes())))
-            except OSError:
+                else:
+                    # 空・不在の成果物も証拠不明として混ぜ、黙って除外しない。
+                    unreadable = True
+                    artifacts.append((path, f"{_HASH_UNREADABLE}:empty-or-missing"))
+            except OSError as exc:
+                unreadable = True
+                artifacts.append((path, f"{_HASH_UNREADABLE}:{type(exc).__name__}"))
                 continue
     artifacts.sort()
-    return digest(artifacts) if artifacts else ""
+    return _HASH_UNREADABLE if unreadable else (digest(artifacts) if artifacts else "")
 
 
 def _current_hashes(manager, project_id: str, contract: dict, mission: dict) -> dict:
@@ -81,6 +96,7 @@ def _current_hashes(manager, project_id: str, contract: dict, mission: dict) -> 
     except Exception:
         source_hash = ""
     artifact_hash = ""
+    unreadable = False
     for task in mission.get("tasks") or []:
         task_contract = contract_of(task) or {}
         if task_contract.get("execution_kind") not in {"vehicle_calculate", "vehicle_verify"}:
@@ -91,10 +107,16 @@ def _current_hashes(manager, project_id: str, contract: dict, mission: dict) -> 
                 continue
             try:
                 result = read_json(resolve(manager, project_id, path))
-            except Exception:
+            except (ValueError, OSError, AttributeError, TypeError, KeyError) as exc:
+                # F2b fail-closed: 検証成果物の読取不能を黙って飛ばさず、
+                # 不明として記録する(達成・承認有効の根拠にしない)。
+                # read_json の JSON 形式不正(ValueError)も証拠不明に倒す。
+                unreadable = True
+                artifact_hash = f"{_HASH_UNREADABLE}:{type(exc).__name__}"
                 continue
             if result.get("workbook_hash"):
-                artifact_hash = str(result["workbook_hash"])
+                if not unreadable:
+                    artifact_hash = str(result["workbook_hash"])
     return {
         "contract_hash": contract.get("content_hash") or "", "plan_signature": plan_signature,
         "input_hash": input_hash, "source_hash": source_hash, "artifact_hash": artifact_hash,
@@ -224,7 +246,8 @@ def evaluate(manager, project_id: str, *, persist: bool = False) -> dict:
     all_pass = bool(rows) and not failed and all(row["status"] == "PASS" for row in rows)
     # Generic: keep per-criterion PASS/FAIL/BLOCKED/UNTESTABLE. Human confirmation
     # is a separate gate and must not rewrite those statuses into success or 0.
-    achieved = all_pass if is_vehicle else (all_pass and (human_ok or not require_human))
+    evidence_known = not str(hashes.get("artifact_hash") or "").startswith(_HASH_UNREADABLE)
+    achieved = (all_pass and evidence_known) if is_vehicle else (all_pass and evidence_known and (human_ok or not require_human))
     artifact = "none"
     if achieved:
         artifact = "final"
@@ -281,8 +304,9 @@ def accept(manager, project_id: str, *, accepted_by: str, note: str = "") -> dic
     else:
         from app.goal_review import require_human_final_confirmation_ready
         require_human_final_confirmation_ready(preview_result)
-    if not preview_result.get("artifact_hash"):
-        raise ValueError("COMPLETION_GATE_FAILED: 成果物がないため確定できません")
+    if (not preview_result.get("artifact_hash") or
+            str(preview_result["artifact_hash"]).startswith(_HASH_UNREADABLE)):
+        raise ValueError("COMPLETION_GATE_FAILED: 成果物がないか読取不能のため確定できません")
     store = GoalCompletionStore(manager.memory.path)
     store.record_acceptance(
         project_id=project_id,
