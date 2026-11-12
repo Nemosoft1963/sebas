@@ -24,3 +24,4 @@ class QwenTTS:
             instruct="自然で落ち着いた声で、簡潔に話してください。",
         )
         return np.asarray(wavs[0], dtype=np.float32), int(rate)
+

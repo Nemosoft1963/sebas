@@ -33,10 +33,19 @@ def _https_url(value: str) -> bool:
 
 
 def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
-                      *, kit_exists: bool = False) -> list[dict]:
+                      *, kit_exists: bool = False,
+                      selected_channels: list[str] | tuple[str, ...] | None = None,
+                      binding_ok_share_ids: set[str] | frozenset[str] | None = None) -> list[dict]:
     campaign_id = str(campaign.get("id") or "")
     if not campaign_id:
         return []
+    if selected_channels is not None:
+        wanted = {str(item) for item in selected_channels}
+        scoped_shares = [share for share in shares
+                         if isinstance(share, dict)
+                         and str(share.get("channel") or "") in wanted]
+    else:
+        scoped_shares = list(shares or [])
     evidence: list[dict] = []
     site_url = str(campaign.get("google_site_url") or "").strip()
     site_approved = _time(campaign.get("site_publication_approved_at"))
@@ -74,7 +83,7 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
                          "reference": f"premarketing/{campaign_id}/social/social_post_kit.md"})
 
     posted_at: list[datetime] = []
-    for share in shares:
+    for share in scoped_shares:
         if share.get("campaign_id") != campaign_id:
             continue
         approved_at = _time(share.get("approved_at"))
@@ -87,14 +96,37 @@ def campaign_evidence(campaign: dict, shares: list[dict], leads: list[dict],
                              "reference": str(share.get("approved_at"))})
         url = str(share.get("evidence_url") or "").strip()
         registered = _time(share.get("evidence_registered_at"))
+        # B2: 登録時の束縛が ok の共有行だけを投稿済みにする。
+        # binding_ok_share_ids が渡されたときだけ適用し、渡されなければ従来どおり。
+        share_id = str(share.get("id") or "")
+        binding_ok = (binding_ok_share_ids is None
+                      or share_id in set(binding_ok_share_ids))
+        from app.social_premarketing import EVIDENCE_HOSTS
+        host_ok = False
+        try:
+            host = (urlparse(url).hostname or "").lower()
+            allowed = EVIDENCE_HOSTS.get(str(share.get("channel") or ""), set())
+            host_ok = bool(host and host in {str(h).lower() for h in allowed})
+        except (ValueError, TypeError, AttributeError):
+            host_ok = False
         if (approved and share.get("status") == "evidence_registered"
-                and _https_url(url) and registered and registered >= approved_at):
+                and _https_url(url) and host_ok and registered
+                and registered >= approved_at and binding_ok):
             posted_at.append(registered)
             for kind in ("social_post", "manual_social_post", "post_url_registration"):
                 event = {"kind": kind, "id": share.get("id"),
                          "campaign_id": campaign_id, "reference": url}
                 if kind == "social_post":
                     event["channel"] = share.get("channel")
+                # 過去の証跡は当時の束縛に結び付けたまま残す。
+                try:
+                    binding_id = share.get("publication_binding_id")
+                    binding_sha = share.get("publication_binding_sha256")
+                    if binding_id or binding_sha:
+                        event["binding_id"] = binding_id
+                        event["binding_sha256"] = binding_sha
+                except (AttributeError, TypeError):
+                    pass
                 evidence.append(event)
 
     # A historical sync does not satisfy the current campaign after OAuth fails,

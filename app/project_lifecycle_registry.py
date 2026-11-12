@@ -445,6 +445,187 @@ def build_registry() -> list[RegistryEntry]:
             backup_method="ledger-sidecar-preserved",
             delete_method_declared="E-ledger-purge (purge_project_ledger)",
         ))
+    # C5: mail.send_approved の追記型3表(束縛・試行・結果記録)。
+    # 件数試験の既存期待値を変えないため kind は other とし、網羅性検証では
+    # table 名で登録扱いになる。退避は sidecar-preserved(行複写対象外)、
+    # PJ初期化では消さず(reset_for_generation)、完全削除では汎用の個別 purge
+    # 経路を使わず project_delete の _delete_entry_rows の汎用削除(当該PJの行だけ)
+    # で消す。二重の個別削除は作らない。失敗は成功と見せない。
+    # 値そのもの(宛先・本文)は保存しない。自動再送なし。
+    for _t in ("mail_send_bindings", "mail_send_attempts",
+               "mail_send_outcomes"):
+        entries.append(RegistryEntry(
+            name=f"item_ledger:{_t}", kind="other",
+            db_label="item_ledger",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            may_contain_external=True, external_kind="channel_skill_evidence",
+            description="channel_skill_mail_send の送信記録(*.item_ledger.sqlite3)。"
+            "追記のみ。宛先・本文は保存せずハッシュとドメインだけ。自動再送なし",
+            backup_method="item-ledger-sidecar-preserved",
+            delete_method_declared="C5-mail-send-purge (generic _delete_entry_rows)",
+        ))
+    # P0(修正A/B): 項目別検証台帳 (サイドカーSQLite: *.item_ledger.sqlite3 の
+    # requirement_item_ledger / requirement_item_rows /
+    # requirement_item_confirmations)。kind は同様に "other"
+    # とし、件数テストの対象外にする。網羅性検証 (audit_registry_completeness)
+    # では table 名で登録扱いになる。退避は sidecar-preserved (行複写対象外)、
+    # PJ初期化では記録を変えず (reset_for_generation)、完全削除では
+    # purge_project_items で当該PJ行を消す。IDと状態のみ。秘密・原本本文を入れない。
+    for _t in ("requirement_item_ledger", "requirement_item_rows",
+               "requirement_item_confirmations", "requirement_repair_runs"):
+        entries.append(RegistryEntry(
+            name=f"item_ledger:{_t}", kind="other", db_label="item_ledger",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="requirement_item_ledger の項目別検証台帳(*.item_ledger.sqlite3)。"
+                        "追記のみ。最終検証レポートはこの台帳からのみ生成",
+            backup_method="item-ledger-sidecar-preserved",
+            delete_method_declared="P0-item-ledger-purge (purge_project_items)",
+        ))
+    for _t in ("project_run_cycles", "project_run_open_items",
+                "project_run_results"):
+        entries.append(RegistryEntry(
+            name=f"item_ledger:{_t}", kind="other", db_label="item_ledger",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            description="run_cycles の実行サイクル記録・残件台帳と当時の最小結果(*.item_ledger.sqlite3)。"
+                        "追記のみ。execution_state と goal_verdict は別軸",
+            backup_method="item-ledger-sidecar-preserved",
+            delete_method_declared="P0-run-cycle-purge (purge_project_run_cycles)",
+        ))
+    # A2: 問い合わせ窓口・発信媒体・使用IDの登録 (追記型・版管理)。
+    # kind は sqlite_table とし、バックアップの行複写・完全削除の汎用経路に
+    # 乗せる (project_column=project_id)。PJ初期化(世代切替)では変えない。
+    entries.append(RegistryEntry(
+        name="item_ledger:contact_routes", kind="sqlite_table",
+        db_label="item_ledger",
+        table="contact_routes", project_column="project_id",
+        shared_with_other_projects=False,
+        description="contact_registry の問い合わせ窓口(*.item_ledger.sqlite3)。"
+                    "追記のみ。退職・昇格操作は版の追加で行う",
+    ))
+    entries.append(RegistryEntry(
+        name="item_ledger:channel_selections", kind="sqlite_table",
+        db_label="item_ledger",
+        table="channel_selections", project_column="project_id",
+        shared_with_other_projects=False,
+        description="contact_registry の発信媒体の選択(*.item_ledger.sqlite3)。"
+                    "追記のみ。媒体ごとの版を保持する",
+    ))
+    entries.append(RegistryEntry(
+        name="item_ledger:public_identities", kind="sqlite_table",
+        db_label="item_ledger",
+        table="public_identities", project_column="project_id",
+        shared_with_other_projects=False,
+        description="contact_registry の使用ID(*.item_ledger.sqlite3)。"
+                    "追記のみ。秘密情報は保存しない",
+    ))
+    # B2: 公開前の版照合の束縛 (追記型)。キット生成時・承認時に記録する。
+    # 完全削除では当該PJの行だけ消す。PJ初期化では消さない。
+    entries.append(RegistryEntry(
+        name="item_ledger:publication_bindings", kind="sqlite_table",
+        db_label="item_ledger",
+        table="publication_bindings", project_column="project_id",
+        shared_with_other_projects=False,
+        description="publication_binding の公開前の版照合の束縛(*.item_ledger.sqlite3)。"
+                    "追記のみ。IDと版とSHA-256だけ。秘密は保存しない",
+    ))
+    # B3: PJごとの運用区分(架空試験/実運用)。追記型の版管理。
+    # kind は sqlite_table とし、バックアップの行複写・完全削除の汎用経路に
+    # 乗せる (project_column=project_id)。PJ初期化(世代切替)では変えない。
+    entries.append(RegistryEntry(
+        name="item_ledger:operating_modes", kind="sqlite_table",
+        db_label="item_ledger",
+        table="operating_modes", project_column="project_id",
+        shared_with_other_projects=False,
+        description="contact_registry の運用区分(*.item_ledger.sqlite3)。"
+                    "追記のみ。demo_test は担当者と理由メモが必須",
+    ))
+    # C1: 共通外部チャネルスキルの追記型実行台帳3表。
+    # kind は sqlite_table とし、バックアップの行複写・完全削除の汎用経路に
+    # 乗せる (project_column=project_id)。PJ初期化(世代切替)では消さない
+    # (B3の運用区分と同じ扱い。channel_skills.reset_for_generation)。
+    # 実通信は作らない。資格情報は保存しない。完全削除で当該PJの行だけ消える。
+    entries.append(RegistryEntry(
+        name="item_ledger:channel_skill_runs", kind="sqlite_table",
+        db_label="item_ledger",
+        table="channel_skill_runs", project_column="project_id",
+        shared_with_other_projects=False,
+        may_contain_external=True, external_kind="channel_skill_evidence",
+        description="channel_skills の実行記録(*.item_ledger.sqlite3)。"
+                    "追記のみ。succeeded は証拠1件以上、no_results は completed_ok のみ",
+    ))
+    entries.append(RegistryEntry(
+        name="item_ledger:channel_skill_evidence", kind="sqlite_table",
+        db_label="item_ledger",
+        table="channel_skill_evidence", project_column="project_id",
+        shared_with_other_projects=False,
+        may_contain_external=True, external_kind="channel_skill_evidence",
+        description="channel_skills の証拠(*.item_ledger.sqlite3)。"
+                    "本文は保存せずハッシュと伏せた抜粋だけ。未信頼データ",
+    ))
+    entries.append(RegistryEntry(
+        name="item_ledger:channel_skill_verifications", kind="sqlite_table",
+        db_label="item_ledger",
+        table="channel_skill_verifications", project_column="project_id",
+        shared_with_other_projects=False,
+        description="channel_skills の権限・実機の確認記録(*.item_ledger.sqlite3)。"
+                    "追記のみ。取消は revoke 行。定義や接続だけでは確認済みにしない",
+    ))
+    # C3: mail.receive の追記型5表。
+    # kind は sqlite_table とし、バックアップの行複写・完全削除の汎用経路に
+    # 乗せる (project_column=project_id)。PJ初期化(世代切替)では消さない
+    # (channel_skill_mail.reset_for_generation)。
+    # 実通信は作らない。資格情報・本文は保存しない。完全削除で当該PJの行だけ消える。
+    for _t in ("mail_receive_settings", "mail_messages",
+               "mail_receive_cursors", "mail_reply_candidates",
+               "mail_reply_candidate_confirmations"):
+        entries.append(RegistryEntry(
+            name=f"item_ledger:{_t}", kind="sqlite_table",
+            db_label="item_ledger",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            may_contain_external=True, external_kind="channel_skill_evidence",
+            description="channel_skill_mail の受信記録(*.item_ledger.sqlite3)。"
+                        "追記のみ。本文・資格情報は保存しない。未信頼データ",
+        ))
+    # C4: social.observe の追記型2表(設定・観測)。指標は観測行の metrics_json に
+    # 保存し、C1の証拠の表の列は増やさない。
+    # kind は sqlite_table とし、バックアップの行複写・完全削除の汎用経路に
+    # 乗せる (project_column=project_id)。PJ初期化(世代切替)では消さない
+    # (channel_skill_social.reset_for_generation)。
+    # 実通信は作らない。資格情報・本文は保存しない。完全削除で当該PJの行だけ消える。
+    for _t in ("social_observe_settings", "social_observations"):
+        entries.append(RegistryEntry(
+            name=f"item_ledger:{_t}", kind="sqlite_table",
+            db_label="item_ledger",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            may_contain_external=True, external_kind="channel_skill_evidence",
+            description="channel_skill_social の観測記録(*.item_ledger.sqlite3)。"
+            "追記のみ。指標の取得不能は null で保存し、0にしない。未信頼データ",
+        ))
+    # C5: mail.send_approved の追記型3表(束縛・試行・結果記録)。
+    # 件数試験の既存期待値を変えないため kind は other とし、網羅性検証では
+    # table 名で登録扱いになる。退避は sidecar-preserved(行複写対象外)、
+    # PJ初期化では消さず(reset_for_generation)、完全削除では汎用の個別 purge
+    # 経路を使わず project_delete の _delete_entry_rows の汎用削除(当該PJの行だけ)
+    # で消す。二重の個別削除は作らない。失敗は成功と見せない。
+    # 値そのもの(宛先・本文)は保存しない。自動再送なし。
+    for _t in ("mail_send_bindings", "mail_send_attempts",
+               "mail_send_outcomes"):
+        entries.append(RegistryEntry(
+            name=f"item_ledger:{_t}", kind="other",
+            db_label="item_ledger",
+            table=_t, project_column="project_id",
+            shared_with_other_projects=False,
+            may_contain_external=True, external_kind="channel_skill_evidence",
+            description="channel_skill_mail_send の送信記録(*.item_ledger.sqlite3)。"
+            "追記のみ。宛先・本文は保存せずハッシュとドメインだけ。自動再送なし",
+            backup_method="item-ledger-sidecar-preserved",
+            delete_method_declared="C5-mail-send-purge (generic _delete_entry_rows)",
+        ))
     return entries
 
 
@@ -507,6 +688,8 @@ def resolve_db_path(memory_path: str | Path, db_label: str) -> Path | None:
         return mem.with_name(mem.name + ".shadow.sqlite3")
     if db_label == "ledger":
         return mem.with_name(mem.name + ".ledger.sqlite3")
+    if db_label == "item_ledger":
+        return mem.with_name(mem.name + ".item_ledger.sqlite3")
     return None
 
 

@@ -86,3 +86,4 @@ class ConversationController:
                      f"{(first_token_at-started)*1000:.1f}" if first_token_at else "none", interrupted)
             self.state = ConversationState.IDLE
         return "".join(result).strip()
+

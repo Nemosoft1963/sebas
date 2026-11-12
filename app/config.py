@@ -47,3 +47,4 @@ class Settings:
             min_speech_ms=audio["vad"]["min_speech_ms"],
             database=ROOT / system["storage"]["database"], log_dir=ROOT / system["storage"]["log_dir"],
         )
+

@@ -137,7 +137,8 @@ def test_generated_plan_has_no_false_positive(tmp_path):
     mgr = Manager(memory=mem, workspace=ws, planning_projects=set(), llm=None,
                   workers={}, _sync_memos=lambda pid: None,
                   provider_statuses=lambda: [{"id": "chatgpt", "configured": True}],
-                  plan_review_runner=None)
+                  plan_review_runner=None,
+                  _outbound_guard=lambda pid, purpose, text, providers=(): {"ok": True, "codes": []})
     hx1, hx2 = uuid.uuid4().hex, uuid.uuid4().hex
     criteria = ["架空手順Aを定義する", "架空手順Bを報告する"]
     t1 = compile_task(1, criteria[0], {"title": "架空資料A", "scope": f"架空Aの整理。工程 {hx1} を対象とし t-0123456789ab で管理し 2026-10-06 に実施する",

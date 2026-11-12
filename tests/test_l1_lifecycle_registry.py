@@ -255,6 +255,137 @@ def _fill_all_stores(env) -> None:
         db.execute("INSERT OR REPLACE INTO recoveries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    ("架空rec1", pid, "架空t", "1", "架空sh", "架空ps", "content",
                     "open", 0, 0, 0, 0, "", "{}", "[]", "[]", time.time(), time.time()))
+    # A2: 問い合わせ・媒体・使用IDの登録 (追記型・版管理。実値のみ)。
+    from app.contact_registry import (
+        register_channel_selection as _a2_channel,
+        register_contact_route as _a2_route,
+        register_public_identity as _a2_identity,
+    )
+    _a2_route(mem, project_id=pid, type="email",
+              public_value="a2@example.com",
+              source_kind="registered", actor="架空担当")
+    _a2_channel(mem, project_id=pid, platform="X",
+                enabled=True, actor="架空担当")
+    _a2_identity(mem, project_id=pid, platform="X", handle="@架空a2",
+                 profile_url="https://social.example.invalid/x/架空",
+                 source_kind="registered", actor="架空担当")
+    # B2: 公開前の版照合の束縛 (追記型・版管理)。他PJの削除に影響しない。
+    from app.publication_binding import record_binding as _b2_binding
+    _b2_binding(mem, project_id=pid, campaign_id=camp["id"], stage="kit",
+                binding={"schema_version": 1, "contact_routes": [],
+                         "channel_selection": {"channels": [], "versions": {}},
+                         "identities": [], "packet_sha256": "", "kit_sha256": ""},
+                actor="架空担当")
+    # B3: 運用区分 (追記型・版管理)。未設定の既定は public。件数試験のため1件入れる。
+    from app.contact_registry import save_operating_mode as _b3_mode
+    _b3_mode(mem, project_id=pid, mode="production",
+             actor="架空担当", reason="架空の実運用区分")
+    # C1: チャネルスキルの実行台帳3表 (追記型)。件数試験のため各1件入れる。
+    # 実通信は行わない。証拠は本文なし・伏せ済み抜粋だけ。
+    from app.channel_skills import (
+        build_evidence as _c1_evidence,
+        record_evidence as _c1_record_evidence,
+        record_run as _c1_run,
+        record_verification as _c1_verify,
+    )
+    _c1_run(mem, project_id=pid, capability_id="web.search_public",
+            status="no_results", completed_ok=True,
+            purpose="架空の公開調査", operating_mode="demo_test")
+    _c1_record_evidence(
+        mem,
+        _c1_evidence(
+            provider="public_web", account_or_public_id="架空検索",
+            url="https://example.invalid/架空1",
+            fetched_at="2026-10-26T00:00:00+00:00",
+            period_start="2026-10-26T00:00:00+00:00",
+            period_end="2026-10-26T00:00:00+00:00",
+            body="架空の公開調査結果", project_id=pid,
+            plan_item_id="SC01-R01", purpose="架空の公開調査",
+            retention_days=90),
+        capability_id="web.search_public")
+    _c1_verify(mem, project_id=pid, capability_id="web.search_public",
+               verification_kind="permission", actor="架空担当",
+               memo="架空の権限確認")
+    # C3: mail.receive の追記型5表。件数試験のため各1件入れる。
+    # 実通信は行わない。本文・資格情報は保存しない。
+    from app.channel_skill_mail import (
+        run_mail_receive as _c3_run,
+        save_mail_settings as _c3_settings,
+    )
+
+    class _C3FakeAdapter:
+        def fetch(self, folder, since, until, after_cursor):
+            return {"messages": [{
+                "provider_id": "架空prov:1", "uid": 1, "uidvalidity": "架空v",
+                "message_id": "<架空1@example.invalid>",
+                "from": "架空差出人@example.invalid",
+                "to": "架空宛先@example.invalid", "subject": "架空件名",
+                "date": "2026-10-26T00:00:00+00:00", "in_reply_to": "",
+                "references": [], "body_text": "架空の受信本文",
+                "attachment_sha256s": []}],
+                    "cursor": {"uidvalidity": "架空v", "last_uid": 1},
+                    "completed_ok": True}
+
+    _c3_settings(mem, pid, {
+        "account_label": "架空受信箱", "allowed_folders": ["INBOX"],
+        "max_period_days": 31, "purpose": "架空の差分取得",
+        "retention_days": 90, "allowed_viewers": ["operator"],
+        "credential_env_prefix": "MAILBOX_A", "actor": "架空担当"})
+    _c3_run(mem, pid, folder="INBOX", since="2026-10-26",
+            until="2026-10-26", purpose="架空の差分取得",
+            operating_mode="demo_test", adapter=_C3FakeAdapter())
+    # 確認の表は候補IDに依存せず直接追記する(受信だけでは候補は生まれない)。
+    # 棚卸しの件数試験のための埋めであり、返信の照合はC3試験で行う。
+    from app.requirement_item_ledger import item_ledger_db_path as _c3_ledger
+    import sqlite3 as _c3_sqlite
+    _c3_db = _c3_sqlite.connect(str(_c3_ledger(mem)))
+    try:
+        _c3_db.execute(
+            "INSERT INTO mail_reply_candidates(project_id, message_provider_id,"
+            " action_id, basis, status, created_at) VALUES(?,?,?,?,?,?)",
+            (pid, "架空prov:1", "架空action1", "架空basis", "candidate",
+             time.time()))
+        _c3_cid = int(_c3_db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        _c3_db.execute(
+            "INSERT INTO mail_reply_candidate_confirmations(project_id,"
+            " candidate_id, actor, memo, created_at) VALUES(?,?,?,?,?)",
+            (pid, int(_c3_cid), "架空担当", "架空の確認", time.time()))
+        _c3_db.commit()
+    finally:
+        _c3_db.close()
+    # C4: social.observe の追記型2表。件数試験のため各1件入れる。
+    # 実通信は行わない。実アダプタは登録しない(本番では needs_configuration)。
+    # 埋めは設定の保存と、登録済みURLへの人手の観測で行う(自動の実行はしない)。
+    from app.channel_skill_social import (
+        record_manual_observation as _c4_manual,
+        save_social_settings as _c4_settings,
+    )
+    _c4_settings(mem, pid, {
+        "platform": "x", "public_identity_id": "架空c4id",
+        "purpose": "架空の反応確認", "retention_days": 90,
+        "allowed_viewers": ["operator"],
+        "credential_env_prefix": "SOCIALX_A", "actor": "架空担当"})
+    # `_fill_all_stores` の先頭で save_social_drafts により同じ共有行が既にある。
+    # 既存行を証跡登録済みへ更新する(INSERTは一意制約で失敗する)。
+    with memory._connect() as db:
+        db.execute(
+            "UPDATE campaign_social_shares SET status='evidence_registered',"
+            " evidence_url=?, publication_binding_id=?, approved_at=?,"
+            " updated_at=? WHERE project_id=? AND campaign_id=?"
+            " AND channel=? AND variant=?",
+            ("https://x.com/架空c4/status/1001", "55",
+             "2026-10-26T00:00:00+00:00",
+             "2026-10-26T00:00:00+00:00",
+             pid, camp["id"], "x", "primary"))
+    from app.contact_registry import save_operating_mode as _c4_mode
+    _c4_mode(mem, project_id=pid, mode="demo_test",
+             actor="架空担当", reason="架空の試験区分")
+    _c4_manual(mem, pid, platform="x",
+               post_url="https://x.com/架空c4/status/1001",
+               observed_at="2026-10-26T00:00:00+00:00",
+               metrics={"likes": 1},
+               evidence_note="架空の目視確認",
+               actor="架空担当", memo="架空の記録")
     # workspace file.
     ws.apply_operations("", pid, [{"action": "write_text", "path": "架空note.txt",
                                    "content": "架空内容"}])
@@ -592,9 +723,10 @@ def test_lifecycle_api_preview_backup_verify(monkeypatch, tmp_path):
     rl = client.get(f"/api/projects/{pid}/lifecycle/backups")
     assert rl.status_code == 200 and len(rl.json()["backups"]) == 1
     backup_id = rl.json()["backups"][0]["backup_id"]
+    assert len(backup_id) <= 36
     # verify。
     rv = client.post(f"/api/projects/{pid}/lifecycle/backups/{backup_id}/verify")
-    assert rv.status_code == 200 and rv.json()["ok"] is True
+    assert rv.status_code == 200 and rv.json()["ok"] is True, rv.text
     # 任意パスは受け取らない: backup_id に / を含めると404/400。
     assert client.post(f"/api/projects/{pid}/lifecycle/backups/../x/verify").status_code in (400, 404)
     assert client.post("/api/projects/nope/lifecycle/backups/x/verify").status_code == 404

@@ -223,12 +223,19 @@ def test_f2a_call_gemini_audit_failure_still_stops(tmp_path, monkeypatch):
 
 # --- plan_review_loop._remap_base (照合不能を通過にしない) ---
 
+def _p0a_explicit():
+    return ("利用者向けに架空手順Aの定義書1件と架空手順Bの報告書1件を作る計画で、"
+            "利用者向け完成成果物は2件、内部記録・検証報告は2件。達成条件SC01・SC02に対応する。")
+
+
 def _stopped_human_run(mgr, pid):
     import app.plan_review_loop as loop
     from app.goal_review import ReviewStore
     _contract(mgr, pid)
     mgr.plan_review_runner = lambda *a, **k: []
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-remap-base")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_p0a_explicit())
+    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_explicit(), "idem-remap-base",
+                             expected_packet_hash=preview["packet_hash"])
     run = loop.get_run(mgr, pid, started["id"])
     run["state"] = "stopped"
     run["stop_kind"] = "human_required"
@@ -309,7 +316,9 @@ def test_f2a_run_locked_audit_failure_not_success(tmp_path, monkeypatch):
         return [{"id": "chatgpt", "ok": True,
                  "review": json.dumps({"verdict": "pass", "issues": []})}]
     mgr.plan_review_runner = _ok_runner
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-runlocked")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_p0a_explicit())
+    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_explicit(), "idem-runlocked",
+                             expected_packet_hash=preview["packet_hash"])
     run = loop.get_run(mgr, pid, started["id"])
     # 空転ガードの停止分岐を直接駆動する(再現性のため _stop_guard_tick を固定)。
     monkeypatch.setattr(loop, "_stop_guard_tick",
@@ -341,7 +350,9 @@ def test_f2a_stop_audit_failure_not_success(tmp_path, monkeypatch):
         return [{"id": "chatgpt", "ok": True,
                  "review": json.dumps({"verdict": "pass", "issues": []})}]
     mgr.plan_review_runner = _ok_runner2
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-stop")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_p0a_explicit())
+    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_explicit(), "idem-stop",
+                             expected_packet_hash=preview["packet_hash"])
     run = loop.get_run(mgr, pid, started["id"])
     run["draft_mode"] = "legacy_gemini"
     loop._save(mgr, run)
@@ -369,7 +380,9 @@ def test_f2a_stop_guard_tick_history_failure_recorded(tmp_path, monkeypatch):
     mgr, pid = _manager(tmp_path, "guard-tick")
     _contract(mgr, pid)
     mgr.plan_review_runner = lambda *a, **k: []
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-guard")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_p0a_explicit())
+    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_explicit(), "idem-guard",
+                             expected_packet_hash=preview["packet_hash"])
     run = loop.get_run(mgr, pid, started["id"])
     monkeypatch.setattr(sc, "append_history",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("架空の履歴失敗")))
@@ -443,7 +456,9 @@ def test_f2a_remap_run_audit_failure_not_success(tmp_path, monkeypatch):
     # 対応付け可能な指摘で stopped_human を作り直す。
     _contract(mgr, pid)
     mgr.plan_review_runner = lambda *a, **k: []
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-remap3")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_p0a_explicit())
+    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_explicit(), "idem-remap3",
+                             expected_packet_hash=preview["packet_hash"])
     run = loop.get_run(mgr, pid, started["id"])
     run["state"] = "stopped"
     run["stop_kind"] = "human_required"
@@ -474,7 +489,9 @@ def test_f2a_start_run_audit_failure_not_success(tmp_path, monkeypatch):
     mgr.plan_review_runner = lambda *a, **k: []
     monkeypatch.setattr(mgr.memory, "add_event",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("架空の監査失敗")))
-    out = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-start-audit")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_p0a_explicit())
+    out = loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_explicit(), "idem-start-audit",
+                         expected_packet_hash=preview["packet_hash"])
     assert out["state"] == "permitted", out
     assert out.get("audit_error") or out.get("id"), out
 

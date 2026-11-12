@@ -97,7 +97,8 @@ def _manager(tmp_path, providers=("chatgpt",)):
     mgr = Manager(memory=mem, workspace=ws, planning_projects=set(), llm=None,
                   workers={}, _sync_memos=lambda pid: None,
                   provider_statuses=lambda: [{"id": p, "configured": True} for p in providers],
-                  plan_review_runner=None)
+                  plan_review_runner=None,
+                  _outbound_guard=lambda pid, purpose, text, providers=(): {"ok": True, "codes": []})
     return mgr, mem, pid
 
 
@@ -168,6 +169,11 @@ def _install(monkeypatch, mgr, stub):
     return loop
 
 
+def _p0a_secret_explicit(value):
+    return ("利用者向けに架空手順Aの定義書1件を作る計画で、利用者向け完成成果物は2件、"
+            "内部記録・検証報告は2件。達成条件SC01・SC02に対応する。公開説明です。" + str(value) + " が混入")
+
+
 @pytest.mark.parametrize("value", SECRET_CASES)
 def test_start_blocks_each_secret_without_leak(tmp_path, monkeypatch, value):
     mgr, mem, pid = _manager(tmp_path)
@@ -175,15 +181,16 @@ def test_start_blocks_each_secret_without_leak(tmp_path, monkeypatch, value):
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub)
+    # P0-A: 編集後の具体的な説明でも秘密混入は開始前に止まる(409相当の開始条件不備)。
     with pytest.raises(ValueError, match="秘密混入"):
-        loop.start_run(mgr, pid, "human-a", ["chatgpt"], f"公開説明です。{value} が混入", f"idem-{abs(hash(value)) % 10**8}")
+        loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_secret_explicit(value), f"idem-{abs(hash(value)) % 10**8}")
     assert stub.calls == 0
     # エラーメッセージに値そのものを出さない。
     try:
-        loop.start_run(mgr, pid, "human-a", ["chatgpt"], f"公開説明です。{value} が混入", "idem-x")
+        loop.start_run(mgr, pid, "human-a", ["chatgpt"], _p0a_secret_explicit(value), "idem-x")
     except ValueError as exc:
         assert value not in str(exc)
-        assert "種別" in str(exc)
+        assert "秘密混入" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("must stop")
 
@@ -219,7 +226,11 @@ def test_payload_log_state_screen_api_have_no_secret(tmp_path, monkeypatch):
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub)
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-noleak")
+    explicit = ("利用者向けに架空手順Aの定義書1件と架空手順Bの報告書1件を作る計画で、"
+                "利用者向け完成成果物は2件、内部記録・検証報告は2件。達成条件SC01・SC02に対応する。")
+    preview = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=explicit)
+    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], explicit, "idem-noleak",
+                             expected_packet_hash=preview["packet_hash"])
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "awaiting_human"
     blob = canonical(stub.sent_prompts)

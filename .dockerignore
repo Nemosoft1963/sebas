@@ -5,3 +5,9 @@ __pycache__
 data
 local_voice_ai.egg-info
 .git
+.playwright-browsers
+backups
+temp
+output
+tests
+workspace

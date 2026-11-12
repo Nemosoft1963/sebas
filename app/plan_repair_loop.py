@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 import time
 import uuid
 
@@ -39,6 +40,17 @@ NEXT = {
 MAX_EXTERNAL_CALLS = 3
 MAX_ADVANCES = 12
 MAX_PATCHED_TASKS = 8
+
+#: P3-1: 解決確認台帳のコードの固定順。合否には影響しない情報コード
+#: `generic_only` と失敗時の `ledger_error` を含む。
+LEDGER_CODE_ORDER = (
+    "task_missing",
+    "no_patch_recorded",
+    "remedy_not_in_plan",
+    "patch_not_in_plan",
+    "generic_only",
+    "ledger_error",
+)
 
 
 def _store(manager):
@@ -103,6 +115,7 @@ def list_runs(manager, project_id: str) -> list[dict]:
 
 
 def _candidate_view(candidate: dict) -> dict:
+    check = candidate.get("check") if isinstance(candidate.get("check"), dict) else {}
     return {
         "issue_id": candidate.get("issue_id"),
         "issue_excerpt": candidate.get("issue_excerpt") or "",
@@ -110,13 +123,17 @@ def _candidate_view(candidate: dict) -> dict:
         "task_key": candidate.get("task_key"),
         "classification": candidate.get("classification"),
         "bound": bool(candidate.get("bound")),
+        "binding_source": candidate.get("binding_source") or "",
         "basis": candidate.get("basis") or "",
         "question": candidate.get("question") or "",
         "has_patch": bool(candidate.get("patch")),
+        "patch_basis": str(candidate.get("patch_basis") or ""),
+        "patch_basis_reason": str(candidate.get("patch_basis_reason") or ""),
         "plan_signature": candidate.get("plan_signature") or "",
         "goal_contract_hash": candidate.get("goal_contract_hash") or "",
         "contract_hash": candidate.get("contract_hash") or "",
         "artifact_diff": candidate.get("artifact_diff") or {},
+        "check": {"passed": check.get("passed"), "codes": list(check.get("codes") or [])},
     }
 
 
@@ -142,19 +159,22 @@ def _artifact_diff_of(patch: dict | None) -> dict:
     return {"before": dict(before), "after": dict(after)}
 
 
-def _enrich_candidates(manager, project_id: str, mission: dict, raw_candidates: list[dict]) -> list[dict]:
+def _enrich_candidates(manager, project_id: str, mission: dict, raw_candidates: list[dict],
+                       contract: dict | None = None) -> list[dict]:
     """P0: 指摘→現行条件→現行工程→成果物契約/検証条件差分を証拠付きで保存する。"""
+    base_contract = contract if isinstance(contract, dict) else {}
     enriched = []
     for cand in raw_candidates or []:
         patch = cand.get("patch") if isinstance(cand.get("patch"), dict) else None
         task_key = str(cand.get("task_key") or "")
-        enriched.append({
+        row = {
             "issue_id": str(cand.get("issue_id") or ""),
             "issue_excerpt": str(cand.get("basis") or "")[:600],
             "criterion_id": str(cand.get("criterion_id") or ""),
             "task_key": task_key,
             "classification": str(cand.get("classification") or ""),
             "bound": bool(cand.get("bound")),
+            "binding_source": str(cand.get("binding_source") or ""),
             "basis": str(cand.get("basis") or "")[:2000],
             "question": str(cand.get("question") or ""),
             "patch": patch,
@@ -162,7 +182,12 @@ def _enrich_candidates(manager, project_id: str, mission: dict, raw_candidates: 
             "plan_signature": str(cand.get("plan_signature") or ""),
             "goal_contract_hash": str(cand.get("goal_contract_hash") or ""),
             "contract_hash": _contract_hash_of(mission, task_key) if task_key else "",
-        })
+        }
+        row["check"] = None
+        row["patch_basis"] = str(cand.get("patch_basis") or "")
+        row["patch_basis_reason"] = str(cand.get("patch_basis_reason") or "")
+        row["check"] = check_candidate(mission, base_contract, row)
+        enriched.append(row)
     return enriched
 
 
@@ -210,7 +235,8 @@ def start(manager, project_id: str, actor: str, issues: list[dict] | None = None
     issue_ids = []
     for cand in preview.get("candidates") or []:
         issue_ids.append(str(cand.get("issue_id") or ""))
-    candidates = _enrich_candidates(manager, project_id, mission, preview.get("candidates") or [])
+    candidates = _enrich_candidates(manager, project_id, mission, preview.get("candidates") or [],
+                                    contract)
     try:
         from app.pending_ledger import build as ledger_build
 
@@ -316,8 +342,309 @@ def _run_coverage_check(mission: dict, contract: dict) -> dict:
     return {"coverage": coverage, "retention": retention}
 
 
+def _is_regression(before_passed: bool, before_items: list, after_passed: bool, after_items: list) -> bool:
+    """適用前は通っていたものが通らなくなったか、通っていないが問題が増えたか。"""
+    if before_passed and not after_passed:
+        return True
+    if not before_passed:
+        return bool(set(after_items or []) - set(before_items or []))
+    return False
+
+
+def check_candidate(mission: dict, contract: dict, candidate: dict) -> dict:
+    """候補パッチの独立検査(決定的・読み取り専用・書き込みなし)。
+
+    パッチの意味の妥当性(指摘内容を実際に解決するか)は判定しない。
+    構造上の安全確認だけを行う。`passed` が True のときだけ適用可能。
+    `passed` は「解決済み」を意味しない。patch_basis が issue_remedy の
+    候補は追記(指摘対応: )がちょうど1箇所あり追記以外が before と同じかを
+    構造的に確認するが、修正案が指摘を実際に解決するかは未検査。
+    """
+    try:
+        if not isinstance(candidate, dict):
+            raise TypeError("candidate must be an object")
+        patch = candidate.get("patch")
+        if patch is None:
+            return {"passed": None, "codes": [], "details": {"skipped": "no_patch"}}
+        if not isinstance(patch, dict):
+            raise TypeError("patch must be an object")
+        before = patch.get("before")
+        after = patch.get("after")
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            raise TypeError("patch before/after must be objects")
+        task_key = str(candidate.get("task_key") or "")
+        issue_id = str(candidate.get("issue_id") or "")
+        codes: list[str] = []
+        tasks = mission.get("tasks") or []
+        current = None
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            if task_key and str(task.get("task_key") or "") == task_key:
+                current = task
+                break
+        if current is None:
+            codes.append("stale_before")
+        else:
+            from app.structured_planning import contract_of as _contract_of
+
+            cur_desc = str(current.get("description") or "")
+            cur_dep = list(current.get("depends_on") or [])
+            cur_contract = _contract_of(current) or {}
+            bef_desc = str(before.get("description") or "")
+            bef_dep = list(before.get("depends_on") or [])
+            bef_contract = before.get("contract")
+            if bef_desc != cur_desc or bef_dep != cur_dep or bef_contract != cur_contract:
+                codes.append("stale_before")
+        if after == before:
+            codes.append("no_effect")
+        else:
+            aft_dep = list(after.get("depends_on") or [])
+            bef_dep = list(before.get("depends_on") or [])
+            aft_contract = after.get("contract")
+            bef_contract = before.get("contract")
+            aft_desc = str(after.get("description") or "")
+            bef_desc = str(before.get("description") or "")
+            if aft_dep != bef_dep or aft_contract != bef_contract:
+                codes.append("unexpected_change")
+            elif not aft_desc.startswith(bef_desc.rstrip()):
+                codes.append("unexpected_change")
+        target_key = task_key
+        patched = copy.deepcopy(mission)
+        target = None
+        for task in patched.get("tasks") or []:
+            if isinstance(task, dict) and target_key and str(task.get("task_key") or "") == target_key:
+                target = task
+                break
+        if target is not None:
+            target["description"] = str(after.get("description") or "")
+            base_contract = contract if isinstance(contract, dict) else {}
+            before_struct = _run_structure_check(mission, base_contract)
+            after_struct = _run_structure_check(patched, base_contract)
+            if _is_regression(bool(before_struct.get("passed")),
+                              list(before_struct.get("issues") or []),
+                              bool(after_struct.get("passed")),
+                              list(after_struct.get("issues") or [])):
+                codes.append("regression_structure")
+            before_all = _run_coverage_check(mission, base_contract)
+            after_all = _run_coverage_check(patched, base_contract)
+            before_cov = before_all.get("coverage") or {}
+            after_cov = after_all.get("coverage") or {}
+            if _is_regression(bool(before_cov.get("passed")),
+                              list(before_cov.get("issues") or []),
+                              bool(after_cov.get("passed")),
+                              list(after_cov.get("issues") or [])):
+                codes.append("regression_coverage")
+            before_ret = before_all.get("retention") or {}
+            after_ret = after_all.get("retention") or {}
+            if _is_regression(bool(before_ret.get("passed")),
+                              list(before_ret.get("missing_topics") or []),
+                              bool(after_ret.get("passed")),
+                              list(after_ret.get("missing_topics") or [])):
+                codes.append("regression_retention")
+        codes = list(dict.fromkeys(codes))
+        if str(candidate.get("patch_basis") or "") == "issue_remedy":
+            try:
+                from app.local_patch_preview import REMEDY_TAG as _REMEDY_TAG
+            except Exception as exc:
+                raise ValueError("remedy検査を確認できませんでした") from exc
+            bef_desc = str(before.get("description") or "")
+            aft_desc = str(after.get("description") or "")
+            prefix = bef_desc.rstrip()
+            if not aft_desc.startswith(prefix):
+                codes.append("remedy_not_reflected")
+            else:
+                rest = aft_desc[len(prefix):]
+                if rest.count(_REMEDY_TAG) != 1:
+                    codes.append("remedy_not_reflected")
+            if "unexpected_change" in codes and "remedy_not_reflected" not in codes:
+                codes.append("remedy_not_reflected")
+            codes = list(dict.fromkeys(codes))
+        return {"passed": not codes, "codes": codes,
+                "details": {"task_key": task_key, "issue_id": issue_id}}
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
+        if isinstance(candidate, dict):
+            iid = str(candidate.get("issue_id") or "")
+            tkey = str(candidate.get("task_key") or "")
+        else:
+            iid = ""
+            tkey = ""
+        return {"passed": False, "codes": ["check_error"],
+                "details": {"error": type(exc).__name__, "issue_id": iid, "task_key": tkey}}
+
+
+def resolution_ledger(mission: dict, run: dict) -> dict:
+    """P3-1: 解決確認台帳(決定的・外部通信なし・書き込みなし)。
+
+    人が承認して適用した指摘ごと(run["applied"][*]["issue_ids"])に1行作る。
+    構造上の残存確認であり、パッチが指摘を実際に解決するか(意味の妥当性)は判定しない。
+    `retained` を「解決済み」と表示・記録しない(意味の妥当性は未検査)。
+    """
+    try:
+        from app.local_patch_preview import REMEDY_TAG as _REMEDY_TAG
+
+        applied = run.get("applied") or []
+        if not applied:
+            return {"rows": [], "all_retained": True, "codes": []}
+        if not isinstance(applied, list):
+            raise TypeError("applied must be an array")
+        candidates = run.get("candidates") or []
+        if not isinstance(candidates, list):
+            raise TypeError("candidates must be an array")
+        tasks = mission.get("tasks") or []
+        if not isinstance(tasks, list):
+            raise TypeError("tasks must be an array")
+        by_issue: dict[str, dict] = {}
+        for cand in candidates:
+            # 非dictが混ざれば AttributeError で fail-closed にする(握りつぶさない)。
+            iid = str(cand.get("issue_id") or "")
+            if iid and iid not in by_issue:
+                by_issue[iid] = cand
+        task_by_key: dict[str, dict] = {}
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            tkey = str(task.get("task_key") or "")
+            if tkey and tkey not in task_by_key:
+                task_by_key[tkey] = task
+        rows: list[dict] = []
+        for entry in applied:
+            issue_ids = entry.get("issue_ids")
+            if not isinstance(issue_ids, list):
+                raise TypeError("applied issue_ids must be an array")
+            entry_key = str(entry.get("task_key") or "")
+            for raw_iid in issue_ids:
+                iid = str(raw_iid or "")
+                if not iid:
+                    raise ValueError("issue_id is required")
+                if iid not in by_issue:
+                    raise KeyError(iid)
+                cand = by_issue[iid]
+                tkey = str(cand.get("task_key") or entry_key or "")
+                basis = str(cand.get("patch_basis") or "")
+                current = task_by_key.get(tkey)
+                if current is None:
+                    rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                 "status": "not_retained", "codes": ["task_missing"]})
+                    continue
+                current_desc = current.get("description")
+                if current_desc is None:
+                    rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                 "status": "not_retained", "codes": ["task_missing"]})
+                    continue
+                if not isinstance(current_desc, str):
+                    raise TypeError("task description must be a string")
+                patch = cand.get("patch")
+                if not isinstance(patch, dict):
+                    rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                 "status": "not_retained", "codes": ["no_patch_recorded"]})
+                    continue
+                after = patch.get("after")
+                if not isinstance(after, dict):
+                    rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                 "status": "not_retained", "codes": ["no_patch_recorded"]})
+                    continue
+                after_desc = after.get("description")
+                if not isinstance(after_desc, str) or not after_desc.strip():
+                    rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                 "status": "not_retained", "codes": ["no_patch_recorded"]})
+                    continue
+                if basis == "issue_remedy":
+                    remedy_line = ""
+                    for line in after_desc.splitlines():
+                        if line.startswith(_REMEDY_TAG):
+                            remedy_line = line
+                    if not remedy_line or remedy_line not in current_desc:
+                        rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                     "status": "not_retained", "codes": ["remedy_not_in_plan"]})
+                    else:
+                        rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                     "status": "retained", "codes": []})
+                else:
+                    before = patch.get("before") if isinstance(patch.get("before"), dict) else {}
+                    bef_desc = str(before.get("description") or "")
+                    prefix = bef_desc.rstrip()
+                    if prefix and after_desc.startswith(prefix):
+                        added = after_desc[len(prefix):]
+                    elif bef_desc and bef_desc in after_desc:
+                        added = after_desc.replace(bef_desc, "", 1)
+                    else:
+                        added = after_desc
+                    needle = added.strip()
+                    if not needle or needle not in current_desc:
+                        rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                     "status": "not_retained", "codes": ["patch_not_in_plan"]})
+                    else:
+                        rows.append({"issue_id": iid, "task_key": tkey, "patch_basis": basis,
+                                     "status": "retained", "codes": ["generic_only"]})
+        all_retained = all(r.get("status") == "retained" for r in rows)
+        seen: list[str] = []
+        for row in rows:
+            for code in row.get("codes") or []:
+                if code not in seen:
+                    seen.append(code)
+        ordered = [c for c in LEDGER_CODE_ORDER if c in seen]
+        ordered.extend([c for c in seen if c not in ordered])
+        return {"rows": rows, "all_retained": bool(all_retained), "codes": ordered}
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {"rows": [], "all_retained": False, "codes": ["ledger_error"],
+                "details": type(exc).__name__}
+
+
+def _merged_task_description(original_desc, entries: list[tuple[str, dict]]) -> str:
+    """P3-2: 同一工程の複数パッチを承認順に統合する(構造上の適用のみ)。
+
+    追記部分 = after.description から before.description を接頭辞として除いた
+    部分(`rstrip` の扱いは `check_candidate` と同じ)。冪等のために既に
+    含まれる追記は足さない。意味の妥当性は判定しない(未検査)。
+    取り出せない場合は fail-closed で ValueError(PATCH_MERGE_FAILED)を送出する。
+    """
+    if len(entries) == 1:
+        # 1件だけの適用は従来と完全同一にする(既存の振舞いを変えない)。
+        # fail-closed の接頭辞検査は複数件の統合時のみ行う。
+        iid, patch = entries[0]
+        after = patch.get("after") if isinstance(patch, dict) else None
+        after = after if isinstance(after, dict) else {}
+        aft = str(after.get("description") or "")
+        if not aft:
+            return original_desc
+        return aft
+    cur = str(original_desc or "")
+    for iid, patch in entries:
+        after = patch.get("after") if isinstance(patch, dict) else None
+        before = patch.get("before") if isinstance(patch, dict) else None
+        after = after if isinstance(after, dict) else {}
+        before = before if isinstance(before, dict) else {}
+        aft = str(after.get("description") or "")
+        if not aft:
+            continue
+        bef = str(before.get("description") or "")
+        if not aft.startswith(bef.rstrip()):
+            raise ValueError(f"PATCH_MERGE_FAILED: {iid}")
+        added = aft[len(bef.rstrip()):]
+        if not added.strip():
+            continue
+        if added in cur:
+            continue
+        for raw in added.split("\n\n"):
+            piece = raw.strip()
+            if not piece:
+                continue
+            if piece in cur:
+                continue
+            if not cur:
+                cur = piece
+            elif cur.endswith("\n\n"):
+                cur = cur + piece
+            elif cur.endswith("\n"):
+                cur = cur + "\n" + piece
+            else:
+                cur = cur + "\n\n" + piece
+    return cur
+
+
 def _do_patched(manager, project_id: str, run: dict, payload: dict, actor: str) -> dict:
-    mission, signature, _contract = _current_context(manager, project_id)
+    mission, signature, contract = _current_context(manager, project_id)
     if signature != str(run.get("plan_signature") or ""):
         raise ValueError("開始後に計画が変わりました。現行版で新規開始してください")
     proposed = (run.get("evidence") or {}).get("proposed") or {}
@@ -358,6 +685,11 @@ def _do_patched(manager, project_id: str, run: dict, payload: dict, actor: str) 
     touched_keys = {by_issue[iid]["task_key"] for iid in approved_map if by_issue[iid].get("task_key")}
     if len(touched_keys) > MAX_PATCHED_TASKS:
         raise ValueError(f"変更範囲が上限({MAX_PATCHED_TASKS}工程)を超えています")
+    for iid in approved_map:
+        fresh = check_candidate(mission, contract, by_issue[iid])
+        if fresh.get("passed") is not True:
+            bad = ",".join(fresh.get("codes") or ["check_failed"])
+            raise ValueError(f"CANDIDATE_CHECK_FAILED: {iid}: {bad}")
     new_signature = signature
     applied: list[dict] = []
     if approved_map:
@@ -376,12 +708,14 @@ def _do_patched(manager, project_id: str, run: dict, payload: dict, actor: str) 
                 "mode": task.get("mode") or "local",
             }
             if row["task_key"] in patch_by_key:
-                after = patch_by_key[row["task_key"]][0][1].get("after") or {}
-                row["description"] = after.get("description") or row["description"]
+                entries = patch_by_key[row["task_key"]]
+                row["description"] = _merged_task_description(row["description"], entries)
+                first_iid = entries[0][0]
                 applied.append({
                     "task_key": row["task_key"],
-                    "issue_ids": [iid for iid, _p in patch_by_key[row["task_key"]]],
-                    **approved_map[[iid for iid, _p in patch_by_key[row["task_key"]]][0]],
+                    "issue_ids": [iid for iid, _p in entries],
+                    **approved_map[first_iid],
+                    "per_issue": {iid: dict(approved_map[iid]) for iid, _p in entries},
                 })
             tasks.append(row)
         summary = str(mission.get("plan_summary") or "") + "\n修復ループの承認済み局所パッチを適用。内容は再検証待ち。"
@@ -520,11 +854,17 @@ def _do_rediff_evaluated(manager, project_id: str, run: dict, actor: str) -> dic
     _mission, signature, _contract = _check_pinned(manager, project_id, run)
     rediff = _current_unresolved(manager, project_id, run, signature)
     run["unresolved_count"] = int(rediff["unresolved_count"])
+    _ledger = resolution_ledger(_mission, run)
     evidence = dict(run.get("evidence") or {})
     evidence["rediff_evaluated"] = {"actor": actor, "signature": signature, **{
         k: v for k, v in rediff.items() if k != "current_preview"},
         "current_classifications": rediff["current_preview"]["classifications"],
         "current_unbound": rediff["current_preview"]["unbound"],
+        "ledger": {
+            "rows": list(_ledger.get("rows") or []),
+            "all_retained": bool(_ledger.get("all_retained")),
+            "codes": list(_ledger.get("codes") or []),
+        },
     }
     run["evidence"] = evidence
     return run
@@ -579,6 +919,21 @@ def _ja_state_label(state: str) -> str:
     }.get(str(state or ""), str(state or ""))
 
 
+def _ledger_resolution_text(ledger: dict, issue_id: str) -> str:
+    """P3-1: repair_cards の解決確認の固定文。retained を解決済みと書かない。"""
+    if "ledger_error" in (ledger.get("codes") or []):
+        return "確認不可(未解決として扱う)"
+    for row in ledger.get("rows") or []:
+        if str(row.get("issue_id") or "") != str(issue_id or ""):
+            continue
+        if str(row.get("status") or "") == "not_retained":
+            return "適用したパッチが計画に残っていない(未解決)"
+        if str(row.get("patch_basis") or "") == "issue_remedy":
+            return "指摘の修正案が計画に反映済み(意味の妥当性は未検査)"
+        return "定型文のみ対応(指摘の修正案は未反映・人間確認が必要)"
+    return "未適用"
+
+
 def repair_cards(manager, project_id: str) -> dict:
     """P0: 案件画面向けの日本語カード。読み取り専用。JSONだけを見せない方針の材料。"""
     try:
@@ -608,6 +963,7 @@ def repair_cards(manager, project_id: str) -> dict:
         lingering = set(rediff.get("lingering_originals") or [])
         unanswered = set(rediff.get("unanswered_business_facts") or [])
         external = (run.get("evidence") or {}).get("external_reviewed") or {}
+        _ledger_for_cards = resolution_ledger(mission, run)
         for cand in run.get("candidates") or []:
             iid = str(cand.get("issue_id") or "")
             cid = str(cand.get("criterion_id") or "")
@@ -657,6 +1013,7 @@ def repair_cards(manager, project_id: str) -> dict:
                 "セバスが次に行えること": nxt,
                 "人間に必要な判断": need,
                 "再評価結果": result,
+                "解決確認": _ledger_resolution_text(_ledger_for_cards, iid),
                 "技術試験と業務達成の区別": "技術試験（構造・被覆・内容再レビュー）と業務達成（未解決0・回答済み・人間承認）は別に判定する",
             })
     return {"runs": runs, "cards": cards}
@@ -669,6 +1026,16 @@ def _evaluate_pass(manager, project_id: str, run: dict) -> list[str]:
         mission, signature, contract = _check_pinned(manager, project_id, run)
     except ValueError as exc:
         return [str(exc)]
+    ledger = resolution_ledger(mission, run)
+    if not ledger.get("all_retained"):
+        seen: list[str] = []
+        for row in ledger.get("rows") or []:
+            if str(row.get("status") or "") != "not_retained":
+                continue
+            seen.append(str(row.get("issue_id") or "") + ":" + ",".join(list(row.get("codes") or [])))
+        if "ledger_error" in (ledger.get("codes") or []):
+            seen = ["ledger:" + ",".join(list(ledger.get("codes") or []))]
+        reasons.append("PATCH_NOT_RETAINED: 適用したパッチが現行の計画に残っていません: " + ",".join(seen[:8]))
     structure = _run_structure_check(mission, contract)
     if not structure.get("passed"):
         reasons.append("STRUCTURE_FAILED: " + "; ".join(structure.get("issues") or ["構造検査不合格"]))

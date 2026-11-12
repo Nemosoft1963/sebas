@@ -55,7 +55,8 @@ def _manager(tmp_path, name="l5pseudo", providers=("chatgpt",)):
     mgr = Manager(memory=mem, workspace=ws, planning_projects=set(), llm=None,
                   workers={}, _sync_memos=lambda pid: None,
                   provider_statuses=lambda: [{"id": p, "configured": True} for p in providers],
-                  plan_review_runner=None)
+                  plan_review_runner=None,
+                  _outbound_guard=lambda pid, purpose, text, providers=(): {"ok": True, "codes": []})
     return mgr, mem, pid
 
 
@@ -66,7 +67,8 @@ def _reopen(tmp_path, pid, stub=None, providers=("chatgpt",)):
     mgr = Manager(memory=mem, workspace=ws, planning_projects=set(), llm=None,
                   workers={}, _sync_memos=lambda pid: None,
                   provider_statuses=lambda: [{"id": p, "configured": True} for p in providers],
-                  plan_review_runner=None)
+                  plan_review_runner=None,
+                  _outbound_guard=lambda pid, purpose, text, providers=(): {"ok": True, "codes": []})
     if stub is not None:
         mgr.plan_review_runner = stub.review_runner()
     return mgr, mem
@@ -244,6 +246,18 @@ def _approval_count(mgr, pid):
 
 
 # ============================================================ 1. 通し(正常系)
+def _explicit_summary():
+    return ("利用者向けに架空手順Aの定義資料と架空手順Bの報告資料を作成し、"
+            "達成条件SC01とSC02に対する成果物と検証記録を確認する公開用計画説明です。")
+
+
+def _start_with_explicit(loop, manager, pid, actor, providers, idempotency_key):
+    summary = _explicit_summary()
+    preview = loop.preview_run(manager, pid, providers, explicit_summary=summary)
+    return loop.start_run(manager, pid, actor, providers, summary, idempotency_key,
+                          expected_packet_hash=preview["packet_hash"])
+
+
 def test_l5_normal_two_rounds_stops_at_human_approval(tmp_path, monkeypatch):
     """許可→Gemini草案→整理→構造検査→第1回不合格→取込→修正→反映→第2回合格→人の承認待ち。"""
     import app.plan_feedback as pf
@@ -263,7 +277,7 @@ def test_l5_normal_two_rounds_stops_at_human_approval(tmp_path, monkeypatch):
     prev = loop.preview_run(mgr, pid, ["chatgpt"])
     assert prev["external_send"] is False
     assert stub.calls == 0
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-normal")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-normal")
     out = _run(loop, mgr, pid, started["id"])
 
     assert out["state"] == "awaiting_human"
@@ -320,7 +334,7 @@ def test_l5_no_socket_opened(tmp_path, monkeypatch):
         raise AssertionError("external network must not open")
 
     monkeypatch.setattr(ext, "_post_json_uncached", _guard)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-nosock")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-nosock")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "awaiting_human"
     assert opened == []
@@ -363,7 +377,7 @@ def test_l5_fail_send_not_approved(tmp_path, monkeypatch):
     # 接続未設定でも開始できない。
     mgr.provider_statuses = lambda: []
     with pytest.raises(ValueError):
-        loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-fail-send2")
+        _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-fail-send2")
     assert stub.calls == 0
 
 
@@ -402,7 +416,7 @@ def test_l5_fail_secret_in_each_draft_field(tmp_path, monkeypatch, field, secret
                           {"id": "S2", "title": "疑似工程2"}]
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, f"l5pseudo-fail-{label_map[field]}", draft=draft)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", f"l5-fail-{field}-{abs(hash(secret)) % 10**6}")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], f"l5-fail-{field}-{abs(hash(secret)) % 10**6}")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     assert out["state"] != "awaiting_human"
@@ -428,7 +442,7 @@ def test_l5_fail_plan_changed_midway(tmp_path, monkeypatch):
         return row
 
     monkeypatch.setattr(pf, "propose", _fake_then_change)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-fail-planver")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-fail-planver")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     stored = loop.get_run(mgr, pid, started["id"])
@@ -440,7 +454,7 @@ def test_l5_fail_plan_changed_midway(tmp_path, monkeypatch):
 def test_l5_fail_connection_not_converted_to_issue(tmp_path, monkeypatch):
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, "l5pseudo-fail-conn", review_sequence=("connection",))
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-fail-conn")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-fail-conn")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     assert out["stop_kind"] == "connection_settings"
@@ -465,7 +479,7 @@ def test_l5_fail_quota_and_budget(tmp_path, monkeypatch):
     assert preview["can_start"] is False
     assert preview["external_send"] is False
     with pytest.raises(ValueError, match="開始条件"):
-        loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-fail-quota")
+        _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-fail-quota")
     assert loop.list_runs(mgr, pid) == []
     _assert_payload_clean(stub)
 
@@ -473,7 +487,7 @@ def test_l5_fail_quota_and_budget(tmp_path, monkeypatch):
 def test_l5_fail_deadline(tmp_path, monkeypatch):
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, "l5pseudo-fail-deadline", review_sequence=("pass",))
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-fail-deadline")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-fail-deadline")
     stored = loop.get_run(mgr, pid, started["id"])
     stored["deadline"] = 1.0
     ReviewStore(mem.path).put(pid, "auto_loop", stored["id"], stored)
@@ -515,7 +529,7 @@ def test_l5_fail_unresolved_and_development(tmp_path, monkeypatch):
             return row
 
         monkeypatch.setattr(pf, "propose", _blocker)
-        started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", f"l5-fail-{kind}")
+        started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], f"l5-fail-{kind}")
         out = _run(loop, mgr, pid, started["id"])
         assert out["state"] == "stopped", kind
         stored = loop.get_run(mgr, pid, started["id"])
@@ -535,7 +549,7 @@ def test_l5_fail_second_round_also_fails_no_third(tmp_path, monkeypatch):
     loop = _install(monkeypatch, mgr, stub)
     safe = SafePropose()
     monkeypatch.setattr(pf, "propose", safe.fake)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-fail-2nd")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-fail-2nd")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     assert out["verification_rounds"] == 2
@@ -549,7 +563,7 @@ def test_l5_fail_local_draft_without_criteria(tmp_path, monkeypatch):
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, "l5pseudo-local-missing", review_sequence=("pass",))
     monkeypatch.setattr(loop, "_local_draft", lambda *_: _draft_body(("SC01",)))
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-local-missing")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-local-missing")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     assert out["verification_rounds"] == 0
@@ -560,7 +574,7 @@ def test_l5_fail_local_draft_without_criteria(tmp_path, monkeypatch):
 def test_l5_unmappable_review_waits_for_human_without_gemini(tmp_path, monkeypatch):
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, "l5pseudo-unmappable", review_sequence=("unmappable",))
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-unmappable")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-unmappable")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     assert out["stop_kind"] == "human_required"
@@ -581,7 +595,7 @@ def test_l5_restart_resume_no_resend_idempotent_lease(tmp_path, monkeypatch):
     loop = _install(monkeypatch, mgr, stub)
     safe = SafePropose()
     monkeypatch.setattr(pf, "propose", safe.fake)
-    first = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-restart")
+    first = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-restart")
     out = _run(loop, mgr, pid, first["id"])
     assert out["state"] == "awaiting_human"
     calls_after_full = stub.calls
@@ -627,7 +641,7 @@ def test_l5_restart_each_stage_and_lease_expiry(tmp_path, monkeypatch):
     # 第1回検証後に接続障害で停止したランを作る。
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, "l5pseudo-restart-stage", review_sequence=("connection",))
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-stage")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-stage")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     calls_at_stop = stub.calls
@@ -658,13 +672,13 @@ def test_l5_restart_each_stage_and_lease_expiry(tmp_path, monkeypatch):
     _contract(mgr4, pid4)
     stub4 = StubExternal(review_sequence=("pass",))
     loop4 = _install(monkeypatch, mgr4, stub4)
-    run_a = loop4.start_run(mgr4, pid4, "架空確認者A", ["chatgpt"], "", "l5-lease-a")
+    run_a = _start_with_explicit(loop4, mgr4, pid4, "架空確認者A", ["chatgpt"], "l5-lease-a")
     with pytest.raises(ValueError, match="実行中"):
         loop4.start_run(mgr4, pid4, "架空確認者A", ["chatgpt"], "", "l5-lease-b")
     lease_row = ReviewStore(mem4.path).get(pid4, "auto_loop_lease", pid4)
     lease_row["expires"] = 1.0
     ReviewStore(mem4.path).put(pid4, "auto_loop_lease", pid4, lease_row)
-    run_c = loop4.start_run(mgr4, pid4, "架空確認者A", ["chatgpt"], "", "l5-lease-c")
+    run_c = _start_with_explicit(loop4, mgr4, pid4, "架空確認者A", ["chatgpt"], "l5-lease-c")
     assert run_c["id"] != run_a["id"]
 
 
@@ -704,7 +718,7 @@ def test_l5_no_bypass_existing_gates(tmp_path, monkeypatch):
     monkeypatch.setattr(pf, "validate_candidate", _count_validate)
     monkeypatch.setattr(pf, "apply", _count_apply)
 
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-gate")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-gate")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "awaiting_human"
     # 既存の review_plan / validate_candidate / apply を通っている。
@@ -776,7 +790,7 @@ def test_l5_weakening_diff_rejected_and_old_kept(tmp_path, monkeypatch):
         return row
 
     monkeypatch.setattr(pf, "propose", _weak_propose)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-weaken")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-weaken")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     stored = loop.get_run(mgr, pid, started["id"])
@@ -804,7 +818,7 @@ def test_l5_p1c_repair_still_blocks_after_l4(tmp_path, monkeypatch):
     loop = _install(monkeypatch, mgr, stub)
     safe = SafePropose()
     monkeypatch.setattr(pf, "propose", safe.fake)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-p1c")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-p1c")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "awaiting_human"
     # P1-C修復ランは別経路として残り、L4が勝手にpassedにしない。
@@ -851,7 +865,7 @@ def test_l5_read_only_changes_nothing(tmp_path, monkeypatch):
     # previewは外部送信を行わない。
     assert stub.calls == 0
     # 状態取得・一覧の読取も変化させない(API経由を含む)。
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-ro")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-ro")
     snap_started = {"runs": loop.list_runs(mgr, pid), "calls": stub.calls}
     _ = loop.get_run(mgr, pid, started["id"])
     _ = loop.list_runs(mgr, pid)
@@ -908,7 +922,7 @@ def test_l5_precision_realistic_plan_completes(tmp_path, monkeypatch):
     loop = _install(monkeypatch, mgr, stub)
     safe = SafePropose()
     monkeypatch.setattr(pf, "propose", safe.fake)
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-idem-precision")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-idem-precision")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "awaiting_human", out.get("stop_reason")
     assert out["verification_rounds"] == 2
@@ -935,7 +949,7 @@ def test_l5_static_js_contract():
 def test_l5_remap_does_not_resend_or_approve(tmp_path, monkeypatch):
     mgr, mem, pid, stub, loop = _start_ok_manager(
         tmp_path, monkeypatch, "l5pseudo-remap", review_sequence=("unmappable",))
-    started = loop.start_run(mgr, pid, "架空確認者A", ["chatgpt"], "", "l5-remap")
+    started = _start_with_explicit(loop, mgr, pid, "架空確認者A", ["chatgpt"], "l5-remap")
     out = _run(loop, mgr, pid, started["id"])
     assert out["state"] == "stopped"
     assert out["stop_kind"] == "human_required"

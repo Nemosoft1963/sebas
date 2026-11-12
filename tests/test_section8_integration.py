@@ -120,13 +120,12 @@ def _final_report(criteria_ids, *, verdicts=None):
 
 
 def _complete_final(manager, pid, task, criteria_ids):
-    from app.structured_planning import contract_of
-    contract = contract_of(task) or {}
-    path = contract["outputs"][0]["path"]
+    from app.project_manager import TaskVerificationError
     project = manager.memory.get_project(pid)
-    target = manager.workspace.resolve_file(project.get("workspace_path", ""), pid, path)[2]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(_final_report(criteria_ids), encoding="utf-8")
+    try:
+        manager._execute_structured_final_verification(project, pid, task)
+    except TaskVerificationError:
+        pass
     manager.memory.update_task(task["id"], "completed", result="最終検証済み")
 
 

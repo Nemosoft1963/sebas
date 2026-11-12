@@ -8,3 +8,4 @@ class ConversationState(str, Enum):
     THINKING = "THINKING"
     SPEAKING = "SPEAKING"
     INTERRUPTED = "INTERRUPTED"
+

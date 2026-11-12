@@ -235,7 +235,9 @@ def create_backup(memory_path: str | Path, project_id: str, backup_root: str | P
     except OSError as exc:
         return {"ok": False, "reason": f"backup root unavailable: {exc}"}
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup_id = f"backup_{_sanitize_id(pid)}_{stamp}_{uuid.uuid4().hex[:8]}"
+    # Keep the final path no longer than tmp_<32 hex> on Windows.
+    pid_tag = hashlib.sha256(pid.encode("utf-8")).hexdigest()[:6]
+    backup_id = f"backup_{pid_tag}_{stamp[:12]}_{uuid.uuid4().hex[:8]}"
     tmp_dir = root / f"tmp_{uuid.uuid4().hex}"
     dest = root / backup_id
     try:

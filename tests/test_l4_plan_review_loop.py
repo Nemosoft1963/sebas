@@ -38,7 +38,8 @@ def _manager(tmp_path, providers=("chatgpt",)):
     mgr = Manager(memory=mem, workspace=ws, planning_projects=set(), llm=None,
                   workers={}, _sync_memos=lambda pid: None,
                   provider_statuses=lambda: [{"id": p, "configured": True} for p in providers],
-                  plan_review_runner=None)
+                  plan_review_runner=None,
+                  _outbound_guard=lambda pid, purpose, text, providers=(): {"ok": True, "codes": []})
     return mgr, mem, pid
 
 
@@ -150,11 +151,26 @@ def test_preview_sends_nothing_and_start_requires_provider(tmp_path):
     mgr, mem, pid = _manager(tmp_path)
     _plan(mgr, mem, pid)
     _contract(mgr, pid)
+    # P0-A: プレビューは編集後の公開用説明を受け取る(空は packet_incomplete)。
     view = loop.preview_run(mgr, pid, [])
     assert view["external_send"] is False
     assert view["max_verification_rounds"] == 2
+    assert view["can_start"] is False
+    assert any("packet_incomplete" in str(x) for x in view["start_blockers"])
     with pytest.raises(ValueError):
         loop.start_run(mgr, pid, "human-a", [], "", "idem-1")
+
+
+def _explicit_summary():
+    return ("利用者向けに架空手順Aの定義書1件と架空手順Bの報告書1件を作る計画で、"
+            "利用者向け完成成果物は2件、内部記録・検証報告は2件。達成条件SC01・SC02に対応する。")
+
+
+def _start_with_explicit(loop, mgr, pid, providers, key):
+    view = loop.preview_run(mgr, pid, providers, explicit_summary=_explicit_summary())
+    assert view["can_start"] is True, view["start_blockers"]
+    return loop.start_run(mgr, pid, "human-a", providers, _explicit_summary(),
+                          key, expected_packet_hash=view["packet_hash"])
 
 
 def test_first_pass_only_one_verification_and_stays_unapproved(tmp_path, monkeypatch):
@@ -163,7 +179,7 @@ def test_first_pass_only_one_verification_and_stays_unapproved(tmp_path, monkeyp
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "pass")
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-pass")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-pass")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "awaiting_human"
     assert out["verification_rounds"] == 1
@@ -190,7 +206,7 @@ def test_two_rounds_then_stop_no_third(tmp_path, monkeypatch):
     # apply は既存の実在関数を使う(検証は既存のまま)。
     import app.plan_review_loop as loopmod
 
-    real_propose = loopmod.__dict__["_run_locked"]
+    real_locked = loopmod.__dict__["_run_locked"]
 
     async def _fake_propose(manager, _pid, signature, tid=None, **kw):
         import app.plan_feedback as pf
@@ -223,16 +239,16 @@ def test_two_rounds_then_stop_no_third(tmp_path, monkeypatch):
         real = pf.propose
         pf.propose = _fake_propose
         try:
-            return await real_propose(manager, _pid, run_id)
+            return await real_locked(manager, _pid, run_id)
         finally:
             pf.propose = real
 
     loopmod._run_locked = _patched_run
     try:
-        started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-2r")
+        started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-2r")
         out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     finally:
-        loopmod._run_locked = real_propose
+        loopmod._run_locked = real_locked
     assert out["state"] == "stopped"
     assert out["verification_rounds"] == 2
     stored = loop.get_run(mgr, pid, started["id"])
@@ -246,7 +262,7 @@ def test_connection_error_is_not_plan_issue(tmp_path, monkeypatch):
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "connection")
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-conn")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-conn")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "stopped"
     assert out["stop_kind"] == "connection_settings"
@@ -286,8 +302,8 @@ def test_idempotent_start_and_single_lease_and_reopen_without_resend(tmp_path, m
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "pass")
-    first = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-same")
-    second = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-same")
+    first = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-same")
+    second = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-same")
     assert first["id"] == second["id"]
     assert stub.calls == 0
 
@@ -324,7 +340,7 @@ def test_no_socket_opened_during_run(tmp_path, monkeypatch):
         raise AssertionError("external network must not open")
 
     monkeypatch.setattr(ext, "_post_json_uncached", _guard)
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-nosock")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-nosock")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "awaiting_human"
     assert opened == []
@@ -345,7 +361,7 @@ def test_payload_contains_only_public_summary_and_structure(tmp_path, monkeypatc
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "pass")
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-payload")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-payload")
     asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     blob = canonical(stub.sent_prompts)
     assert FAKE_SECRET not in blob
@@ -384,7 +400,7 @@ def test_structure_check_stops_before_verification(tmp_path, monkeypatch):
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "pass")
     monkeypatch.setattr(loop, "_local_draft", lambda *_: _draft_body(("SC01",)))
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-struct")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-struct")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "stopped"
     assert out["verification_rounds"] == 0
@@ -404,7 +420,7 @@ def test_local_draft_never_calls_gemini(tmp_path, monkeypatch):
     monkeypatch.setattr(ext, "call_provider_with_metadata", forbidden)
     with pytest.raises(ValueError, match="不明な外部AI"):
         loop.preview_run(mgr, pid, ["gemini"])
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-local-only")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-local-only")
     out = asyncio.run(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "awaiting_human"
     assert out["draft_mode"] == "local"
@@ -418,7 +434,7 @@ def test_legacy_gemini_run_requires_new_start(tmp_path, monkeypatch):
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "pass")
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-legacy")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-legacy")
     old = loop.get_run(mgr, pid, started["id"])
     old.pop("draft_mode")
     loop._save(mgr, old)
@@ -434,7 +450,7 @@ def test_unmappable_issues_stop_after_gemini_organize_fails(tmp_path, monkeypatc
     _contract(mgr, pid)
     stub = StubExternal(organize_mode="rewrite_pass")
     loop = _install(monkeypatch, mgr, stub, "unmappable")
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-unmap")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-unmap")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "stopped"
     assert stub.organize_calls == 0
@@ -451,15 +467,15 @@ def test_cancel_and_second_lease_and_awaiting_human_not_cancellable(tmp_path, mo
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "pass")
-    first = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-lease-a")
+    first = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-lease-a")
     with pytest.raises(ValueError, match="実行中"):
-        loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-lease-b")
+        _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-lease-b")
     cancelled = loop.cancel_run(mgr, pid, first["id"], "human-a")
     assert cancelled["state"] == "cancelled"
     again = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, first["id"]))
     assert again["state"] == "cancelled"
     assert stub.calls == 0
-    second = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-lease-c")
+    second = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-lease-c")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, second["id"]))
     assert out["state"] == "awaiting_human"
     with pytest.raises(ValueError, match="承認待ち"):
@@ -478,7 +494,7 @@ def test_api_preview_start_status_cancel(tmp_path, monkeypatch):
     monkeypatch.setattr(web_module, "memory", mem)
     monkeypatch.setattr(web_module, "orchestrator", mgr)
     client = TestClient(web_module.app)
-    prev = client.post(f"/api/projects/{pid}/goal-review/auto-loop/preview", json={"providers": []})
+    prev = client.post(f"/api/projects/{pid}/goal-review/auto-loop/preview", json={"providers": [], "public_summary": _explicit_summary()})
     assert prev.status_code == 200, prev.text
     assert prev.json()["external_send"] is False
     empty = client.post(f"/api/projects/{pid}/goal-review/auto-loop/start",
@@ -486,6 +502,8 @@ def test_api_preview_start_status_cancel(tmp_path, monkeypatch):
     assert empty.status_code == 422
     started = client.post(f"/api/projects/{pid}/goal-review/auto-loop/start",
                           json={"actor": "human-a", "providers": ["chatgpt"],
+                                "public_summary": _explicit_summary(),
+                                "expected_packet_hash": prev.json()["packet_hash"],
                                 "idempotency_key": "idem-api"})
     assert started.status_code == 200, started.text
     rid = started.json()["id"]
@@ -533,7 +551,8 @@ async def test_subset_verifier_fits_budget_and_only_selected_ai_receives_plan(tm
     monkeypatch.setattr(gr, "review_budget", lambda *_: {
         "managed": True, "remaining_calls": 4, "daily_calls": 4,
     })
-    all_preview = loop.preview_run(mgr, pid, [p for p in allowed if p != "gemini"])
+    all_preview = loop.preview_run(mgr, pid, [p for p in allowed if p != "gemini"],
+                                     explicit_summary=_explicit_summary())
     assert all_preview["can_start"] is False
     assert all_preview["external_send"] is False
     assert all_preview["required_calls"] == 8
@@ -541,14 +560,14 @@ async def test_subset_verifier_fits_budget_and_only_selected_ai_receives_plan(tm
         loop.start_run(mgr, pid, "human-a", [p for p in allowed if p != "gemini"])
     assert not sent_to and stub.calls == 0
 
-    preview = loop.preview_run(mgr, pid, ["meta"])
+    preview = loop.preview_run(mgr, pid, ["meta"], explicit_summary=_explicit_summary())
     assert preview["can_start"] is True
-    with pytest.raises(ValueError, match="送信内容がプレビュー後に変わりました"):
-        loop.start_run(mgr, pid, "human-a", ["meta"],
+    with pytest.raises(ValueError, match="409"):
+        loop.start_run(mgr, pid, "human-a", ["meta"], _explicit_summary(),
                        expected_packet_hash="0" * 64)
     assert not sent_to and stub.calls == 0
 
-    started = loop.start_run(mgr, pid, "human-a", ["meta"],
+    started = loop.start_run(mgr, pid, "human-a", ["meta"], _explicit_summary(), "idem-meta-ok",
                              expected_packet_hash=preview["packet_hash"])
     result = await loop.run_loop(mgr, pid, started["id"])
     assert result["state"] == "awaiting_human"
@@ -568,7 +587,8 @@ def test_unselected_gemini_configuration_does_not_block_preview(tmp_path, monkey
     mgr.plan_review_runner = StubExternal().review_runner("pass")
     mgr.provider_statuses = lambda: [{"id": "chatgpt", "configured": True},
                                       {"id": "gemini", "configured": False}]
-    view = loop.preview_run(mgr, pid, ["chatgpt"])
+    # P0-A: 編集後の具体的な公開要約があれば開始条件を満たす。
+    view = loop.preview_run(mgr, pid, ["chatgpt"], explicit_summary=_explicit_summary())
     assert view["can_start"] is True
     assert view["required_calls"] == 2
     assert view["draft_role"].startswith("既存計画")
@@ -713,7 +733,7 @@ def test_remap_preview_and_run_use_stored_review_without_external_calls(tmp_path
     _contract(mgr, pid)
     stub = StubExternal()
     loop = _install(monkeypatch, mgr, stub, "unmappable")
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-remap")
+    started = _start_with_explicit(loop, mgr, pid, ["chatgpt"], "idem-remap")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "stopped"
     assert out["stop_kind"] == "human_required"

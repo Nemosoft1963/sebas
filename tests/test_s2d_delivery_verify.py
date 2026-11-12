@@ -318,7 +318,7 @@ def test_delivery_rejections(tmp_path):
     # 秘密を含む失敗ログ -> 拒否し、値は残さない。
     manager7, pid7, target7, base7 = _pipeline(tmp_path)
     secret = _delivery_payload(base7, idx=15)
-    secret["failure_logs"] = "架空失敗 " + "sk-" + "test-dummy-key-0123456789abcdef を含む"
+    secret["failure_logs"] = "架空失敗 sk-test-dummy-key-0123456789abcdef を含む"
     denied = delivery.record_delivery(manager7, pid7, target7, secret,
                                       actor="架空担当")
     assert denied["ok"] is False

@@ -17,3 +17,4 @@ async def test_controller_stream_and_store(tmp_path):
     controller = ConversationController(FakeLLM(), None, None, memory, "fake", "system")
     assert await controller.respond("テスト", speak=False) == "はい。承知しました。"
     assert len(memory.recent(controller.session_id)) == 2
+

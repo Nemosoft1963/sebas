@@ -88,3 +88,4 @@ def test_qc09_manual_retry_forces_immediate_load():
     # 手動の再取得ボタン(retry.onclick)は強制フラグを渡して即時実行する
     assert "retry.onclick" in WR
     assert "load(true)" in WR
+

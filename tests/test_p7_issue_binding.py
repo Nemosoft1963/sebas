@@ -34,7 +34,8 @@ def _manager(tmp_path, providers=("chatgpt",)):
     mgr = Manager(memory=mem, workspace=ws, planning_projects=set(), llm=None,
                   workers={}, _sync_memos=lambda pid: None,
                   provider_statuses=lambda: [{"id": p, "configured": True} for p in providers],
-                  plan_review_runner=None)
+                  plan_review_runner=None,
+                  _outbound_guard=lambda pid, purpose, text, providers=(): {"ok": True, "codes": []})
     return mgr, mem, pid
 
 
@@ -169,6 +170,14 @@ def test_p7_auto_apply_only_resolved_and_coherent_multiple():
     assert table["empty"] is True
 
 
+def _start_with_explicit(loop, manager, pid, actor, providers, idempotency_key):
+    summary = ("架空手順Aと架空手順Bの資料を作成し、達成条件SC01とSC02に対する"
+               "成果物および検証記録を確認する公開用の具体的な計画説明です。")
+    preview = loop.preview_run(manager, pid, providers, explicit_summary=summary)
+    return loop.start_run(manager, pid, actor, providers, summary, idempotency_key,
+                          expected_packet_hash=preview["packet_hash"])
+
+
 def test_p7_remap_idempotent_and_concurrent_no_duplicates(tmp_path, monkeypatch):
     import json as _json
     from types import SimpleNamespace as _NS
@@ -212,7 +221,7 @@ def test_p7_remap_idempotent_and_concurrent_no_duplicates(tmp_path, monkeypatch)
         return await real_runner(text, providers)
 
     mgr.plan_review_runner = _counting
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-p7-remap")
+    started = _start_with_explicit(loop, mgr, pid, "human-a", ["chatgpt"], "idem-p7-remap")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["state"] == "stopped"
     assert out["stop_kind"] == "human_required"
@@ -275,7 +284,7 @@ def test_p7_remap_rejects_on_signature_contract_packet_review_change(tmp_path, m
                         "remedy": "検討する"}]})} for p in providers]
 
     mgr.plan_review_runner = _runner
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-p7-409")
+    started = _start_with_explicit(loop, mgr, pid, "human-a", ["chatgpt"], "idem-p7-409")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["stop_kind"] == "human_required"
     run = loop.get_run(mgr, pid, started["id"])
@@ -360,7 +369,7 @@ def test_p7_remap_rejects_deleted_and_non_human_required(tmp_path, monkeypatch):
                         "remedy": "検討する"}]})} for p in providers]
 
     mgr.plan_review_runner = _runner
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-p7-del")
+    started = _start_with_explicit(loop, mgr, pid, "human-a", ["chatgpt"], "idem-p7-del")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["stop_kind"] == "human_required"
     # 論理削除中PJは拒否
@@ -391,7 +400,7 @@ def test_p7_remap_rejects_deleted_and_non_human_required(tmp_path, monkeypatch):
     _activate(mgr3, pid3)
     mgr3.plan_review_runner = _runner
     monkeypatch.setattr(ext, "call_provider_with_metadata", _fake_gemini)
-    started2 = loop.start_run(mgr3, pid3, "human-a", ["chatgpt"], "", "idem-p7-cancel")
+    started2 = _start_with_explicit(loop, mgr3, pid3, "human-a", ["chatgpt"], "idem-p7-cancel")
     loop.cancel_run(mgr3, pid3, started2["id"], "human-a")
     with pytest.raises(ValueError, match="human_required"):
         loop.remap_preview(mgr3, pid3, started2["id"])
@@ -431,7 +440,7 @@ def test_p7_remap_preview_is_readonly(tmp_path, monkeypatch):
                         "remedy": "検討する"}]})} for p in providers]
 
     mgr.plan_review_runner = _runner
-    started = loop.start_run(mgr, pid, "human-a", ["chatgpt"], "", "idem-p7-ro")
+    started = _start_with_explicit(loop, mgr, pid, "human-a", ["chatgpt"], "idem-p7-ro")
     out = asyncio.new_event_loop().run_until_complete(loop.run_loop(mgr, pid, started["id"]))
     assert out["stop_kind"] == "human_required"
     before_run = _fp(loop.get_run(mgr, pid, started["id"]))

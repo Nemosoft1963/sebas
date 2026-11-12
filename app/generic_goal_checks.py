@@ -191,6 +191,15 @@ def _resolve(manager, project_id: str, relative: str, *, must_exist: bool = Fals
     )[2]
 
 
+def _artifact_digest(manager, project_id: str, relative: str) -> str:
+    import hashlib as _hashlib
+
+    try:
+        return _hashlib.sha256(_resolve(manager, project_id, relative, must_exist=True).read_bytes()).hexdigest()
+    except (OSError, ValueError, FileNotFoundError):
+        return "unknown:unreadable"
+
+
 def _outputs_of(tasks: list[dict]) -> list[dict]:
     outputs = []
     for task in tasks:
@@ -204,6 +213,15 @@ def _read_text(path) -> str:
     return path.read_text(encoding="utf-8-sig")
 
 
+def _mission_for_p0c(manager, project_id: str) -> dict:
+    """P0-C用の mission 取得。読取失敗は空扱いにし、呼び出し側で UNTESTABLE に倒す。"""
+    try:
+        mission = manager.memory.get_mission(project_id)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return {}
+    return mission if isinstance(mission, dict) else {}
+
+
 def _load_verdicts(manager, project_id: str, verify_tasks: list[dict]) -> tuple[str | None, dict[str, str], str]:
     if not verify_tasks:
         return None, {}, ""
@@ -213,11 +231,53 @@ def _load_verdicts(manager, project_id: str, verify_tasks: list[dict]) -> tuple[
     path = str((outputs[0] or {}).get("path") or "result/final_verification.md") if outputs else "result/final_verification.md"
     if status != "completed":
         return status, {}, path
+    # 修正B: 最終検証レポートは項目別検証台帳からのみ生成される。台帳の判定を
+    # 正とし、本文の verdict 行は補助として読む(台帳が無ければ未評価扱い)。
+    verdicts: dict[str, str] = {}
+    ledger_verdicts: dict[str, str] = {}
+    try:
+        saved = open_ledger_readonly(manager, project_id)
+        if isinstance(saved, dict):
+            try:
+                import json as _json
+
+                ledger_verdicts = _json.loads(str(saved.get("criterion_verdicts_json") or "{}"))
+            except (ValueError, TypeError, AttributeError):
+                ledger_verdicts = {}
+            if not isinstance(ledger_verdicts, dict):
+                ledger_verdicts = {}
+    except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # 読取失敗は『空』に倒さない。 LedgerReadError はそのまま上げ、
+        # それ以外の失敗も UNTESTABLE 側に倒して呼出側で区別する。
+        try:
+            from app.requirement_item_ledger import LedgerReadError as _LedgerReadError
+
+            if isinstance(exc, _LedgerReadError):
+                raise
+        except ImportError:
+            pass
+        saved = None
+        ledger_verdicts = {}
+    if saved is None:
+        # 台帳が無い計画の最終検証は理由を明示した FAIL(PASSにも理由なしにもしない)。
+        try:
+            ledger_missing = "|LEDGER_MISSING:" in str(path)
+        except (ValueError, TypeError, AttributeError):
+            ledger_missing = False
+        if ledger_missing:
+            return status, {}, path
+        return status, {}, path + "|LEDGER_MISSING:項目別検証台帳が無い: 再計画が必要"
+    verdicts.update({str(k): str(v) for k, v in ledger_verdicts.items() if str(k)})
     try:
         content = _read_text(_resolve(manager, project_id, path, must_exist=True))
     except (OSError, ValueError, FileNotFoundError):
-        return status, {}, path
-    return status, parse_criterion_verdicts(content), path
+        return status, verdicts, path
+    for cid, verdict in parse_criterion_verdicts(content).items():
+        # 台帳に無いSCの本文 verdict は採用しない(形式PASSの昇格を禁止)。
+        if cid not in verdicts:
+            continue
+        verdicts[cid] = verdict
+    return status, verdicts, path
 
 
 def _https_url(value: str) -> bool:
@@ -226,7 +286,48 @@ def _https_url(value: str) -> bool:
 
 
 def collect_external_evidence(manager, project_id: str) -> dict:
+    return collect_external_evidence_for_project(manager, project_id, None)
+
+
+def _channel_selection_for_project(manager, project_id: str,
+                                   campaign_id: str | None) -> tuple[list[str] | None, bool, str]:
+    """媒体選択を返す。未登録/パスなしだけ従来動作、読取不能はSNS証跡を遮断する。"""
+    memory_path = getattr(getattr(manager, "memory", None), "path", None)
+    if memory_path is None:
+        return None, False, ""
+    try:
+        from app.social_premarketing import resolve_channel_selection
+        result = resolve_channel_selection(memory_path, project_id, campaign_id)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, ImportError) as exc:
+        return [], True, f"{type(exc).__name__}: {exc}"
+    if not isinstance(result, dict):
+        return [], True, "媒体選択の読取結果が不正です"
+    status = str(result.get("status") or "")
+    if status == "selected":
+        return [str(item) for item in (result.get("channels") or []) if str(item)], False, ""
+    if status == "none_needed":
+        return [], False, ""
+    if status == "not_configured":
+        return None, False, ""
+    return [], True, str(result.get("reason_ja") or "媒体の選択を読めません")
+
+
+def _selected_channels_for_project(manager, project_id: str,
+                                   campaign_id: str | None) -> list[str] | None:
+    return _channel_selection_for_project(manager, project_id, campaign_id)[0]
+
+
+def collect_external_evidence_for_project(manager, project_id: str,
+                                          campaign_id: str | None) -> dict:
+    """B1: 選択した媒体だけを外部証拠に含める。campaign_id が None のときは従来どおり。
+
+    台帳が not_configured / 読取不能のときは従来どおり全媒体(既存挙動)。
+    selected のときは選択媒体だけ。none_needed のときはSNS関連を増やさない。
+    """
     from app.campaign_evidence import CAMPAIGN_OPERATION_KINDS, _time, campaign_evidence
+
+    selected_channels, selection_unreadable, selection_reason = _channel_selection_for_project(
+        manager, project_id, campaign_id)
 
     actions = []
     try:
@@ -277,6 +378,12 @@ def collect_external_evidence(manager, project_id: str) -> dict:
     forms = []
     social = []
     for campaign in campaigns:
+        campaign_channels, campaign_unreadable, campaign_reason = _channel_selection_for_project(
+            manager, project_id, str(campaign.get("id") or ""))
+        effective_channels = campaign_channels
+        selection_unreadable = selection_unreadable or campaign_unreadable
+        if campaign_unreadable and campaign_reason:
+            selection_reason = campaign_reason
         public_url = str(campaign.get("google_site_url") or "").strip()
         site_approved = _time(campaign.get("site_publication_approved_at"))
         published = _time(campaign.get("published_at"))
@@ -306,6 +413,8 @@ def collect_external_evidence(manager, project_id: str) -> dict:
         except Exception:
             shares = []
         for share in shares:
+            if effective_channels is not None and str(share.get("channel") or "") not in set(effective_channels):
+                continue
             url = str(share.get("evidence_url") or "").strip()
             social_approved = _time(share.get("approved_at"))
             social_registered = _time(share.get("evidence_registered_at"))
@@ -326,7 +435,10 @@ def collect_external_evidence(manager, project_id: str) -> dict:
             kit_exists = kit.is_file()
         except (OSError, ValueError, FileNotFoundError, KeyError):
             pass
-        for event in campaign_evidence(campaign, shares, leads, kit_exists=kit_exists):
+        for event in campaign_evidence(
+            campaign, shares, leads, kit_exists=kit_exists,
+            selected_channels=effective_channels,
+        ):
             if event["kind"] in {"google_site_publication", "social_post",
                                  "manual_social_post", "post_url_registration"}:
                 if not _https_url(event.get("reference") or ""):
@@ -341,6 +453,8 @@ def collect_external_evidence(manager, project_id: str) -> dict:
         "forms": forms,
         "social": social,
         "leads": leads,
+        "social_selection_unreadable": selection_unreadable,
+        "social_selection_reason": selection_reason,
     }
 
 
@@ -474,6 +588,37 @@ def _evaluate_one(
     exec_tasks = _exec_tasks(item, by_key, cid)
     if not exec_tasks:
         return _untestable(cid, CHECK_TASK, f"{cid}の実行タスクが無いため判定できません", code=REASON_NO_EXEC)
+    # 修正A/B: 項目未抽出・対象不明・方法未定義は needs_review 相当に止める。
+    # 片方の成果物の項目ゼロはFAIL。勝手に通さない。
+    # 専用検証契約(車両等)は既存の専用検証に任せ、ここでは何もしない。
+    try:
+        has_vehicle = any(
+            str((contract_of(task) or {}).get("execution_kind") or "").startswith("vehicle_")
+            for task in exec_tasks
+        )
+    except (ValueError, TypeError, AttributeError, KeyError):
+        has_vehicle = False
+    if has_vehicle:
+        matrix_check = {"passed": True, "issues": [], "needs_human_review": False,
+                        "artifact_zero_failed": False}
+    else:
+        try:
+            from app.requirement_matrix import validate_requirement_matrix
+            matrix_check = validate_requirement_matrix({"tasks": exec_tasks})
+        except (ValueError, TypeError, AttributeError, KeyError):
+            matrix_check = {"passed": False, "issues": ["requirement matrix unreadable"],
+                            "needs_human_review": True, "artifact_zero_failed": False}
+    if matrix_check.get("artifact_zero_failed"):
+        return _fail(
+            cid, CHECK_ARTIFACT, REASON_ARTIFACT,
+            "成果物と項目の対応が不完全です: " + "; ".join(matrix_check.get("issues") or [])[:500],
+            str((_outputs_of(exec_tasks)[0].get("path") if _outputs_of(exec_tasks) else "")),
+        )
+    if not matrix_check.get("passed"):
+        return _untestable(
+            cid, CHECK_ARTIFACT,
+            "人の確認待ち: " + "; ".join(matrix_check.get("issues") or ["項目の抽出に疑義"])[:500],
+        )
     incomplete = [task for task in exec_tasks if task.get("status") != "completed"]
     if incomplete:
         keys = ",".join(str(task.get("task_key") or "") for task in incomplete)
@@ -529,26 +674,24 @@ def _evaluate_one(
         return _untestable(cid, CHECK_VERIFY, f"{cid}を評価する最終検証タスクがありません", code=REASON_VERIFY)
     if fv_status is None:
         fv_status = verify_tasks[0].get("status")
+    ledger_missing = "|LEDGER_MISSING:" in str(fv_path)
+    ledger_missing_reason = ""
+    if ledger_missing:
+        try:
+            ledger_missing_reason = str(fv_path).split("|LEDGER_MISSING:", 1)[1]
+        except (ValueError, TypeError, AttributeError, IndexError):
+            ledger_missing_reason = "項目別検証台帳が無い: 再計画が必要"
+        if not ledger_missing_reason:
+            ledger_missing_reason = "項目別検証台帳が無い: 再計画が必要"
+        fv_path = str(fv_path).split("|LEDGER_MISSING:", 1)[0]
     if fv_status != "completed":
         return _blocked(
             cid, CHECK_VERIFY,
             "最終検証が未完了のためこの達成条件を確定できません",
             fv_path or primary, code=REASON_VERIFY,
         )
-    verdict = fv_verdicts.get(cid)
-    if not verdict:
-        return _fail(
-            cid, CHECK_VERIFY, REASON_VERIFY,
-            f"最終検証が{cid}を明示的に評価していません",
-            fv_path or primary,
-        )
-    if verdict != "PASS":
-        return _fail(
-            cid, CHECK_VERIFY, REASON_VERIFY,
-            f"最終検証が{cid}を{verdict}と判定しています",
-            fv_path or primary,
-        )
 
+    # 外部証拠は先に確認する(既存の外部送信・営業実行の挙動を維持)。
     kinds = _action_kinds(item, exec_tasks) if _needs_external(item, exec_tasks) else []
     external_summary = ""
     if kinds or _needs_external(item, exec_tasks):
@@ -573,6 +716,176 @@ def _evaluate_one(
     trial = _check_trial(cid, item, evidence, artifact_text, primary)
     if trial is not None:
         return trial
+
+    if ledger_missing:
+        return _fail(
+            cid, CHECK_VERIFY, REASON_VERIFY,
+            ledger_missing_reason,
+            fv_path or primary,
+        )
+
+    verdict = fv_verdicts.get(cid)
+    if not verdict:
+        return _fail(
+            cid, CHECK_VERIFY, REASON_VERIFY,
+            f"最終検証が{cid}を明示的に評価していません",
+            fv_path or primary,
+        )
+    if verdict != "PASS":
+        return _fail(
+            cid, CHECK_VERIFY, REASON_VERIFY,
+            f"最終検証が{cid}を{verdict}と判定しています",
+            fv_path or primary,
+        )
+
+    # 修正B: 形式検査は前段として保持し、必須項目の証拠付き判定を必須にする。
+    # SC判定の集約: 必須項目がすべて PASS または(文意の項目で)HUMAN_CONFIRMED
+    # のときだけ PASS。FAIL が1件でもあれば FAIL。UNTESTABLE が残れば人の確認待ち。
+    # 専用検証契約(車両等)は既存の専用検証に任せる。
+    try:
+        from app.requirement_verification import (
+            HUMAN_CONFIRMED as _HUMAN_CONFIRMED,
+        )
+        from app.requirement_verification import verify_requirement_items as _verify_items
+        _has_items_module = True
+    except (ValueError, TypeError, AttributeError, ImportError):
+        _has_items_module = False
+        _HUMAN_CONFIRMED = "HUMAN_CONFIRMED"
+        _verify_items = None
+    if not _has_items_module and not has_vehicle:
+        return _untestable(
+            cid, CHECK_VERIFY, "人の確認待ち: 項目別検証器を読み込めません",
+            code=REASON_VERIFY,
+        )
+    if _has_items_module and not has_vehicle:
+        # P0-C: 保存後の成果物本文の根拠確認をライブ再検査に合流させる。
+        # 登録テキストは業務事実の照合用にだけ使い、原本本文の外部転送はしない。
+        # 読めない・出典不能は UNTESTABLE で合格にしない。
+        try:
+            from app.structured_planning import build_p0c_registered_text as _p0c_text
+            try:
+                _p0c_files = manager.memory.list_context_files(
+                    project_id, include_content=True)
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
+                _p0c_files = []
+            _p0c_registered = _p0c_text(
+                _mission_for_p0c(manager, project_id), _p0c_files, "")
+        except (ValueError, TypeError, AttributeError):
+            _p0c_registered = ""
+        live_rows: list[dict] = []
+        for task in exec_tasks:
+            def resolve_item_path(relative):
+                return _resolve(manager, project_id, relative, must_exist=True)
+            try:
+                live_rows.extend(_verify_items(task, resolve_item_path, semantic_judge=None,
+                                               registered_text=_p0c_registered))
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
+                return _untestable(cid, CHECK_VERIFY, "人の確認待ち: 項目別検証を確認できません", code=REASON_VERIFY)
+        live_rows = [row for row in live_rows if str(row.get("criterion_id") or "") == cid]
+        live_required = [row for row in live_rows if row.get("required", True)]
+        if not live_required:
+            return _untestable(cid, CHECK_VERIFY, "人の確認待ち: 必須項目が抽出できません", code=REASON_VERIFY)
+        # 台帳の人確認を反映する(文意の項目だけ。機械項目は上書きできない)。
+        # 読取失敗は『空』に倒さず UNTESTABLE にする(人確認の流用をしない)。
+        try:
+            saved_ledger = open_ledger_readonly(manager, project_id)
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            return _untestable(cid, CHECK_VERIFY, "人の確認待ち: 項目別検証を確認できません", code=REASON_VERIFY)
+        if saved_ledger is not None and isinstance(saved_ledger, dict):
+            saved_rows = saved_ledger.get("rows") if isinstance(saved_ledger.get("rows"), list) else []
+            # 人確認を流用する前に、現行の計画・原本・対象成果物が
+            # 台帳と一致することを毎回確かめる。変更後は再確認が必要。
+            try:
+                stored_hashes = __import__("json").loads(
+                    str(saved_ledger.get("artifact_hashes_json") or "{}"))
+            except (ValueError, TypeError):
+                stored_hashes = {}
+            same_plan = bool(current_binding.get("plan_signature")) and (
+                str(saved_ledger.get("plan_signature") or "")
+                == str(current_binding.get("plan_signature") or ""))
+            same_source = bool(current_binding.get("source_hash")) and (
+                str(saved_ledger.get("source_hash") or "")
+                == str(current_binding.get("source_hash") or ""))
+            confirmed_by_id = {
+                str(row.get("item_id") or ""): row
+                for row in saved_rows
+                if same_plan and same_source and isinstance(stored_hashes, dict)
+                and isinstance(row, dict) and str(row.get("result") or "") == _HUMAN_CONFIRMED
+                and str(row.get("method") or "") == "llm_semantic"
+                and str(stored_hashes.get(str(row.get("artifact_path") or "")) or "")
+                == _artifact_digest(manager, project_id, str(row.get("artifact_path") or ""))
+            }
+            for row in live_required:
+                if str(row.get("result") or "") != "UNTESTABLE":
+                    continue
+                if str(row.get("method") or "") != "llm_semantic":
+                    continue
+                confirmed = confirmed_by_id.get(str(row.get("item_id") or ""))
+                if confirmed is not None:
+                    row["result"] = _HUMAN_CONFIRMED
+        live_results = [str(row.get("result") or "") for row in live_required]
+        if any(result == "FAIL" for result in live_results):
+            detail = "; ".join(
+                f"{row.get('item_id')}:{row.get('reason')}" for row in live_required
+                if str(row.get("result") or "") == "FAIL"
+            )
+            return _fail(cid, CHECK_VERIFY, REASON_VERIFY,
+                         "必須項目の未達: " + detail[:800], primary, detail[:500])
+        if any(result == "UNTESTABLE" for result in live_results):
+            detail = "; ".join(
+                f"{row.get('item_id')}:{row.get('reason')}" for row in live_required
+                if str(row.get("result") or "") == "UNTESTABLE"
+            )
+            return _untestable(cid, CHECK_VERIFY, "人の確認待ち: " + detail[:800],
+                               primary, code=REASON_VERIFY)
+        if any(result not in ("PASS", _HUMAN_CONFIRMED) for result in live_results):
+            detail = "; ".join(
+                f"{row.get('item_id')}:{row.get('reason')}" for row in live_required
+                if str(row.get("result") or "") not in ("PASS", _HUMAN_CONFIRMED)
+            )
+            return _untestable(cid, CHECK_VERIFY, "人の確認待ち: " + detail[:800],
+                               primary, code=REASON_VERIFY)
+        # 台帳が無ければ未検証として扱う(レポート生成前にPASSにしない)。
+        if saved_ledger is None:
+            return _untestable(cid, CHECK_VERIFY, "人の確認待ち: 項目別検証台帳がありません",
+                               code=REASON_VERIFY)
+        try:
+            from app.requirement_verification import ledger_invalidated as _invalidated
+            artifact_hashes = {
+                str(output.get("path") or ""): _artifact_digest(manager, project_id, str(output.get("path") or ""))
+                for output in outputs
+            }
+            invalid = _invalidated(
+                {
+                    "plan_signature": str((saved_ledger or {}).get("plan_signature") or ""),
+                    "source_hash": str((saved_ledger or {}).get("source_hash") or ""),
+                    "artifact_hashes": __import__("json").loads(
+                        str((saved_ledger or {}).get("artifact_hashes_json") or "{}")),
+                },
+                str((current_binding or {}).get("plan_signature") or ""),
+                str((current_binding or {}).get("source_hash") or ""),
+                artifact_hashes,
+            )
+        except (ValueError, TypeError, AttributeError, KeyError):
+            invalid = ["ledger_unreadable"]
+        if invalid and any(str(row.get("result") or "") == _HUMAN_CONFIRMED for row in live_required):
+            return _untestable(
+                cid, CHECK_VERIFY, "人の確認待ち: 計画・原本・成果物が変わり、以前の確認を再利用できません",
+                code=REASON_VERIFY,
+            )
+        saved_rows = saved_ledger.get("rows") if isinstance(saved_ledger.get("rows"), list) else []
+        saved_for_cid = [
+            row for row in saved_rows
+            if isinstance(row, dict) and str(row.get("criterion_id") or "") == cid
+            and int(row.get("is_required", 1)) == 1
+        ]
+        if not saved_for_cid or any(
+                str(row.get("result") or "") not in ("PASS", _HUMAN_CONFIRMED)
+                or (str(row.get("result") or "") == _HUMAN_CONFIRMED
+                    and str(row.get("method") or "") != "llm_semantic")
+                for row in saved_for_cid):
+            return _untestable(cid, CHECK_VERIFY, "人の確認待ち: 台帳の必須項目がPASSではありません",
+                               code=REASON_VERIFY)
 
     summary = f"artifacts={present_paths} verification={cid}:PASS"
     if external_summary:
@@ -620,3 +933,17 @@ def evaluate_generic_criteria(manager, project_id, criteria, contract=None, hash
             fv_status, fv_verdicts, fv_path, evidence, binding,
         ))
     return rows
+
+
+def open_ledger_readonly(manager, project_id: str) -> dict | None:
+    """監視用の読み取り専用経路。実行中PJの状態を書き換えない。
+
+    ShortTermMemory を新規生成しない(open_ledger_readonly経由で台帳だけ読む)。
+    戻り値は最新台帳。台帳が無ければNone、読取失敗は例外。
+    """
+    from app.requirement_item_ledger import open_ledger_readonly as _open
+
+    memory_path = getattr(getattr(manager, "memory", None), "path", None)
+    if memory_path is None:
+        raise ValueError("manager.memory.path がありません")
+    return _open(memory_path, project_id)

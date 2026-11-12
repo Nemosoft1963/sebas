@@ -214,3 +214,4 @@ def extract_context_file(filename: str, data: bytes, mime_type: str = "") -> Con
     else:
         kind = "binary"
     return ContextExtraction("", kind, detected, "原本を保存しました。自動文字抽出は未対応です。")
+

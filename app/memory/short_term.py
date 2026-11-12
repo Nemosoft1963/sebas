@@ -127,10 +127,14 @@ def ensure_ocr_tables(db: sqlite3.Connection) -> None:
 
 
 class ShortTermMemory:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
         self.path = path
+        self._read_only = bool(read_only)
+        if self._read_only:
+            # 監視・試験の読取専用経路: DDLも再起動後復旧も行わない。書込まない。
+            return
         now = datetime.now(timezone.utc).isoformat()
+        path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, context_text TEXT NOT NULL DEFAULT '',
@@ -266,10 +270,24 @@ class ShortTermMemory:
                 tracking_url TEXT NOT NULL, compose_url TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'draft_ready', evidence_url TEXT NOT NULL DEFAULT '',
                 open_count INTEGER NOT NULL DEFAULT 0, approved_at TEXT, last_opened_at TEXT,
-                evidence_registered_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                evidence_registered_at TEXT,
+                publication_binding_id INTEGER NOT NULL DEFAULT 0,
+                publication_binding_sha256 TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 UNIQUE(campaign_id,channel,variant))""")
             db.execute("""CREATE INDEX IF NOT EXISTS idx_social_shares_project_campaign
                 ON campaign_social_shares(project_id,campaign_id,channel)""")
+            try:
+                share_columns = {row[1] for row in db.execute(
+                    "PRAGMA table_info(campaign_social_shares)").fetchall()}
+            except sqlite3.Error:
+                share_columns = set()
+            if "publication_binding_id" not in share_columns:
+                db.execute("ALTER TABLE campaign_social_shares ADD COLUMN "
+                           "publication_binding_id INTEGER NOT NULL DEFAULT 0")
+            if "publication_binding_sha256" not in share_columns:
+                db.execute("ALTER TABLE campaign_social_shares ADD COLUMN "
+                           "publication_binding_sha256 TEXT NOT NULL DEFAULT ''")
             db.execute("""CREATE TABLE IF NOT EXISTS project_leads (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL, campaign_id TEXT NOT NULL,
                 name TEXT NOT NULL, email TEXT NOT NULL, company TEXT NOT NULL DEFAULT '',
@@ -304,6 +322,17 @@ class ShortTermMemory:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        if self._read_only:
+            # 読取専用: mode=ro で開く。親DBが無ければ失敗させる(作らない)。
+            from app.requirement_item_ledger import ledger_readonly_uri
+
+            db = sqlite3.connect(
+                ledger_readonly_uri(self.path), uri=True, timeout=15)
+            try:
+                yield db
+            finally:
+                db.close()
+            return
         db = sqlite3.connect(self.path)
         try:
             with db:
@@ -568,6 +597,24 @@ class ShortTermMemory:
             "percent": round(completed * 100 / total) if total else 0,
         }
         return result
+
+    def latest_event_ids(self, project_id: str, kinds: tuple[str, ...]) -> dict[str, int]:
+        """指定した kind の project_events の最新IDを返す(読取専用)。
+
+        get_mission() は直近の一部のイベントしか返さないため、承認の記録のように
+        古いイベントも確実に見るにはこの問い合わせを使う。記録が無い kind は含めない。
+        読取失敗は sqlite3.Error をそのまま送出する(握りつぶさない)。
+        """
+        if not kinds:
+            return {}
+        marks = ",".join("?" for _ in kinds)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT kind, MAX(id) FROM project_events "
+                f"WHERE project_id=? AND kind IN ({marks}) GROUP BY kind",
+                (str(project_id), *[str(kind) for kind in kinds]),
+            ).fetchall()
+        return {str(kind): int(max_id) for kind, max_id in rows if max_id is not None}
 
     def save_mission(self, project_id: str, goal: str, success_criteria: str,
                      constraints_text: str, allow_external_ai: bool,
@@ -1078,10 +1125,19 @@ class ShortTermMemory:
 
     def register_social_evidence(self, project_id: str, campaign_id: str,
                                  channel: str, evidence_url: str,
-                                 variant: str = "primary") -> dict:
+                                 variant: str = "primary",
+                                 publication_binding_id: int = 0,
+                                 publication_binding_sha256: str = "") -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {row[1] for row in db.execute(
+                    "PRAGMA table_info(campaign_social_shares)").fetchall()}
+            except sqlite3.Error:
+                columns = set()
+            has_binding = ("publication_binding_id" in columns
+                           and "publication_binding_sha256" in columns)
             current = db.execute("""SELECT status,evidence_url FROM campaign_social_shares
                 WHERE project_id=? AND campaign_id=? AND channel=? AND variant=?""",
                 (project_id, campaign_id, channel, variant)).fetchone()
@@ -1090,6 +1146,14 @@ class ShortTermMemory:
             if current[0] == 'evidence_registered':
                 if current[1] != evidence_url:
                     raise ValueError("公開投稿URLは登録済みです。異なるURLで上書きできません")
+            elif has_binding:
+                db.execute("""UPDATE campaign_social_shares SET status='evidence_registered',
+                    evidence_url=?,evidence_registered_at=?,updated_at=?,
+                    publication_binding_id=?,publication_binding_sha256=?
+                    WHERE project_id=? AND campaign_id=? AND channel=? AND variant=?""",
+                    (evidence_url, now, now, int(publication_binding_id or 0),
+                     str(publication_binding_sha256 or ""),
+                     project_id, campaign_id, channel, variant))
             else:
                 db.execute("""UPDATE campaign_social_shares SET status='evidence_registered',
                     evidence_url=?,evidence_registered_at=?,updated_at=?
@@ -1265,6 +1329,15 @@ class ShortTermMemory:
                 plan_summary=CASE WHEN ?='' THEN plan_summary ELSE plan_summary || '\n\n' || ? END,
                 plan_version=plan_version+1,updated_at=? WHERE project_id=?""",
                 (summary_note.strip(), summary_note.strip(), now, project_id))
+            # 承認済み計画への追加も『計画が変わった』記録として残す。
+            # 承認の記録より新しい plan_extended があれば、公開Web調査の許可は
+            # 再承認されるまで与えない(channel_skills.web_search_permission)。
+            db.execute(
+                """INSERT INTO project_events(project_id,task_id,kind,message,detail,created_at)
+                    VALUES(?,?,?,?,?,?)""",
+                (project_id, None, "plan_extended",
+                 f"実行計画に{len(tasks)}タスクを追加しました",
+                 summary_note.strip()[:2000], now))
         return self.get_mission(project_id)
 
     def save(self, session_id: str, user: str, assistant: str, model: str,

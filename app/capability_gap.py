@@ -49,7 +49,11 @@ GAP_CODES = (
     "missing_binding",
     "policy_block",
     "unknown",
+    "plan_wiring_gap",
 )
+
+#: plan_wiring_gap のときに次に取る操作を示す固定コード。
+PLAN_WIRING_NEXT_ACTION = "revise_plan"
 
 STATUSES = (
     "draft",
@@ -569,6 +573,26 @@ def _classify_gap(*, has_owner: bool, policy_hit: bool, inspection: dict) -> str
     return None
 
 
+#: plan_wiring_gap にする操作の許可リスト (P0-2は原本抽出のみ。将来の拡張は別単位)。
+PLAN_WIRING_OPERATIONS: tuple[str, ...] = ("source_extraction",)
+
+
+def _is_plan_wiring_candidate(inspection: dict) -> bool:
+    """P0-2: 既存能力で提供可能な結線不足か。5状態がすべて真かつ実行器ありのときだけ真。
+
+    P0-2修正: 対象は PLAN_WIRING_OPERATIONS (source_extractionのみ)。それ以外の操作
+    (document_generation・table_processing・public_research等)は従来分類のままにする。
+    例外・確認失敗はここでは扱わない。呼出側は False (従来分類) に倒す。
+    判定不能を真にしない。握りつぶしはしない (inspection の実測値だけ読む)。
+    """
+    if str(inspection.get("operation_id") or "") not in PLAN_WIRING_OPERATIONS:
+        return False
+    if not str(inspection.get("executor_capability") or ""):
+        return False
+    return all(bool(inspection.get(key)) for key in (
+        "implemented", "configured", "input_compatible", "validated", "permitted"))
+
+
 # ----------------------------------------------------------------------------
 # 事前照合 (読み取り専用)
 # ----------------------------------------------------------------------------
@@ -688,11 +712,18 @@ def capability_preflight(manager, project_id: str, plan_signature: str | None = 
                 code = _classify_gap(has_owner=bool(owners), policy_hit=policy_hit,
                                      inspection=inspection)
             elif not provided:
-                code = ("policy_block" if policy_hit else "missing_capability")
                 inspection = dict(inspection)
                 reasons = dict(inspection.get("reasons") or {})
-                reasons["provided"] = ("要求される操作を提供できる工程が無い "
-                                       "(文書生成は代用にしない)")
+                # P0-2: 5状態がすべて真かつ実行器ありなら結線不足。それ以外は
+                # 従来の missing_capability のまま。判定不能は倒さない。
+                if (not policy_hit and _is_plan_wiring_candidate(inspection)):
+                    code = "plan_wiring_gap"
+                    reasons["provided"] = ("既存の実行器で提供可能。計画修正で解消する "
+                                           "(文書生成は代用にしない)")
+                else:
+                    code = ("policy_block" if policy_hit else "missing_capability")
+                    reasons["provided"] = ("要求される操作を提供できる工程が無い "
+                                           "(文書生成は代用にしない)")
                 inspection["reasons"] = reasons
             else:
                 code = _classify_gap(has_owner=bool(owners), policy_hit=policy_hit,
@@ -710,6 +741,9 @@ def capability_preflight(manager, project_id: str, plan_signature: str | None = 
                 "permitted": bool(inspection.get("permitted")),
                 "reasons": dict(inspection.get("reasons") or {}),
                 "gap_code": code,
+                # P0-2: 計画修正へ戻す導線。結線不足の行だけ固定の次操作を載せる。
+                **({"next_action": PLAN_WIRING_NEXT_ACTION}
+                   if code == "plan_wiring_gap" else {}),
             })
             if code is not None and gap_code is None:
                 gap_code = code
@@ -733,6 +767,9 @@ def capability_preflight(manager, project_id: str, plan_signature: str | None = 
                 "required_capability_id": str(op_entry.get("hypothetical") or ""),
                 "executor_capability": str(op_row.get("executor_capability") or ""),
                 "reasons": dict(op_row.get("reasons") or {}),
+                # P0-2: 公開ビュー/事前照合の出力にも次操作を載せる。
+                **({"next_action": PLAN_WIRING_NEXT_ACTION}
+                   if str(op_row.get("gap_code") or "") == "plan_wiring_gap" else {}),
                 "evidence_refs": {
                     "plan_signature": signature,
                     "criterion_id": cid,
@@ -1000,6 +1037,9 @@ def preflight_to_classifier_inputs(preflight: dict) -> dict:
     if missing:
         base["disposition"] = "development"
         base["development_required"] = True
+    # P0-2: plan_wiring_gap は新機能の不足にしない。disposition/development を
+    # 付けず、既存の missing_capability だけがあるときだけ開発扱いにする。
+    # 呼出側の分類不能・不明扱いは変えない。
     # 4-E (追加のみ): 選択済みパックの適合検査が violates/unknown のとき、
     # stop_classifier が参照できる形で conforms=false を渡す。分類コード・
     # 優先順位は変えない (分類器側は既存の development 相当のまま)。
@@ -1018,21 +1058,29 @@ def preflight_to_classifier_inputs(preflight: dict) -> dict:
 def blocks_execution_approval(manager, project_id: str,
                               plan_signature: str | None = None,
                               preflight: dict | None = None) -> dict:
-    """missing_capability が残る計画は実行承認不可とするゲートの入口 (読み取り専用)。
+    """missing_capability / plan_wiring_gap が残る計画は実行承認不可とする入口 (読み取り専用)。
 
     保存済みの FunctionProposal (当該計画署名・未解決の missing_capability) が
-    残っていれば承認不可。既存のゲートを弱めない (不可にしかしない)。
+    残っていれば承認不可。plan_wiring_gap は提案を作らないため、事前照合の
+    残存そのもので承認不可にする。既存のゲートを弱めない (不可にしかしない)。
     """
     pid = str(project_id or "")
-    try:
-        if preflight is None:
-            _, current_signature = _plan_snapshot(manager, pid)
-        else:
-            current_signature = str(preflight.get("plan_signature") or "")
-    except Exception:
-        return {"blocked": False, "reason": "", "proposal_ids": [],
-                "plan_signature": str(plan_signature or ""), "read_only": True}
-    signature = str(plan_signature or current_signature or "")
+    # P0-2修正: preflight が渡されないときは自分で事前照合を計算する
+    # (読み取り専用・外部通信なし)。計算の例外は握りつぶさず伝播させ、
+    # execution_gate 側の既存 except が fail-closed で止める。
+    if preflight is None:
+        preflight = capability_preflight(manager, pid, plan_signature)
+    # 形式不正の事前照合は信頼できないため止める側に倒す (fail-closed)。
+    if not isinstance(preflight, dict):
+        return {"blocked": True,
+                "reason": ("事前照合を確認できないため実行承認できません。"
+                           "計画修正(必要な工程宣言の追加)を確認してください"),
+                "proposal_ids": [],
+                "plan_signature": str(plan_signature or ""),
+                "read_only": True,
+                "plan_wiring_gap": True,
+                "next_action": PLAN_WIRING_NEXT_ACTION}
+    signature = str(plan_signature or str(preflight.get("plan_signature") or "") or "")
     try:
         rows = list_proposals(manager, pid, plan_signature=signature)
     except Exception:
@@ -1041,18 +1089,72 @@ def blocks_execution_approval(manager, project_id: str,
     open_missing = [r for r in rows
                     if r.get("gap_code") == "missing_capability"
                     and str(r.get("status") or "") in OPEN_STATUSES]
-    if not open_missing:
-        return {"blocked": False, "reason": "", "proposal_ids": [],
-                "plan_signature": signature, "read_only": True}
-    ids = sorted({str(r.get("proposal_id") or "") for r in open_missing if r.get("proposal_id")})
-    return {
-        "blocked": True,
-        "reason": (f"不足機能の提案が{len(ids)}件残っているため実行承認できません。"
-                   "不足機能の提案を確認してください"),
-        "proposal_ids": ids,
-        "plan_signature": signature,
-        "read_only": True,
-    }
+    if open_missing:
+        ids = sorted({str(r.get("proposal_id") or "") for r in open_missing if r.get("proposal_id")})
+        return {
+            "blocked": True,
+            "reason": (f"不足機能の提案が{len(ids)}件残っているため実行承認できません。"
+                       "不足機能の提案を確認してください"),
+            "proposal_ids": ids,
+            "plan_signature": signature,
+            "read_only": True,
+        }
+    # P0-2: plan_wiring_gap は提案を作らないため、事前照合の残存そのもので
+    # 直接止める。署名の扱いは保存済み提案の経路に合わせる: plan_signature の
+    # 指定と事前照合の署名が食い違えば、その事前照合では現行計画を確認でき
+    # ないため止める側に倒す。gaps が list でなければ信頼できないため止める
+    # 側に倒す。判定ループに try/except は置かない (型の確認だけする)。
+    preflight_signature = str(preflight.get("plan_signature") or "")
+    if (plan_signature is not None and preflight_signature
+            and str(plan_signature) != preflight_signature):
+        return {
+            "blocked": True,
+            "reason": ("計画の結線不足が残っているため実行承認できません。"
+                       "計画修正(必要な工程宣言の追加)を確認してください"),
+            "proposal_ids": [],
+            "plan_signature": str(plan_signature),
+            "read_only": True,
+            "plan_wiring_gap": True,
+            "next_action": PLAN_WIRING_NEXT_ACTION,
+        }
+    gaps_raw = preflight.get("gaps")
+    if not isinstance(gaps_raw, list):
+        return {
+            "blocked": True,
+            "reason": ("事前照合を確認できないため実行承認できません。"
+                       "計画修正(必要な工程宣言の追加)を確認してください"),
+            "proposal_ids": [],
+            "plan_signature": signature,
+            "read_only": True,
+            "plan_wiring_gap": True,
+            "next_action": PLAN_WIRING_NEXT_ACTION,
+        }
+    if any(not isinstance(gap_item, dict) for gap_item in gaps_raw):
+        return {
+            "blocked": True,
+            "reason": ("事前照合を確認できないため実行承認できません。"
+                       "計画修正(必要な工程宣言の追加)を確認してください"),
+            "proposal_ids": [],
+            "plan_signature": signature,
+            "read_only": True,
+            "plan_wiring_gap": True,
+            "next_action": PLAN_WIRING_NEXT_ACTION,
+        }
+    wiring_gaps = [gap_item for gap_item in gaps_raw
+                   if str(gap_item.get("gap_code") or "") == "plan_wiring_gap"]
+    if wiring_gaps:
+        return {
+            "blocked": True,
+            "reason": ("計画の結線不足が残っているため実行承認できません。"
+                       "計画修正(必要な工程宣言の追加)を確認してください"),
+            "proposal_ids": [],
+            "plan_signature": signature,
+            "read_only": True,
+            "plan_wiring_gap": True,
+            "next_action": PLAN_WIRING_NEXT_ACTION,
+        }
+    return {"blocked": False, "reason": "", "proposal_ids": [],
+            "plan_signature": signature, "read_only": True}
 
 
 # ----------------------------------------------------------------------------

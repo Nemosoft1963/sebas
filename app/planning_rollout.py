@@ -53,6 +53,9 @@ def namespace_tasks(tasks,version,prioritize_web=False):
         c=contract_of(task)
         if not c:raise ValueError('構造化契約がありません')
         for out in c['outputs']:out['path']=mapping[out['path']]
+        # 項目別検証の対象パスも成果物と同じ対応表で書き換える(未対応だと対象不明になる)。
+        for row in c.get('requirement_matrix') or []:
+            if isinstance(row,dict) and row.get('artifact_path') in mapping:row['artifact_path']=mapping[row['artifact_path']]
         c['inputs']=[mapping.get(value,value) for value in c.get('inputs',[])]
         text=task.get('description','')
         # Replace longest names first, once per original occurrence.

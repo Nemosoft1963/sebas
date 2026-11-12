@@ -20,3 +20,4 @@ class QwenASR:
         result = await asyncio.to_thread(self.model.transcribe, audio=(audio, sample_rate), language="Japanese")
         first = result[0] if isinstance(result, list) else result
         return str(getattr(first, "text", first)).strip()
+

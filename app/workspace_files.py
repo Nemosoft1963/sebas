@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -14,6 +15,11 @@ MAX_TEXT_WRITE_BYTES = 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_TREE_ENTRIES = 500
 MAX_SNAPSHOT_CHARS = 40_000
+MANIFEST_SIDECAR_DIR = ".local_cowork_manifests"
+KNOWN_FILE_EXTENSIONS = {
+    ".md", ".csv", ".txt", ".json", ".yaml", ".yml", ".html",
+    ".xlsx", ".docx", ".pdf",
+}
 
 
 def normalize_workspace_path(value: str, *, allow_empty: bool = False) -> str:
@@ -29,6 +35,29 @@ def normalize_workspace_path(value: str, *, allow_empty: bool = False) -> str:
     if len(normalized) > 500:
         raise ValueError("Workspace path must be 500 characters or fewer")
     return normalized
+
+
+class ContractPathConflictError(ValueError):
+    """契約でファイルと定めたパスが既存ディレクトリと衝突した。削除も上書きもしない。"""
+
+    def __init__(self, relative: str) -> None:
+        super().__init__(f"contract file path is an existing directory: {relative}")
+        self.relative = str(relative or "")
+
+
+def ensure_contract_file_writable(scope: Path, relative: str) -> Path:
+    """書込み前にパス種別を検査する。既存ディレクトリなら削除・上書きせず拒否。
+
+    通常のファイルパス(存在しない・ファイル)は従来どおり。そのまま書ける。
+    """
+    name = str(relative or "")
+    target = scope / Path(name)
+    try:
+        if target.is_dir():
+            raise ContractPathConflictError(name)
+    except OSError as exc:
+        raise ValueError(f"contract path unreadable: {name}: {type(exc).__name__}") from exc
+    return target
 
 
 class WorkspaceSandbox:
@@ -84,6 +113,8 @@ class WorkspaceSandbox:
         for path in sorted(scope.rglob("*"), key=lambda item: item.as_posix().lower()):
             if ".local_cowork_backups" in path.parts:
                 continue
+            if MANIFEST_SIDECAR_DIR in path.parts:
+                continue
             try:
                 resolved = path.resolve(strict=True)
             except (FileNotFoundError, OSError):
@@ -134,7 +165,11 @@ class WorkspaceSandbox:
         if not target.exists() or not target.is_file():
             return None
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        backup = scope / ".local_cowork_backups" / stamp / target.relative_to(scope)
+        # Windowsの長いPJ/試験パスでも退避できるよう、相対パスは短い
+        # ハッシュ名へ写像する。復元は返却する実パスを使うため可逆性を保つ。
+        relative = target.relative_to(scope).as_posix()
+        digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
+        backup = scope / ".local_cowork_backups" / f"{stamp}-{digest}.bak"
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, backup)
         return backup.relative_to(scope).as_posix()
@@ -174,9 +209,17 @@ class WorkspaceSandbox:
             relative = normalize_workspace_path(scoped_path)
             target = self._inside(scope, relative)
             if action == "mkdir":
+                from pathlib import Path as _Path
+
+                # ファイル用のパスに mkdir を許可しない。契約の衝突検査より前に拒否する。
+                if _Path(relative).suffix.lower() in KNOWN_FILE_EXTENSIONS:
+                    raise ValueError(
+                        f"mkdir is not allowed for a file path: {relative}")
                 target.mkdir(parents=True, exist_ok=True)
                 audit.append({"action": action, "path": relative, "status": "created"})
             elif action in {"write_text", "append_text"}:
+                # 契約でファイルと定めたパスが既存ディレクトリなら削除・上書きせず拒否。
+                ensure_contract_file_writable(scope, relative)
                 content = str(operation.get("content", ""))
                 data = content.encode("utf-8")
                 if len(data) > MAX_TEXT_WRITE_BYTES:
@@ -194,6 +237,7 @@ class WorkspaceSandbox:
                 source = self._inside(scope, source_relative, must_exist=True)
                 if target.exists():
                     raise FileExistsError(f"Destination already exists: {relative}")
+                ensure_contract_file_writable(scope, relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if action == "copy":
                     shutil.copy2(source, target) if source.is_file() else shutil.copytree(source, target)
@@ -260,6 +304,8 @@ class WorkspaceSandbox:
             raise ValueError("One generated workspace file must be 50 MB or smaller")
         project_relative, scope, target = self.resolve_file(configured, project_id, relative)
         scope.mkdir(parents=True, exist_ok=True)
+        scoped = self._scope_relative(project_relative, relative)
+        ensure_contract_file_writable(scope, normalize_workspace_path(scoped))
         backup = self._backup(scope, target)
         self._atomic_write(target, data)
         scoped = self._scope_relative(project_relative, relative)
@@ -278,6 +324,61 @@ class WorkspaceSandbox:
         self._atomic_write(target, data)
         return {"path": normalize_workspace_path(relative), "size_bytes": len(data)}
 
+    def manifest_path_for(self, configured: str, project_id: str,
+                          relative: str) -> tuple[str, Path, Path]:
+        """P1-1 manifest sidecar の配置を返す。本文と同じ階層には置かない。
+
+        PJごと・パスごとに最新1件。形式は JSON。内容が変わったら(sha不一致)
+        古い manifest では合格扱いにしない(呼び出し側が verify で判定)。
+        """
+        import hashlib as _hashlib
+        import json as _json
+
+        project_relative, scope = self.project_path(configured, project_id)
+        scoped = normalize_workspace_path(self._scope_relative(project_relative, relative))
+        digest = _hashlib.sha256(scoped.encode("utf-8")).hexdigest()[:32]
+        sidecar_relative = f"{MANIFEST_SIDECAR_DIR}/{digest}.json"
+        return scoped, scope, self._inside(scope, sidecar_relative)
+
+    def record_artifact_manifest(self, configured: str, project_id: str,
+                                 manifest: dict[str, Any]) -> dict[str, Any]:
+        """manifest 1件を sidecar に保存する。PJごと・パスごとに最新1件。
+
+        本文は保存しない(呼び出し側が build 済みの dict を渡す)。
+        既存の成果物本体には触らない。失敗は例外として送出する(握りつぶさない)。
+        """
+        import json as _json
+
+        if not isinstance(manifest, dict) or not manifest:
+            raise ValueError("manifest must be a non-empty object")
+        scoped = str(manifest.get("path") or "").strip()
+        if not scoped:
+            raise ValueError("manifest path is required")
+        _, scope, sidecar = self.manifest_path_for(configured, project_id, scoped)
+        scope.mkdir(parents=True, exist_ok=True)
+        payload = _json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+        self._atomic_write(sidecar, payload.encode("utf-8"))
+        return {"path": scoped, "sidecar": sidecar.relative_to(scope).as_posix()}
+
+    def read_artifact_manifest(self, configured: str, project_id: str,
+                               relative: str) -> dict[str, Any] | None:
+        """sidecar の manifest 1件を読む。無ければ None。本文は返さない。"""
+        import json as _json
+
+        try:
+            _, scope, sidecar = self.manifest_path_for(configured, project_id, relative)
+        except (ValueError, OSError):
+            return None
+        try:
+            raw = sidecar.read_bytes()
+        except (OSError, ValueError):
+            return None
+        try:
+            data = _json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def store_original(self, configured: str, project_id: str,
                        relative: str, data: bytes) -> dict[str, Any]:
         """Persist a registered source under the project-local originals folder."""
@@ -291,3 +392,4 @@ class WorkspaceSandbox:
         self._atomic_write(target, data)
         return {"path": target_relative, "size_bytes": len(data),
                 "status": "stored", "backup": backup}
+

@@ -239,3 +239,4 @@ def test_ocr_review_ui_scroll_validation_and_action_results():
     load_files_match = re.search(r"function loadFiles\s*\(\)\s*\{(.*?)\n\s*\}", source, re.DOTALL)
     if load_files_match:
         assert "scrollIntoView" not in load_files_match.group(1)
+

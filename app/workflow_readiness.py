@@ -508,6 +508,32 @@ def _allowed(manager, pid, mission, vehicle, revision, plan, queue, gate, issues
         start_reason = gate.get('reason') or '外部検証が未完了です'
     elif mission.get('status') not in {'ready', 'paused'}:
         start_reason = '計画の承認後に実行できます'
+    if not start_reason:
+        try:
+            _gate_v2_enabled = False
+            _gate_v2_result = None
+            try:
+                from app.plan_gate_decision import decide as _plan_gate_decide
+                from app.plan_gate_decision import enabled_for_project as _plan_gate_v2
+                _gate_v2_enabled = bool(_plan_gate_v2(pid))
+                if _gate_v2_enabled:
+                    _gate_v2_result = _plan_gate_decide(manager, pid)
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                _gate_v2_result = None
+            if _gate_v2_enabled and isinstance(_gate_v2_result, dict) and _gate_v2_result.get("mode") == "v2":
+                _gate_v2_verdict = _gate_v2_result.get("verdict")
+                _gate_v2_reason = _gate_v2_result.get("reason")
+                if _gate_v2_verdict != "passed":
+                    gate_code = str(_gate_v2_reason or "gate_check_error")
+                else:
+                    gate_code = None
+            else:
+                from app.independent_review_gate import gate_error as _ir_gate_error
+                gate_code = _ir_gate_error(manager, pid)
+        except Exception:
+            gate_code = 'independent_review_check_error'
+        if gate_code is not None:
+            start_reason = f'独立評価が必要です: {gate_code}'
     actions = {
         'prepare': _action(
             vehicle['applicable'] and not running,
@@ -763,6 +789,24 @@ def build_readiness(manager, pid: str) -> dict:
     revision = store.get(pid, 'revision', signature) or {}
     queue = store.get(pid, 'plan_queue', signature) or {}
     gate = execution_gate(manager, pid)
+    # 開始APIと同じv2判定を準備画面にも使う。旧ゲートの二重停止を表示しない。
+    try:
+        from app.plan_gate_decision import decide as _gate_decide
+        from app.plan_gate_decision import enabled_for_project as _gate_enabled
+        if _gate_enabled(pid):
+            _decision = _gate_decide(manager, pid)
+            if not isinstance(_decision, dict):
+                gate = {'blocked': True, 'reason': 'gate_check_error'}
+            elif _decision.get('mode') == 'v2':
+                gate = {
+                    'blocked': _decision.get('verdict') != 'passed',
+                    'reason': '' if _decision.get('verdict') == 'passed'
+                    else str(_decision.get('reason') or 'gate_check_error'),
+                }
+            elif _decision.get('mode') != 'legacy':
+                gate = {'blocked': True, 'reason': 'gate_check_error'}
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
+        gate = {'blocked': True, 'reason': 'gate_check_error'}
     issues = issues_for(manager, pid, signature)
     vehicle = _vehicle_view(manager, pid, mission)
     failures = list(goal_failures(manager, pid) or [])

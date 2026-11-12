@@ -132,3 +132,4 @@ def can_adopt(item,recipe):
  if not experiments:return False
  e=experiments[-1];result=next(r for r in e['results'] if r['candidate']==origin['candidate'])
  return e['status']=='completed' and result.get('recipe_hash')==recipe['hash'] and result.get('passed',False) and bool((result.get('review') or {}).get('evidence'))
+

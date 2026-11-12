@@ -16,6 +16,10 @@ OCR_CAPABILITY_IDS = (
 CAPABILITY_ALIASES = {
     'source.extract_table': 'source.extract_pdf_table',
 }
+# C1: 共通外部チャネルスキルの4ID。接続先(アダプタ)が無ければ『利用可能』にしない。
+CHANNEL_SKILL_CAPABILITY_IDS = frozenset({
+    'web.search_public', 'mail.receive', 'social.observe', 'mail.send_approved',
+})
 PDF_TEXT_CONSTRAINT = '文字PDFの抽出。OCR・一般的な表復元は保証しない'
 
 DEFINITIONS = {
@@ -70,7 +74,23 @@ class CapabilityRegistry:
             if capability in TRIZ_CAPABILITIES and capability not in DEFINITIONS:
                 c=TRIZ_CAPABILITIES[capability]
                 definition=('triz_adapters',c['domain'],c['description'])
-            if definition is None:
+            if capability in CHANNEL_SKILL_CAPABILITY_IDS:
+                # C1: アダプタが無ければ unavailable。定義があるだけで available にしない。
+                # DEFINITIONS に無いため unknown に倒す前に評価する(既存分岐の順序は変えない)。
+                # channel_skills.skill_state の決定規則(a)に基づく(アダプタ無し→needs_configuration
+                # → registryでは unavailable/adapter_not_connected)。
+                try:
+                    from app.channel_skills import SKILL_DEFINITIONS as _C1_DEFS
+                    from app.channel_skills import capability_registry_state
+                    state, reason = capability_registry_state(capability)
+                    _d = _C1_DEFS.get(capability)
+                    if _d is not None:
+                        definition = ('channel_skills',
+                                      str(_d.get('provider_kind') or ''),
+                                      str(_d.get('purpose') or ''))
+                except (ImportError, AttributeError, ValueError):
+                    state, reason = 'unavailable', 'adapter_not_connected'
+            elif definition is None:
                 state, reason = 'unknown', 'unregistered'
             elif capability in TRIZ_CAPABILITIES and capability not in DEFINITIONS and not TRIZ_CAPABILITIES[capability]['available']:
                 state,reason='unavailable','adapter_not_connected'

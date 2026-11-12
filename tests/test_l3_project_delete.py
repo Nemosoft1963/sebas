@@ -650,6 +650,43 @@ def test_legacy_delete_api_rejected(monkeypatch, tmp_path):
 
 
 
+def test_item_ledger_purge_failure_does_not_report_complete(env, monkeypatch):
+    import app.requirement_item_ledger as item_ledger
+
+    _fill(env)
+    # サイドカーを作り、存在しない場合の正常な0件経路と区別する。
+    item_ledger.record_ledger(env["mem"], {
+        "project_id": env["pid"], "plan_signature": "sig", "source_hash": "src",
+        "artifact_hashes": {}, "criterion_verdicts": {}, "ledger_digest": "digest",
+        "rows": [{"item_id": "SC01-R01", "criterion_id": "SC01",
+                  "artifact_path": "result/x.md", "method": "phrase",
+                  "required": True, "result": "FAIL", "reason": "missing"}],
+    })
+    deleted, _ = _do_delete(env)
+    assert deleted["ok"] is True
+    mem = env["mem"]
+    pid = env["pid"]
+    from app.project_delete import delete_db_path
+    with sqlite3.connect(str(delete_db_path(mem))) as db:
+        db.execute("UPDATE project_delete_states SET purgeable_at=? WHERE project_id=?",
+                   ("2000-01-01T00:00:00+00:00", pid))
+    preview = build_purge_preview(mem, pid, env["ws_root"])
+    assert preview["can_purge"] is True, preview.get("blocked_reasons")
+
+    def fail_item_purge(*_args):
+        raise RuntimeError("injected row enumeration failure")
+
+    monkeypatch.setattr(item_ledger, "purge_project_items", fail_item_purge)
+    result = purge_deleted(
+        mem, pid, purge_token=preview["purge_token"],
+        project_name=preview["project_name"], actor="架空担当",
+        workspace_root=env["ws_root"], backup_root=env["backup_root"])
+    assert result["ok"] is False
+    assert result["code"] == "ITEM_LEDGER_PURGE_FAILED"
+    assert get_delete_state(mem, pid)["state"] == "failed"
+    assert "完全削除しました" not in json.dumps(result, ensure_ascii=False)
+
+
 def test_watch_purge_failure_does_not_report_complete(env, monkeypatch):
     import app.watchtower as watch
 

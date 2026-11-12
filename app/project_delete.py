@@ -1203,6 +1203,98 @@ def purge_deleted(memory_path: str | Path, project_id: str, *,
                     "reason": "成果台帳の記録を完全削除できません",
                     "code": "LEDGER_PURGE_FAILED", "removed": removed,
                     "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # P0(修正A/B): 項目別検証・判断待ちの記録は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        try:
+            from app.requirement_item_ledger import purge_project_items as _purge_items
+            _ipurged = _purge_items(memory_path, pid)
+            if not isinstance(_ipurged, dict) or not all(
+                    key in _ipurged for key in ("requirement_item_ledger",
+                                                "requirement_item_rows",
+                                                "requirement_item_confirmations",
+                                                "requirement_repair_runs")):
+                raise ValueError("item ledger purge result unavailable")
+            removed["item_ledger:requirement_item_ledger"] = int(
+                _ipurged["requirement_item_ledger"])
+            removed["item_ledger:requirement_item_rows"] = int(
+                _ipurged["requirement_item_rows"])
+            removed["item_ledger:requirement_item_confirmations"] = int(
+                _ipurged["requirement_item_confirmations"])
+            removed["item_ledger:requirement_repair_runs"] = int(
+                (_ipurged or {}).get("requirement_repair_runs") or 0)
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            LOGGER.warning("item ledger purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed",
+                       "item ledger purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="項目別検証台帳の記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "項目別検証台帳の記録を完全削除できません",
+                    "code": "ITEM_LEDGER_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # B2: 公開前の版照合の束縛(item_ledger:publication_bindings)は、上の
+        # 汎用経路(REGISTRY の sqlite_table)で当該PJ行だけ消える。残存があれば
+        # 後段の孤児検査(ORPHANS_REMAIN)で失敗として返すため、個別の二重削除は行わない。
+        # P0-1 (追加のみ): 実行サイクル記録と残件台帳は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        try:
+            from app.run_cycles import purge_project_run_cycles as _purge_runs
+            _rpurged = _purge_runs(memory_path, pid)
+            if not isinstance(_rpurged, dict) or not all(
+                    key in _rpurged for key in ("project_run_cycles",
+                                                "project_run_open_items")):
+                raise ValueError("run cycle purge result unavailable")
+            removed["item_ledger:project_run_cycles"] = int(
+                _rpurged["project_run_cycles"])
+            removed["item_ledger:project_run_open_items"] = int(
+                _rpurged["project_run_open_items"])
+        except (OSError, sqlite3.Error, ValueError, TypeError,
+                AttributeError, KeyError, RuntimeError) as exc:
+            LOGGER.warning("run cycle purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed",
+                       "run cycle purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="実行サイクル記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "実行サイクル記録を完全削除できません",
+                    "code": "RUN_CYCLE_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # C5 (追加のみ): mail_send_bindings/attempts/outcomes は kind=other のため
+        # _purge_all_data では触れない。当該PJ行だけ消す (他PJに影響しない)。
+        try:
+            from app.channel_skill_mail_send import purge_project_mail_send as _purge_mail_send
+            _mpurged = _purge_mail_send(memory_path, pid)
+            if not isinstance(_mpurged, dict) or not all(
+                    key in _mpurged for key in ("mail_send_bindings",
+                                                "mail_send_attempts",
+                                                "mail_send_outcomes")):
+                raise ValueError("mail send purge result unavailable")
+            removed["mail_send:mail_send_bindings"] = int(_mpurged["mail_send_bindings"])
+            removed["mail_send:mail_send_attempts"] = int(_mpurged["mail_send_attempts"])
+            removed["mail_send:mail_send_outcomes"] = int(_mpurged["mail_send_outcomes"])
+        except Exception as exc:
+            LOGGER.warning("mail send purge failed: %s", type(exc).__name__)
+            _record_op(memory_path, pid, "purge", key, "failed",
+                       "mail send purge failed")
+            _set_state(memory_path, pid, "failed", actor=actor_name,
+                       backup_id=backup_id,
+                       manifest_sha256=str(st.get("manifest_sha256") or ""),
+                       fail_reason="送信記録を完全削除できません:"
+                       + type(exc).__name__)
+            return {"ok": False,
+                    "reason": "送信記録を完全削除できません",
+                    "code": "MAIL_SEND_PURGE_FAILED", "removed": removed,
+                    "restore_hint": f"退避 {backup_id} は検証済みです。原因解消後に確認してください"}
+        # C1 (追加のみ): channel_skill_runs/evidence/verifications は REGISTRY の
+        # 汎用経路 (sqlite_table) で当該PJ行だけ消える。残存があれば後段の
+        # 孤児検査 (ORPHANS_REMAIN) で失敗として返すため、個別の二重削除は行わない。
         orphans = list_orphans_after_legacy_delete(memory_path, pid, workspace_root)
         if orphans.get("orphan_count"):
             _record_op(memory_path, pid, "purge", key, "failed", "orphans remain")

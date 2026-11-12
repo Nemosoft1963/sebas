@@ -19,3 +19,4 @@ class WhisperSTT:
             segments, _ = self.model.transcribe(audio, language="ja", vad_filter=False)
             return "".join(item.text for item in segments).strip()
         return await asyncio.to_thread(run)
+

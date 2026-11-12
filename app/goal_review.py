@@ -1,6 +1,7 @@
 """Version-bound external plan review and explicit human-approved local lessons."""
 import asyncio
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -309,8 +310,387 @@ def selected_detail(manager,pid,tid):
     return found['payload']
 
 
+PUBLIC_STRUCTURE_VERSION = "public-structure-v3"
+
+FINAL_VERIFICATION_MODEL = {
+    "report_generated_by": "system",
+    "human_approval_gate": "separate_human_acceptance",
+    "completes_without_human_approval": False,
+    "unverifiable_policy": "never_pass_without_evidence",
+    "note": "approval_required=falseは外部操作の追加承認が不要の意味であり、人間の内容承認ゲートとは別。未承認では最終完了しない。非公開原本の実在・内容はローカル照合の責任であり、外部評価のunverifiableを合格に変えない。",
+}
+
+VERIFICATION_AGGREGATION_RULE = "all_required_items_must_pass_for_task_pass"
+
+VERIFICATION_METHODS_PUBLIC = ("count", "artifact_count", "section_char_count", "approval_stage_matrix", "headings", "phrase", "llm_semantic")
+
+
+# P0-A: 公開packetを評価可能にする(項目1〜3)。原本・秘密・連絡先・内部パス・
+# 個人情報は自動転送しない。公開可の情報が足りないときは推測で補わない。
+P0A_PUBLIC_PURPOSE_VERSION = "public-purpose-v1"
+P0A_PACKET_BINDING_VERSION = "packet-binding-v1"
+P0A_GENERIC_MARKERS = (
+    "登録済みの目標と達成条件を実行する汎用計画",
+    "構造情報だけから生成",
+)
+_P0A_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def is_generic_public_summary(text: object) -> bool:
+    """汎用文だけか。既定の汎用説明の文言が残っていれば具体性不足とみなす。"""
+    blob = str(text) if isinstance(text, str) else ""
+    if not blob.strip():
+        return True
+    for marker in P0A_GENERIC_MARKERS:
+        if marker in blob:
+            return True
+    return False
+
+
+def is_valid_packet_hash(value: object) -> bool:
+    """欠落・空・不正な形式は『一致』にしないための厳格な形式検査。"""
+    if not isinstance(value, str):
+        return False
+    if len(value) != 64:
+        return False
+    if _P0A_HASH_RE.fullmatch(value) is None:
+        return False
+    return True
+
+
+def build_public_purpose_summary(snapshot: dict, explicit_summary: str = "") -> dict:
+    """公開可の情報だけから目的要約を作る。推測で補わない。"""
+    tasks = (snapshot or {}).get("tasks") if isinstance(snapshot, dict) else []
+    if not isinstance(tasks, list):
+        tasks = []
+    contracts = [contract_of(t) or {} for t in tasks if isinstance(t, dict)]
+    deliverable = 0
+    internal_records = 0
+    kinds: dict[str, int] = {}
+    criterion_ids: list[str] = []
+    for contract in contracts:
+        role = str(contract.get("role") or "")
+        final = bool(contract.get("final_verification"))
+        is_deliverable = (role not in {"preparation", "final_verification"}) and (not final)
+        outputs = contract.get("outputs") if isinstance(contract.get("outputs"), list) else []
+        count = sum(1 for row in outputs if isinstance(row, dict))
+        if is_deliverable:
+            deliverable += count
+        else:
+            internal_records += count
+        for row in outputs:
+            if not isinstance(row, dict):
+                continue
+            category = str(row.get("artifact_category") or "document")
+            kinds[category] = kinds.get(category, 0) + 1
+        for cid in contract.get("criterion_ids") or []:
+            if isinstance(cid, str) and re.fullmatch(r"SC[0-9]{2}", cid):
+                if cid not in criterion_ids:
+                    criterion_ids.append(cid)
+    criterion_ids.sort()
+    kind_text = "、".join(f"{name} {num}件" for name, num in sorted(kinds.items())) if kinds else "種類不明"
+    purpose_text = (
+        f"利用者向け完成成果物{deliverable}件（{kind_text}）と"
+        f"内部記録・検証報告{internal_records}件を含む計画。"
+        f"達成条件ID{criterion_ids.__len__()}件"
+        f"（{ '、'.join(criterion_ids) if criterion_ids else 'なし'}）。"
+    )
+    explicit = str(explicit_summary) if isinstance(explicit_summary, str) else ""
+    explicit_stripped = explicit.strip()
+    secret_suspected = ""
+    if explicit_stripped:
+        try:
+            from app.plan_review_loop import contains_secret as _contains_secret
+            secret_suspected = _contains_secret(explicit_stripped)
+        except (ValueError, TypeError, AttributeError):
+            secret_suspected = "確認不能"
+    missing: list[str] = []
+    if not explicit_stripped or is_generic_public_summary(explicit_stripped):
+        missing.append("concrete_purpose_description")
+    if not criterion_ids:
+        missing.append("criterion_ids")
+    if deliverable <= 0 and internal_records <= 0:
+        missing.append("artifact_counts")
+    complete = (not missing) and (not secret_suspected)
+    return {
+        "version": P0A_PUBLIC_PURPOSE_VERSION,
+        "purpose_text": purpose_text,
+        "audience": "利用者向け完成成果物と内部記録を区別して示す",
+        "artifact_kinds": [{"category": name, "count": num} for name, num in sorted(kinds.items())],
+        "deliverable_count": deliverable,
+        "internal_record_count": internal_records,
+        "criterion_ids": list(criterion_ids),
+        "criterion_count": len(criterion_ids),
+        "explicit_summary_used": bool(explicit_stripped) and not is_generic_public_summary(explicit_stripped) and not secret_suspected,
+        "secret_suspected": secret_suspected,
+        "missing": missing,
+        "complete": bool(complete),
+        "source": "public_structure_only",
+    }
+
+
+def check_public_consistency(snapshot: dict, structure: dict, explicit_summary: str = "") -> dict:
+    """送信前の整合検査。内部契約と一致しなければ送信しない。"""
+    reasons: list[str] = []
+    tasks = (snapshot or {}).get("tasks") if isinstance(snapshot, dict) else []
+    if not isinstance(tasks, list):
+        tasks = []
+    struct_tasks = (structure or {}).get("tasks") if isinstance(structure, dict) else []
+    if not isinstance(struct_tasks, list):
+        struct_tasks = []
+    if len(tasks) != len(struct_tasks):
+        reasons.append("工程数が内部契約と一致しません")
+    per_task_ok = True
+    for position, task in enumerate(tasks):
+        if position >= len(struct_tasks):
+            per_task_ok = False
+            break
+        row = struct_tasks[position]
+        if not isinstance(task, dict) or not isinstance(row, dict):
+            per_task_ok = False
+            reasons.append(f"工程{position + 1}の形式が不正です")
+            continue
+        contract = contract_of(task) or {}
+        expected_cids = [x for x in (contract.get("criterion_ids") or [])
+                         if isinstance(x, str) and re.fullmatch(r"SC[0-9]{2}", x)]
+        actual_cids = [x for x in (row.get("criterion_ids") or []) if isinstance(x, str)]
+        if sorted(expected_cids) != sorted(actual_cids):
+            per_task_ok = False
+            reasons.append(f"工程{position + 1}の達成条件IDが一致しません")
+        expected_outputs = contract.get("outputs") if isinstance(contract.get("outputs"), list) else []
+        expected_n = sum(1 for x in expected_outputs if isinstance(x, dict))
+        actual_n = row.get("output_count")
+        if not isinstance(actual_n, int) or actual_n != expected_n:
+            per_task_ok = False
+            reasons.append(f"工程{position + 1}の成果物数が一致しません")
+        expected_checks = contract.get("exit_checks") if isinstance(contract.get("exit_checks"), list) else []
+        if row.get("exit_check_count") != len(expected_checks):
+            per_task_ok = False
+            reasons.append(f"工程{position + 1}の検査項目数が一致しません")
+        needs = bool(contract.get("approval_required") or contract.get("action_requirements"))
+        expected_approval = bool(needs) and (not bool(contract.get("final_verification")))
+        if bool(row.get("approval_required")) != expected_approval:
+            per_task_ok = False
+            reasons.append(f"工程{position + 1}の承認境界が一致しません")
+    try:
+        from app.structured_planning import normalize_p0a_artifact_requirement as _norm_slots
+        slot_ok = True
+        slot_detail: list[dict] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            contract = contract_of(task) or {}
+            if bool(contract.get("final_verification")):
+                continue
+            if str(contract.get("role") or "") in {"preparation", "final_verification"}:
+                continue
+            cids = list(contract.get("criterion_ids") or [])
+            if not cids:
+                continue
+            criterion_text = str(contract.get("criterion") or "")
+            if not criterion_text.strip():
+                slot_ok = False
+                reasons.append("成果物スロットの判定材料がありません")
+                slot_detail.append({"criterion_ids": list(cids), "consistent": False})
+                continue
+            norm = _norm_slots(criterion_text)
+            if not norm.get("consistent"):
+                slot_ok = False
+                reasons.append("成果物スロットの要求が矛盾しているため送信しません")
+                slot_detail.append({"criterion_ids": list(cids), "consistent": False})
+                continue
+            required = norm.get("required")
+            if not isinstance(required, int) or not 1 <= required <= 9:
+                slot_ok = False
+                reasons.append("成果物スロット数が判定不能のため送信しません")
+                slot_detail.append({"criterion_ids": list(cids), "consistent": False})
+                continue
+            outputs = contract.get("outputs") if isinstance(contract.get("outputs"), list) else []
+            actual = sum(1 for x in outputs if isinstance(x, dict))
+            item_counts = norm.get("item_counts")
+            explicit_total = norm.get("explicit_total")
+            count_is_explicit = bool(item_counts) or explicit_total is not None
+            slot_detail.append({"criterion_ids": list(cids), "required": required, "actual": actual,
+                                "count_is_explicit": count_is_explicit})
+            if actual < required or (actual > required and count_is_explicit):
+                slot_ok = False
+                reasons.append("成果物スロット数と成果物数が一致しません")
+    except ValueError:
+        slot_ok = False
+        slot_detail = [{"consistent": False, "error": "undetermined"}]
+        reasons.append("成果物スロット数が判定不能のため送信しません")
+    withheld_exit = 0
+    withheld_items = 0
+    disclosure = (structure or {}).get("exit_check_disclosure") if isinstance(structure, dict) else {}
+    if isinstance(disclosure, dict) and isinstance(disclosure.get("withheld_count"), int):
+        withheld_exit = int(disclosure.get("withheld_count"))
+    vdisc = (structure or {}).get("verification_disclosure") if isinstance(structure, dict) else {}
+    if isinstance(vdisc, dict) and isinstance(vdisc.get("withheld_item_count"), int):
+        withheld_items = int(vdisc.get("withheld_item_count"))
+    nonpublic = withheld_exit + withheld_items
+    unevaluable = ""
+    if nonpublic > 0:
+        unevaluable = f"非公開{nonpublic}件（公開できない検査・条件）は外部AIが評価できません。内容は送りません。"
+    prep_disc = (structure or {}).get("preparation_gate_disclosure") if isinstance(structure, dict) else {}
+    disclosure_incomplete = bool(isinstance(prep_disc, dict) and prep_disc.get("disclosure_incomplete"))
+    generic = is_generic_public_summary(explicit_summary)
+    status = "ok"
+    if generic:
+        status = "packet_incomplete"
+        reasons.append("目的説明が汎用文だけのため送信しません。具体的な公開要約を入力・確認してください。")
+    if disclosure_incomplete:
+        # 内部契約の不足は外部評価で発見すべき対象でもあるため、送信自体は止めない。
+        # 評価不能範囲としてpacket・preview・承認記録へ残し、外部判定では合格にしない。
+        status = "unverifiable"
+    passed = (not reasons) and per_task_ok and slot_ok and (not generic)
+    if not passed and status == "ok":
+        status = "mismatch"
+    return {
+        "version": P0A_PACKET_BINDING_VERSION,
+        "passed": bool(passed),
+        "status": status,
+        "reasons": list(reasons),
+        "per_task_ok": bool(per_task_ok),
+        "slot_ok": bool(slot_ok),
+        "slot_detail": slot_detail,
+        "withheld_exit_checks": withheld_exit,
+        "withheld_verification_items": withheld_items,
+        "nonpublic_count": nonpublic,
+        "unevaluable_scope": unevaluable,
+        "disclosure_incomplete": bool(disclosure_incomplete),
+        "generic_summary": bool(generic),
+    }
+
+
+def build_final_packet(public_summary: str, snapshot: dict) -> tuple:
+    """最終送信packetとハッシュ。previewと実送信で同じ作り方を使う。"""
+    structure = public_structure(snapshot)
+    disclosure = structure.get("preparation_gate_disclosure") if isinstance(structure, dict) else {}
+    packet = {
+        "public_goal_and_plan": str(public_summary),
+        "structure": structure,
+        "evaluation_limitations": {
+            "status": "unverifiable" if isinstance(disclosure, dict) and disclosure.get("disclosure_incomplete") else "ok",
+            "unevaluable_scope": str((disclosure or {}).get("unevaluable_scope") or "") if isinstance(disclosure, dict) else "",
+            "disclosure_incomplete": bool(isinstance(disclosure, dict) and disclosure.get("disclosure_incomplete")),
+        },
+    }
+    return packet, fingerprint(packet)
+
+
+def verify_packet_hash(expected_hash: object, packet: dict) -> dict:
+    """決定的な照合。欠落・空・不正な形式は『一致』にしない。"""
+    actual = fingerprint(packet)
+    if not is_valid_packet_hash(expected_hash):
+        return {"ok": False, "reason": "missing_or_invalid_hash",
+                "guidance": "再プレビューしてください。プレビューで示したハッシュをそのまま送ってください。",
+                "actual_hash": actual}
+    if not is_valid_packet_hash(actual):
+        return {"ok": False, "reason": "internal_hash_invalid",
+                "guidance": "再プレビューしてください。",
+                "actual_hash": actual}
+    if str(expected_hash) != str(actual):
+        return {"ok": False, "reason": "mismatch",
+                "guidance": "送信内容がプレビュー後に変わりました。再プレビューしてください。",
+                "actual_hash": actual}
+    return {"ok": True, "reason": "", "guidance": "", "actual_hash": actual}
+
+
+def _public_exit_checks(contract, safe_codes):
+    """公開可能な検査コードと件数を同じ出所から作る。非公開は件数のみ示す。"""
+    raw = contract.get("exit_checks") if isinstance(contract, dict) else None
+    checks = raw if isinstance(raw, list) else []
+    public = [x for x in checks if isinstance(x, str) and x in safe_codes]
+    total = len(checks)
+    withheld = total - len(public)
+    if withheld < 0:
+        withheld = 0
+    return public, withheld, total
+
+
+def _public_verification_items(contract):
+    """成果物ごとの項目ID・検査方法分類・集約条件を公開範囲で示す。本文・キーワード・原本参照は送らない。"""
+    if not isinstance(contract, dict):
+        return [], 0
+    raw_outputs = contract.get("outputs")
+    outputs = raw_outputs if isinstance(raw_outputs, list) else []
+    paths = []
+    for row in outputs:
+        if isinstance(row, dict) and isinstance(row.get("path"), str):
+            paths.append(str(row.get("path")))
+    raw_matrix = contract.get("requirement_matrix")
+    if not isinstance(raw_matrix, list):
+        return [], 0
+    public = []
+    withheld = 0
+    for row in raw_matrix:
+        if not isinstance(row, dict):
+            withheld += 1
+            continue
+        item_id = row.get("item_id")
+        method = row.get("method")
+        required = row.get("required")
+        artifact_path = row.get("artifact_path")
+        if not isinstance(item_id, str) or not item_id:
+            withheld += 1
+            continue
+        if method not in VERIFICATION_METHODS_PUBLIC:
+            withheld += 1
+            continue
+        if required is not True and required is not False:
+            withheld += 1
+            continue
+        if not isinstance(artifact_path, str):
+            withheld += 1
+            continue
+        index = -1
+        for pos, path in enumerate(paths):
+            if path == artifact_path:
+                index = pos
+                break
+        if index < 0:
+            withheld += 1
+            continue
+        row_public = {"item_id": item_id, "method": method, "required": bool(required)}
+        if method == "artifact_count":
+            row_public["artifact_indices"] = list(range(len(paths)))
+            row_public["scope"] = "all_declared_outputs"
+        else:
+            row_public["artifact_index"] = index
+            row_public["scope"] = "listed_artifact"
+        if method == "section_char_count":
+            row_public["measurement"] = "heading_section_paragraph_characters_excluding_bullets_and_spaces"
+        public.append(row_public)
+    public.sort(key=lambda r: (str(r.get("item_id") if isinstance(r.get("item_id"), str) else ""),
+                               int(r.get("artifact_index") if isinstance(r.get("artifact_index"), int) else 0)))
+    return public, withheld
+
+
+def _public_approval_model(contract):
+    """最終検証の矛盾しない状態モデル。システム報告・人間承認別ゲート・未承認では完了しない。"""
+    if not isinstance(contract, dict):
+        return {"approval_required": False, "separate_human_approval_gate": False,
+                "completes_without_human_approval": False}
+    needs = bool(contract.get("approval_required"))
+    acts = bool(contract.get("action_requirements"))
+    is_final = bool(contract.get("final_verification"))
+    approval_required = (needs or acts) and (not is_final)
+    separate = contract.get("human_approval_gate") == "separate_human_acceptance"
+    return {"approval_required": bool(approval_required),
+            "separate_human_approval_gate": bool(separate),
+            "completes_without_human_approval": False}
+
+
 def public_structure(snapshot):
     # Whitelist structural facts only. No source text, filenames, original goals or names.
+    safe_exit_codes={
+        'source_evidence_linked', 'criterion_content_verified', 'unknowns_and_failures_reported',
+        'faq_items_individually_verified', 'procedure_steps_individually_verified',
+        'approval_points_verified', 'fictional_marking_verified', 'no_real_processing_claimed',
+        'each_output_contract_verified', 'all_criteria_decided', 'evidence_paths_verified',
+        'unmet_and_pending_reported', 'per_criterion_verdicts_recorded',
+        'registered_sources_classified', 'missing_inputs_listed', 'validation_method_defined',
+    }
     purpose_catalog={
         'input_readiness':'Verify registered sources, missing inputs, constraints, and validation methods.',
         'multi_channel_workflow_design':'Design the execution workflow for forms, landing pages, social support, and lead capture.',
@@ -323,6 +703,7 @@ def public_structure(snapshot):
         'market_and_customer_definition':'Define markets, priority sectors, ideal customers, and customer problems.',
         'service_package_design':'Design multiple consulting service packages.',
         'commercial_terms':'Define scope, duration, prerequisites, price proposals, and exclusions.',
+        'menu_document':'Create menu and product explanations with provisional prices marked as unconfirmed.',
         'sales_assets':'Create introduction, proposal, interview, proof-of-concept, and quotation materials.',
         'sales_plan':'Create a sales plan with channels, activity, KPIs, and financial outlook.',
         'prospect_prioritization':'Evaluate prospects and define priorities and proposal hypotheses.',
@@ -334,6 +715,15 @@ def public_structure(snapshot):
         'final_goal_verification':'Verify every criterion against artifacts and execution evidence; any unmet criterion prevents PASS.',
         'criterion_delivery':'Create and verify the artifact required by its criterion.',
     }
+    contracts=[contract_of(task) or {} for task in snapshot['tasks']]
+    aggregate_item_count=sum(
+        len(contract.get('requirement_matrix') or [])
+        for contract in contracts if not contract.get('final_verification')
+    )
+    criterion_ids=sorted({
+        cid for contract in contracts for cid in (contract.get('criterion_ids') or [])
+        if isinstance(cid,str) and __import__('re').fullmatch(r'SC[0-9]{2}',cid)
+    })
     tasks=[]
     for i,t in enumerate(snapshot['tasks'],1):
         c=contract_of(t) or {}
@@ -341,9 +731,22 @@ def public_structure(snapshot):
         role=('preparation' if c.get('role')=='preparation' else
               'final_verification' if c.get('final_verification') else
               'external_action' if c.get('action_requirements') else 'execution')
+        public_codes, withheld_checks, total_checks = _public_exit_checks(c, safe_exit_codes)
+        public_items, withheld_items = _public_verification_items(c)
+        approval_model = _public_approval_model(c)
+        withheld_note = ('非公開%d件' % withheld_checks) if withheld_checks else '非公開0件'
+        output_class=('internal_input_record' if role=='preparation' else
+                      'internal_verification_report' if role=='final_verification' else 'deliverable')
         tasks.append({'step':i,'type':kind,'role':role,
+                      'output_class':output_class,
+                      'aggregates_earlier_item_count':aggregate_item_count if role=='final_verification' else 0,
+                      'aggregates_criterion_ids':criterion_ids if role=='final_verification' else [],
+                      'preparation_gate_required':role=='final_verification' and any((x.get('role')=='preparation') for x in contracts),
+                      'upstream_failure_action':c.get('upstream_failure_action','') if role=='final_verification' else '',
+                      'internal_preparation_gate_ids':['PREP00'] if role in {'preparation','final_verification'} else [],
                       'parents':[next((j for j,x in enumerate(snapshot['tasks'],1) if x['task_key']==p),0) for p in t.get('depends_on',[])],
                       'outputs':[Path(x.get('path','')).suffix for x in c.get('outputs',[])],
+                      'output_count':sum(1 for x in (c.get('outputs') or []) if isinstance(x,dict)),
                       'criterion_ids':[x for x in c.get('criterion_ids',[]) if isinstance(x,str) and __import__('re').fullmatch(r'SC[0-9]{2}',x)],
                       'public_purpose_code':c.get('public_purpose_code','unspecified'),
                       'public_purpose_summary':purpose_catalog.get(c.get('public_purpose_code'),'Purpose summary unavailable.'),
@@ -356,15 +759,112 @@ def public_structure(snapshot):
                       'required_heading_count':sum(len(x.get('required_headings',[])) for x in c.get('outputs',[]) if isinstance(x,dict)),
                       'action_kinds':[x.get('kind') for x in c.get('action_requirements',[]) if isinstance(x,dict) and x.get('kind')],
                       'approval_required':bool(c.get('approval_required') or c.get('action_requirements')) and not c.get('final_verification'),
+                      'approval_model':approval_model,
+                      'separate_human_approval_gate':c.get('human_approval_gate')=='separate_human_acceptance',
+                      'retry_limit':c.get('max_retries') if type(c.get('max_retries')) is int and 0 <= c['max_retries'] <= 3 else None,
                       'evidence_required':bool(c.get('evidence_required')) or any(bool(x.get('evidence_required')) for x in c.get('action_requirements',[]) if isinstance(x,dict)),
                       'human_confirmation_required':bool(c.get('human_confirmation_required')),
                       'semantic_review_required':bool(c.get('semantic_review_required')),
-                      'exit_check_count':len(c.get('exit_checks',[])),
+                      'exit_check_count':total_checks,
+                      'exit_check_codes':public_codes,
+                      'exit_check_withheld_count':withheld_checks,
+                      'exit_check_withheld_note':withheld_note,
+                      'verification_items':public_items,
+                      'verification_items_withheld_count':withheld_items,
+                      'verification_aggregation':VERIFICATION_AGGREGATION_RULE,
                       'estimated_days':c.get('estimated_days'),
                       'period_months':[m for m in c.get('months',[]) if isinstance(m,str) and __import__('re').fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',m)],'criteria_count':len(c.get('criterion_ids',[]))})
     used={x['public_purpose_code'] for x in tasks}
-    packet={'goal_category':'controlled_business_execution','tasks':tasks,
+    public_exit_total=sum(int(x.get('exit_check_count') or 0) for x in tasks)
+    public_exit_codes=sum(len(x.get('exit_check_codes') or []) for x in tasks)
+    public_exit_withheld=sum(int(x.get('exit_check_withheld_count') or 0) for x in tasks)
+    public_item_total=sum(len(x.get('verification_items') or []) for x in tasks)
+    public_item_withheld=sum(int(x.get('verification_items_withheld_count') or 0) for x in tasks)
+    # P1(修正C): 準備ゲートの構造情報だけを公開する。件数・要否・失敗時の扱い・
+    # 合否チェックの件数と対象種別のみ。原本本文・氏名・ファイル名・秘密情報・
+    # 内部の詳細条件は送らない(公開packet生成前の機密検査と明示許可は維持)。
+    prep_gate_ids=sorted({str(gid) for t in tasks for gid in (t.get('internal_preparation_gate_ids') or []) if isinstance(gid,str)})
+    prep_required=any(bool(t.get('preparation_gate_required')) for t in tasks if t.get('role')=='final_verification')
+    prep_failure_action=''
+    for t in tasks:
+        if t.get('role')=='final_verification' and str(t.get('upstream_failure_action') or ''):
+            prep_failure_action=str(t.get('upstream_failure_action'))
+            break
+    prep_method_kinds=sorted({str(item.get('method') or '') for t in tasks for item in (t.get('verification_items') or []) if isinstance(item,dict) and str(item.get('method') or '')})
+    prep_check_kinds=(['exit_check'] if public_exit_total else [])+['verification:'+m for m in prep_method_kinds]
+    # 段階2: 件数の意味を固定する。同じ内部契約から数えたtasks集計値を再利用し、別経路で数え直さない。
+    # 準備工程だけの検査数と、全工程の公開検査数の合計を別のフィールドで示す。旧check_countは置かない。
+    prep_tasks=[t for t in tasks if t.get('role')=='preparation']
+    preparation_check_count=sum(int(t.get('exit_check_count') or 0) for t in prep_tasks)
+    all_task_check_count=public_exit_total+public_item_total
+    non_public_count=public_exit_withheld+public_item_withheld
+    if non_public_count>0:
+        unevaluable_scope='非公開%d件(公開できない検査・条件)は外部AIが評価できません。内容は送りません。' % non_public_count
+    else:
+        unevaluable_scope=''
+    # 段階2: 判定情報を内部契約と一致させる。無い値は補完せずunknownとし、不完全を明示する。
+    has_final=any(t.get('role')=='final_verification' for t in tasks)
+    incomplete_reasons=[]
+    if not tasks or not contracts:
+        required_out='unknown'
+        failure_out='unknown'
+        aggregation_out='unknown'
+        incomplete_reasons.append('内部契約を確認できません')
+    elif not has_final:
+        required_out='unknown'
+        failure_out='unknown'
+        aggregation_out='unknown'
+        incomplete_reasons.append('最終検証の内部契約がありません')
+    else:
+        required_out=bool(prep_required)
+        if prep_failure_action:
+            failure_out=prep_failure_action
+        else:
+            failure_out='unknown'
+            incomplete_reasons.append('準備失敗時の遷移が内部契約にありません')
+        if public_item_total>0 or aggregate_item_count>0:
+            aggregation_out=VERIFICATION_AGGREGATION_RULE
+        else:
+            aggregation_out='unknown'
+            incomplete_reasons.append('最終検証の集約対象が内部契約にありません')
+    packet={'goal_category':'controlled_business_execution','structure_version':PUBLIC_STRUCTURE_VERSION,
+            'tasks':tasks,
             'purpose_catalog':{key:value for key,value in purpose_catalog.items() if key in used},
+            'exit_check_disclosure':{'public_code_count':public_exit_codes,
+                                     'total_count':public_exit_total,
+                                     'withheld_count':public_exit_withheld,
+                                     'withheld_note':('非公開%d件' % public_exit_withheld) if public_exit_withheld else '非公開0件',
+                                     'meaning':'exit_check_countは全検査数、exit_check_codesは公開可能な種別だけ。差分は非公開であり内容は送らない。'},
+            'verification_disclosure':{'public_item_count':public_item_total,
+                                       'withheld_item_count':public_item_withheld,
+                                       'withheld_note':('非公開%d件' % public_item_withheld) if public_item_withheld else '非公開0件',
+                                       'aggregation':VERIFICATION_AGGREGATION_RULE,
+                                       'methods':list(VERIFICATION_METHODS_PUBLIC),
+                                       'meaning':'verification_itemsは項目ID・成果物番号・検査方法分類・必須/任意だけ。要求文・キーワード・原本参照は送らない。'},
+            'preparation_gate_disclosure':{'internal_gate_count':len(prep_gate_ids),
+                                           'preparation_gate_required':required_out,
+                                           'preparation_failure_action':failure_out,
+                                           'final_aggregation_rule':aggregation_out,
+                                           'disclosure_incomplete':bool(incomplete_reasons),
+                                           'incomplete_reasons':list(incomplete_reasons),
+                                           'preparation_check_count':preparation_check_count,
+                                           'preparation_check_count_scope':'準備工程のみ',
+                                           'all_task_check_count':all_task_check_count,
+                                           'all_task_check_count_scope':'全工程の合計(準備工程を含む)',
+                                           'check_kinds':prep_check_kinds,
+                                           'non_public_check_count':non_public_count,
+                                           'unevaluable_scope':unevaluable_scope,
+                                           'meaning':'準備工程の内部ゲートは構造情報(件数・要否・失敗時の扱い・合否チェックの件数と対象種別)だけ。原本本文・氏名・ファイル名・秘密情報・内部の詳細条件は送らない。criteria_count=0は「検証がない」の意味ではない。'},
+            'final_verification_model':{**FINAL_VERIFICATION_MODEL,
+                                        'aggregates_earlier_item_count':aggregate_item_count,
+                                        'aggregates_criterion_ids':criterion_ids,
+                                        'meaning':'最終検証は先行工程の項目別台帳を集約する。最終工程自身に新たなrequirement_matrixを複製しない。'}, 
+            'output_classes':{'deliverable_count':sum(t['output_count'] for t in tasks if t['output_class']=='deliverable'),
+                              'internal_record_count':sum(t['output_count'] for t in tasks if t['output_class']!='deliverable')},
+
+            'external_evaluation_policy':{'unverifiable_is_not_pass':True,
+                                          'local_originals_are_local_responsibility':True,
+                                          'meaning':'非公開原本の実在・内容はローカル照合の責任。外部評価のunverifiableを合格に変えない。'},
             'limitations':['文書生成と実処理は別。機械検査は人間の意味確認を代替しない。']}
     if any(x['type']=='vehicle_calculate' for x in tasks):
         packet['limitations'].append('対応するExcel・CSV・請求PDFを原本参照付き明細へ自動抽出する。未対応形式・曖昧な配賦・税区分混在は暫定Excelに表示し、確定合格にしない。')
@@ -382,10 +882,26 @@ def send_allowed(manager, pid):
 
 def record_send_approval(manager, pid, signature, public_summary, providers=None):
     store = ReviewStore(manager.memory.path)
-    packet = {'public_goal_and_plan': public_summary, 'structure': public_structure(plan_snapshot(manager, pid)[0])}
+    snapshot, _current_signature = plan_snapshot(manager, pid)
+    structure = public_structure(snapshot)
+    check = check_public_consistency(snapshot, structure, public_summary)
+    if not check.get("passed"):
+        raise ValueError("送信前検査に失敗したため送信しません: " + " / ".join(check.get("reasons") or ["不一致"]))
+    summary = build_public_purpose_summary(snapshot, public_summary)
+    if not summary.get("complete"):
+        raise ValueError("公開目的要約が不完全なため送信しません: " + ",".join(summary.get("missing") or ["不足"]))
+    packet, packet_hash = build_final_packet(public_summary, snapshot)
+    packet_check = verify_packet_hash(packet_hash, packet)
+    if not packet_check.get("ok"):
+        raise ValueError("送信packetのハッシュを確認できません: " + str(packet_check.get("reason") or "不明"))
     approval = {
-        'approved': True, 'packet_hash': fingerprint(packet), 'public_summary': public_summary,
+        'approved': True, 'packet_hash': packet_hash, 'public_summary': public_summary,
         'providers': list(providers or []), 'approved_at': time.time(), 'signature': signature,
+        'public_purpose': {k: summary.get(k) for k in ("purpose_text", "audience", "artifact_kinds", "deliverable_count", "internal_record_count", "criterion_ids", "criterion_count", "version")},
+        'consistency': check,
+        'packet_status': str(check['status']),
+        'unevaluable_scope': check.get('unevaluable_scope') or '',
+        'disclosure_incomplete': bool(check.get('disclosure_incomplete')),
     }
     store.put(pid, 'send_approval', signature, approval)
     save_orchestration(store, pid, last_completed_stage='send_approval', plan_signature=signature,
@@ -398,10 +914,29 @@ def approved_packet(store, pid, signature, packet):
     return bool(approval.get('approved') and approval.get('packet_hash') == fingerprint(packet))
 
 
-async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None,idempotency_key=None,providers_override=None):
+async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None,idempotency_key=None,providers_override=None,expected_packet_hash=None):
     if not safe_to_send or not 20<=len(public_summary.strip())<=12000:raise ValueError('秘密・個人情報を含まない公開用の目標・達成条件・工程説明を確認してください')
+    # P0-A: 汎用文だけの目的説明は外部AIを呼ぶ前に止める(public_summaryの旧挙動は温存しない)。
+    if is_generic_public_summary(public_summary):
+        raise ValueError('packet_incomplete: 目的説明が汎用文だけのため送信しません。具体的な公開要約を入力・確認してください。外部AIは呼びません')
     detail=selected_detail(manager,pid,tid);snapshot,current=plan_snapshot(manager,pid,detail)
     if current!=signature:raise ValueError('計画が変わりました。再読込してください')
+    structure = public_structure(snapshot)
+    check = check_public_consistency(snapshot, structure, public_summary)
+    if not check.get("passed"):
+        raise ValueError('送信前検査に失敗したため送信しません: ' + " / ".join(check.get("reasons") or ["不一致"]))
+    summary = build_public_purpose_summary(snapshot, public_summary)
+    if not summary.get("complete"):
+        raise ValueError('公開目的要約が不完全なため送信しません: ' + ",".join(summary.get("missing") or ["不足"]))
+    packet, packet_hash = build_final_packet(public_summary, snapshot)
+    if expected_packet_hash is None:
+        # 旧経路は期待値が無いため照合不能。一致とは扱わず監査結果に明示する。
+        hash_binding = "not_provided"
+    else:
+        verified = verify_packet_hash(expected_packet_hash, packet)
+        if not verified.get("ok"):
+            raise ValueError('packet_previewと実送信のハッシュが一致しません: ' + str(verified.get("reason") or "不明") + '。' + str(verified.get("guidance") or "再プレビューしてください。"))
+        hash_binding = "matched"
     mission=manager.memory.get_mission(pid)
     allowed_providers=list(dict.fromkeys(mission.get('external_providers',[])))
     providers=(list(dict.fromkeys(providers_override)) if providers_override is not None else allowed_providers)
@@ -422,10 +957,13 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
     configured={x['id'] for x in manager.provider_statuses() if x.get('configured')}
     if not mission.get('allow_external_ai') or not providers or not set(providers)<=configured or not manager.plan_review_runner:
         raise ValueError('選択した外部AIの許可・接続が揃っていません。未検証のまま実行できません')
+    guard = manager._outbound_guard(pid, "goal_gate_review", 'GOAL_GATE_V1\n'+canonical(packet), providers)
+    if not guard.get("ok"):
+        raise ValueError('送信前検査に失敗したため送信しません: privacy_check_failed:' + ','.join(str(c) for c in (guard.get("codes") or [])))
     store=ReviewStore(manager.memory.path)
     previous=store.get(pid,'plan',signature)
     if previous and previous.get('status')=='running' and time.time()-previous.get('started',0)<240:raise ValueError('同じ計画を検証中です')
-    packet={'public_goal_and_plan':public_summary,'structure':public_structure(snapshot)}
+    # packet_preview と実送信のバイト内容を一致させる(同じ作り方の値を再利用する)。
     # safe_to_send is the explicit send approval (step 6). Never send without it.
     record_send_approval(manager, pid, signature, public_summary, providers)
     job=None
@@ -443,7 +981,7 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
                'task_id':tid,'next_at':budget.get('reset_at',time.time()+3600),'expires':time.time()+7*86400,'attempts':0,
                'packet_hash':fingerprint(packet)}
         store.put(pid,'plan_queue',signature,queue)
-        result={'status':'waiting_budget','packet':packet,'reviews':retained,'pending_providers':pending,'required_calls':len(pending),'resume_at':queue['next_at'],'job_id':job['id'],'called_providers':[],'reused_providers':[r.get('provider') for r in retained]}
+        result={'status':'waiting_budget','packet':packet,'hash_binding':hash_binding,'reviews':retained,'pending_providers':pending,'required_calls':len(pending),'resume_at':queue['next_at'],'job_id':job['id'],'called_providers':[],'reused_providers':[r.get('provider') for r in retained]}
         store.put(pid,'plan',signature,result)
         finish_job(store,pid,job['id'],'succeeded',last_completed_stage='external_review')
         save_orchestration(store,pid,last_completed_stage='external_review',plan_signature=signature,resume_from='external_review')
@@ -485,7 +1023,7 @@ async def review_plan(manager,pid,signature,public_summary,safe_to_send,tid=None
             'category':(x.get('connection_error') or {}).get('category') or (x.get('response') or {}).get('error_category') or 'connection_error',
             'error':((x.get('connection_error') or {}).get('error') or (x.get('response') or {}).get('error') or '')[:2000],
         } for x in parsed if x.get('status')=='connection_error']
-        result={'status':judged['status'],'reviews':parsed,'packet':packet,'finished':time.time(),
+        result={'status':judged['status'],'reviews':parsed,'packet':packet,'hash_binding':hash_binding,'finished':time.time(),
                 'called_providers':list(pending),'reused_providers':[r.get('provider') for r in retained],
                 'pending_providers':[x['provider'] for x in parsed if x['status'] in {'unverified','connection_error'}],
                 'job_id':job['id'] if job else '','provider_outcomes':provider_review_outcomes(parsed,providers),

@@ -20,7 +20,51 @@ from app.structured_planning import (
     SCHEMA, MAX_CRITERIA, extract_criteria, decode_object, compile_task, compile_plan,
     validate_plan, inspect_plan_structure, contract_of, verify_outputs, sanitize_proposal,
     requires_google_site_publication, requires_public_web_research,
+    check_p0a_unsupported_values, normalize_p0a_plan_items,
+    validate_p0a_item_contract, ensure_p0a_item_target_consistency,
 )
+from app.planning_errors import (
+    PlanningError, candidate_hash, fix_instruction, normalize_planning_error,
+)
+
+
+def _p04_next_hint_text(err) -> str:
+    if not isinstance(err, PlanningError):
+        return "JSON形式と制約を再確認して修正。"
+    if err.code == "unknown":
+        return fix_instruction(err)
+    return "エラーコード: " + err.code + "。修正指示: " + fix_instruction(err)
+
+
+def _p04_next_prompt(raw_text: str, err) -> str:
+    base = _p04_next_hint_text(err)
+    if isinstance(err, PlanningError) and err.code == "unknown":
+        short = str(raw_text or "")[:200]
+        if short:
+            return base + " 前回の形式エラー(短縮): " + short
+    return base
+
+
+def _p04_switch_candidates(orchestrator, project_id: str) -> dict:
+    from app.planning_rollout import enabled as _rollout_enabled
+    models: list[str] = []
+    name = str(getattr(getattr(orchestrator, "llm", None), "model", "") or "").strip()
+    if name:
+        models.append(name)
+    template_available = False
+    try:
+        from app.planning_rollout import outcome_proposal as _outcome
+        from app.structured_planning import _p0a_required_or_raise  # noqa: F401
+        mission = orchestrator.memory.get_mission(project_id)
+        template_available = bool(_outcome("", mission or {}) is not None)
+    except (ValueError, TypeError, KeyError, AttributeError, OSError):
+        template_available = False
+    try:
+        rollout_on = bool(_rollout_enabled(orchestrator.memory.path, project_id))
+    except (ValueError, TypeError, KeyError, AttributeError, OSError):
+        rollout_on = False
+    template_available = bool(template_available or rollout_on)
+    return {"models": list(dict.fromkeys(models)), "template": {"available": template_available}}
 
 
 PLANNER_SYSTEM_PROMPT = """あなたはローカルで動作するプロジェクト統制AIです。
@@ -53,6 +97,17 @@ PROPOSAL_JSON_SCHEMA = {
         "depends_on": {
             "type": "array", "items": {"type": "string", "maxLength": 80},
         },
+        "outputs": {
+            "type": "array", "minItems": 1, "maxItems": 4,
+            "items": {"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["document", "checklist", "faq", "procedure"]},
+                "required_headings": {"type": "array", "minItems": 2, "maxItems": 8,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 100}},
+            }, "required": ["kind", "required_headings"], "additionalProperties": False},
+        },
+        "exit_checks": {"type": "array", "minItems": 1, "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 120}},
+        "semantic_review_required": {"type": "boolean"},
     },
     "required": ["title", "scope", "headings", "depends_on"],
     "additionalProperties": False,
@@ -579,6 +634,28 @@ class TaskVerificationError(RuntimeError):
     """Backend evidence could not prove that a task really completed."""
 
 
+def _resolve_contact_purpose_for_plan(memory_path, project_id: str):
+    """運用区分から用途を決める。未設定・読取不能は public(厳しい側)。
+
+    読取失敗を internal_demo に倒さない。None を返さず、必ず用途文字列を返す。
+    代替値で続行せず、決定した用途は ContextVar に設定して本番経路へ渡す。
+    """
+    if memory_path is None:
+        return "public"
+    try:
+        from app.contact_registry import resolve_contact_purpose as _resolve_purpose
+    except (ImportError, AttributeError, ValueError):
+        return "public"
+    try:
+        resolved = _resolve_purpose(memory_path, str(project_id or ""))
+    except Exception:
+        return "public"
+    if not isinstance(resolved, dict):
+        return "public"
+    purpose = str(resolved.get("purpose") or "")
+    return purpose if purpose in ("internal_demo", "public") else "public"
+
+
 def _constrain_table_operation_sources(
     operations: list[dict],
     allowed_source_ids: list[str],
@@ -708,6 +785,96 @@ class ProjectOrchestrator:
                 "プロジェクト備忘録MDの更新に失敗しました",
                 detail=str(exc)[:2000],
             )
+
+    def _record_execution_manifests(
+        self, project_id: str, project: dict, task_id: str,
+        audit: list[dict],
+    ) -> None:
+        """P1-1: 実行工程の保存成功後に origin=execution の manifest を記録する。
+
+        plan_signature と task_id が取れる箇所では入れる。取れなければ空文字
+        (推測で埋めない)。対象は成果フォルダ/契約出力の write 系のみ。
+        失敗で本体の保存を失敗させない(失敗は artifact_manifest_failed で記録)。
+        """
+        if not audit or self.workspace is None:
+            return
+        try:
+            from app.artifact_manifest import build_manifest
+            from app.goal_review import plan_snapshot
+        except (ImportError, AttributeError, ValueError):
+            return
+        try:
+            signature = plan_snapshot(self, project_id)[1]
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            signature = ""
+        try:
+            mission_state = self.memory.get_mission(project_id, event_limit=50)
+            contract_paths = set()
+            for entry in mission_state.get("tasks", []):
+                if str(entry.get("id") or "") != str(task_id or ""):
+                    continue
+                try:
+                    import json as _json
+
+                    contract = _json.loads(entry.get("acceptance_criteria") or "")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(contract, dict):
+                    continue
+                for output in contract.get("outputs") or []:
+                    if isinstance(output, dict) and output.get("path"):
+                        contract_paths.add(
+                            str(output.get("path", "")).replace("\\", "/").lstrip("/")
+                        )
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            contract_paths = set()
+        for item in audit:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("action", "")).strip().lower() not in {
+                "write_text", "append_text", "copy", "move", "write_bytes",
+            }:
+                continue
+            relative = str(item.get("path", "")).replace("\\", "/").lstrip("/")
+            if not relative:
+                continue
+            scope_prefixes = ("成果フォルダ/", "output/", "result/")
+            in_scope = relative.startswith(scope_prefixes)
+            if contract_paths and relative not in contract_paths and not in_scope:
+                continue
+            if not contract_paths and not in_scope:
+                continue
+            try:
+                _, _, target = self.workspace.resolve_file(
+                    project.get("workspace_path", ""), project_id, relative,
+                    must_exist=True,
+                )
+                if not target.is_file():
+                    continue
+                content = target.read_bytes()
+                manifest = build_manifest(
+                    project_id=project_id,
+                    plan_signature=str(signature or ""),
+                    task_id=str(task_id or ""),
+                    path=relative,
+                    origin="execution",
+                    content_bytes=content,
+                    source_hashes=[],
+                    validation_state="unverified",
+                )
+                self.workspace.record_artifact_manifest(
+                    project.get("workspace_path", ""), project_id, manifest,
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+                try:
+                    self.memory.add_event(
+                        project_id, "artifact_manifest_failed",
+                        f"実行成果物の manifest 記録に失敗しました: {relative}",
+                        task_id, detail=type(exc).__name__[:2000],
+                    )
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                    pass
+                continue
 
     async def _local_complete(
         self, system: str, prompt: str, response_schema: dict | None = None,
@@ -1001,126 +1168,506 @@ class ProjectOrchestrator:
             raise ValueError(f"計画JSONを再生成しても不正です: {second_error}") from second_error
 
     async def _generate_structured_plan(self, project_id: str, criteria: list[str]) -> dict:
-        mission = self.memory.get_mission(project_id)
-        project = self.memory.get_project(project_id)
-        # P1-B: 両経路で同じ統一IFから事例参照を取得する(定型/アンカー側)。
-        # 必須工程・検証条件は事例で上書きしない(参考記録のみ)。
-        # F2a fail-closed: 参照失敗は空扱いで通さず狭い例外で記録する。
-        try:
-            from app.plan_case_reference import collect_for_current_plan as _collect_cases
-            from app.plan_case_reference import format_for_prompt as _format_hints
-            _case_ref_result = _collect_cases(self, project_id, criteria_input=criteria)
-            _case_hints = _format_hints(_case_ref_result)
-        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
-            _case_ref_result = {'criteria': []}
-            _case_hints = {}
-        try:
-            self.memory.add_event(
-                project_id, 'plan_case_reference',
-                '計画生成前に事例参照を照合(参考・達成証拠ではない)',
-                detail=__import__('json').dumps(
-                    {'criteria': [{'criterion_id': c.get('criterion_id'),
-                                   'status': c.get('status'),
-                                   'used': [r.get('case_id') for r in c.get('references', [])
-                                            if r.get('used_or_rejected') == 'used'],
-                                   'rejected': [r.get('case_id') for r in c.get('references', [])
-                                                if r.get('used_or_rejected') == 'rejected']}
-                                  for c in _case_ref_result.get('criteria', [])]},
-                    ensure_ascii=False)[:6000])
-        # F2a: 監査の書込失敗は握りつぶさず記録不能として停止側に倒す(通過させない)。
-        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
-            pass
-        if len(criteria) > MAX_CRITERIA:
-            raise ValueError("達成条件が18件を超えています。条件を捨てずに複数計画へ分割してください")
-        _, files = self.static_context(project)
-        source_ids = [str(item['id']) for item in files if item.get('id') and item.get('source') != 'memo']
-        source_context = build_execution_source_context('', files, 6000)
-        tasks = []
-        for index, criterion in enumerate(criteria, 1):
-            self.memory.add_event(project_id, 'plan_criterion_started', f'達成条件 {index}/{len(criteria)} の内容を設計中')
-            errors = ''
-            for attempt in range(3):
-                prompt = (
-                    '次の1件の達成条件を満たす作業内容を設計してください。日本語のJSONだけを返してください。\n'
-                    '{"title":"タスク名","scope":"必要な成果物本文の内容設計","headings":["必須見出し1","必須見出し2"],"depends_on":[]}\n'
-                    'scopeは1600文字以内、headingsは2～8件。出力先・形式・操作はシステムが決めます。'
-                    'ファイルパスやPDF/DOCX出力を指定しないでください。'
-                    '複数の資料が必要なら、それぞれを同じMarkdown資料の独立した節として設計してください。'
-                    '顧客接触・送信・契約・実面談の未実施分は承認待ちとして整理してください。'
-                    'テンプレートを作成しただけで実顧客活動を達成済みにしないでください。'
-                    '外部指摘の全文や評価レポートをtitle/scopeにコピーしないでください。'
-                    '「計画草案の評価と改善提案」のような評価専用タスクは作らないでください。\n'
-                    f'達成条件 SC{index:02d}: {criterion}\n'
-                    f'全体の達成条件: {json.dumps(criteria, ensure_ascii=False)}\n'
-                    f'追加達成条件: {mission["success_criteria"]}\n制約: {mission["constraints_text"]}\n'
-                    f'先行タスク（依存が必要ならdepends_onへIDを指定）: '
-                    + json.dumps([{ 'id': t['task_key'], 'title': t['title']} for t in tasks], ensure_ascii=False)
-                    + '\n追加指示（全体に継承する制約）:'+json.dumps([x['message'] for x in mission.get('instruction_messages',[]) if x['kind']=='mission_instruction_user'],ensure_ascii=False)
-                    + '\n原本は参考資料です。原本の題名に引きずられず、今回の達成条件に固有の題名・見出しを作成し、先行タスクと同じ題名を繰り返さないでください。'
-                    + '\n登録原本（ローカルのみ）:\n' + source_context
-                    + '\n前回の形式エラー: ' + errors
-                    + ('\n\n' + _case_hints.get(f'SC{index:02d}', '') if _case_hints.get(f'SC{index:02d}', '') else '')
-                )
-                try:
-                    from app.planning_rollout import enabled, outcome_proposal
-                    anchored=outcome_proposal(criterion,mission) if enabled(self.memory.path,project_id) else None
-                    if anchored is not None:
-                        proposal=sanitize_proposal(anchored)
-                        proposal['depends_on']=[t['task_key'] for t in tasks]
-                    else:
-                        response = await self._local_complete(
-                            PLANNER_SYSTEM_PROMPT, prompt, PROPOSAL_JSON_SCHEMA
-                        )
-                        proposal = sanitize_proposal(decode_object(response))
-                    from app.planning_rollout import enabled
-                    if enabled(self.memory.path,project_id) and any(t['title']==proposal.get('title') for t in tasks):
-                        raise ValueError('既存タスクと同じ題名です。今回の達成条件に対応する内容に修正してください')
-                    task = compile_task(index, criterion, proposal, source_ids)
-                    tasks.append(task)
-                    self.memory.add_event(
-                        project_id,
-                        "planning_decision_summary",
-                        f"SC{index:02d}の設計判断を確定: {task['title']}",
-                        detail=json.dumps({
-                            "criterion_id": f"SC{index:02d}",
-                            "schema_valid": True,
-                            "heading_count": len(proposal.get("headings", [])),
-                            "dependencies": task.get("depends_on", []),
-                            "source_count": len(source_ids),
-                            "note": "内部思考ではなく、採用した設計条件の要約です",
-                        }, ensure_ascii=False),
-                    )
-                    break
-                except (ValueError, TypeError, KeyError) as exc:
-                    errors = str(exc)[:1000]
-                    self.memory.add_event(project_id, 'plan_criterion_retry', f'SC{index:02d}の形式補正 {attempt + 1}/3', detail=errors)
-            else:
-                raise ValueError(f'SC{index:02d}の設計を3回で確定できません: {errors}')
-        candidate = compile_plan(criteria, tasks, goal=mission["goal"])
-        from app.planning_rollout import enabled,namespace_tasks,extension_for
-        rollout=enabled(self.memory.path,project_id)
-        if rollout:candidate['tasks']=namespace_tasks(candidate['tasks'],mission['plan_version']+1,prioritize_web=True)
-        from app.plan_feedback import PLANNING_FEEDBACK
-        assessment = validate_plan(
-            candidate, {f'SC{i:02d}' for i in range(1, len(criteria) + 1)},
-            review_count=len(PLANNING_FEEDBACK.get() or []),
+        from app.requirement_matrix import (
+            configure_contact_registry as _configure_contacts,
+            reset_contact_request_context as _reset_contact_ctx,
+            set_contact_request_context as _contact_ctx,
         )
-        if not assessment['passed']:
-            raise ValueError('構造化計画の検証失敗: ' + '; '.join(assessment['issues']))
-        # The complete manifest is retained in the summary and each task contract in
-        # acceptance_criteria: existing SQLite persistence preserves both exactly.
-        manifest = {'schema': SCHEMA, 'criteria': criteria, 'additional_success_criteria': mission['success_criteria'],
-                    'constraints': mission['constraints_text'],
-                    'artifacts': [{'task_key': task['task_key'], **contract_of(task)} for task in candidate['tasks']]}
-        candidate['summary'] += '\n\n構造検証: 合格（内容品質・営業成果の達成を意味しません）。\n\n' + json.dumps(manifest, ensure_ascii=False, indent=2)
-        self.memory.add_event(project_id, 'structured_plan_validated', '達成条件・成果物契約・依存関係を検証しました', detail=json.dumps(assessment, ensure_ascii=False))
-        self._check_plan_snapshot(project_id, mission)
-        self.memory.replace_plan(project_id, candidate['summary'], candidate['tasks'],task_extensions={t['task_key']:extension_for(t) for t in candidate['tasks']} if rollout else None)
-        self._sync_memos(project_id)
-        return self.memory.get_mission(project_id)
+        # A3本番配線: ContextVar token は generate_plan の終了時に必ず復元する。
+        memory_path = getattr(self.memory, "path", None)
+        if memory_path is not None:
+            _configure_contacts(memory_path, default_purpose="public")
+        else:
+            self.memory.add_event(
+                project_id, "contact_registry_disabled",
+                "memory.path が無いため問い合わせ台帳を使用せず登録コンテキストを使います",
+            )
+        _contact_purpose = _resolve_contact_purpose_for_plan(memory_path, project_id)
+        _contact_context_token = _contact_ctx(project_id=project_id, purpose=_contact_purpose)
+        try:
+            mission = self.memory.get_mission(project_id)
+            project = self.memory.get_project(project_id)
+            # P1-B: 両経路で同じ統一IFから事例参照を取得する(定型/アンカー側)。
+            # 必須工程・検証条件は事例で上書きしない(参考記録のみ)。
+            # F2a fail-closed: 参照失敗は空扱いで通さず狭い例外で記録する。
+            try:
+                from app.plan_case_reference import collect_for_current_plan as _collect_cases
+                from app.plan_case_reference import format_for_prompt as _format_hints
+                _case_ref_result = _collect_cases(self, project_id, criteria_input=criteria)
+                _case_hints = _format_hints(_case_ref_result)
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                _case_ref_result = {'criteria': []}
+                _case_hints = {}
+            try:
+                self.memory.add_event(
+                    project_id, 'plan_case_reference',
+                    '計画生成前に事例参照を照合(参考・達成証拠ではない)',
+                    detail=__import__('json').dumps(
+                        {'criteria': [{'criterion_id': c.get('criterion_id'),
+                                       'status': c.get('status'),
+                                       'used': [r.get('case_id') for r in c.get('references', [])
+                                                if r.get('used_or_rejected') == 'used'],
+                                       'rejected': [r.get('case_id') for r in c.get('references', [])
+                                                    if r.get('used_or_rejected') == 'rejected']}
+                                      for c in _case_ref_result.get('criteria', [])]},
+                        ensure_ascii=False)[:6000])
+            # F2a: 監査の書込失敗は握りつぶさず記録不能として停止側に倒す(通過させない)。
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                pass
+            if len(criteria) > MAX_CRITERIA:
+                raise ValueError("達成条件が18件を超えています。条件を捨てずに複数計画へ分割してください")
+            registered_body, files = self.static_context(project)
+            source_ids = [str(item['id']) for item in files if item.get('id') and item.get('source') != 'memo']
+            # P0-A: 登録コンテキスト本文を捨てない。目標・達成条件・登録コンテキスト・
+            # 原本由来の事実を出典と長さ制限つきでローカル計画の入力に渡す。
+            # 原本本文の外部AIへの自動転送はしない(既存の公開packet設計は不変)。
+            from app.structured_planning import build_p0a_planning_input as _p0a_input
+            _p0a_bundle = _p0a_input(goal=str(mission.get("goal") or ""),
+                                     success_criteria=str(mission.get("success_criteria") or ""),
+                                     constraints_text=str(mission.get("constraints_text") or ""),
+                                     static_body=str(registered_body or ""),
+                                     source_files=files)
+            source_context = build_execution_source_context(
+                str(_p0a_bundle.get("text") or ""), files, 6000)
+            # P0-A: item 生成時に参照する登録テキスト。generate_plan の本番パスでは必ず
+            # 정의され、テストの個別呼び出し(compile_task 直接呼び等)では None のまま残る。
+            from app.structured_planning import build_p0a_registered_text as _p0a_registered
+            _p0a_registered_text = _p0a_registered(
+                goal=str(mission.get("goal") or ""),
+                success_criteria=str(mission.get("success_criteria") or ""),
+                constraints_text=str(mission.get("constraints_text") or ""),
+                static_body=str(registered_body or ""),
+                source_files=files)
+            tasks = []
+            for index, criterion in enumerate(criteria, 1):
+                self.memory.add_event(project_id, 'plan_criterion_started', f'達成条件 {index}/{len(criteria)} の内容を設計中')
+                errors = ''
+                _p04_attempts: list[dict] = []
+                _p04_last_error: PlanningError | None = None
+                for attempt in range(3):
+                    proposal = None
+                    prompt = (
+                        '次の1件の達成条件を満たす作業内容を設計してください。日本語のJSONだけを返してください。\n'
+                        '{"title":"タスク名","scope":"必要な成果物本文の内容設計","headings":["必須見出し1","必須見出し2"],"depends_on":[],"outputs":[{"kind":"document","required_headings":["必須見出し1","必須見出し2"]}],"exit_checks":["必須項目を個別に確認"],"semantic_review_required":true}\n'
+                        'scopeは1600文字以内、headingsは2～8件。出力先・操作はシステムが決めます。'
+                        'ファイルパスやPDF/DOCX出力を指定しないでください。'
+                        '別々の完成資料が明示されたときだけoutputsを資料ごとに分け、kindはdocument/checklist/faq/procedureから選んでください。'
+                        '登録原本・達成条件でMarkdown成果物数が指定された場合、outputsは必ずその点数にしてください。'
+                        '商品説明文と手順書が別々に必要ならoutputsはdocumentとprocedureを各1件にし、手順書の見出しはprocedure側へ入れてください。案内文とチェックリストならdocumentとchecklistを各1件にし、案内文側の見出しにチェックリストを置かないでください。'
+                        '内容の意味的整合性を要する場合はsemantic_review_requiredをtrueにしてください。falseで既定の意味検査を無効化できません。'
+                        '顧客接触・送信・契約・実面談の未実施分は承認待ちとして整理してください。'
+                        'テンプレートを作成しただけで実顧客活動を達成済みにしないでください。'
+                        '外部指摘の全文や評価レポートをtitle/scopeにコピーしないでください。'
+                        '「計画草案の評価と改善提案」のような評価専用タスクは作らないでください。\n'
+                        f'達成条件 SC{index:02d}: {criterion}\n'
+                        f'全体の達成条件: {json.dumps(criteria, ensure_ascii=False)}\n'
+                        f'追加達成条件: {mission["success_criteria"]}\n制約: {mission["constraints_text"]}\n'
+                        f'先行タスク（依存が必要ならdepends_onへIDを指定）: '
+                        + json.dumps([{ 'id': t['task_key'], 'title': t['title']} for t in tasks], ensure_ascii=False)
+                        + '\n追加指示（全体に継承する制約）:'+json.dumps([x['message'] for x in mission.get('instruction_messages',[]) if x['kind']=='mission_instruction_user'],ensure_ascii=False)
+                        + '\n原本は参考資料です。原本の題名に引きずられず、今回の達成条件に固有の題名・見出しを作成し、先行タスクと同じ題名を繰り返さないでください。'
+                        + '\n登録原本（ローカルのみ）:\n' + source_context
+                        + '\n前回の形式エラー: ' + (
+                            _p04_next_prompt(errors, _p04_last_error) if errors else ''
+                        )
+                        + ('\n\n' + _case_hints.get(f'SC{index:02d}', '') if _case_hints.get(f'SC{index:02d}', '') else '')
+                    )
+                    from app.external_draft_hint import current_hint_text as _g3b_hint_text
+                    _g3b_text = _g3b_hint_text()
+                    if _g3b_text:
+                        prompt += '\n\n' + _g3b_text
+                    try:
+                        from app.planning_rollout import enabled, outcome_proposal
+                        anchored=outcome_proposal(criterion,mission) if enabled(self.memory.path,project_id) else None
+                        if anchored is not None:
+                            proposal=sanitize_proposal(anchored)
+                            proposal['depends_on']=[t['task_key'] for t in tasks]
+                        else:
+                            response = await self._local_complete(
+                                PLANNER_SYSTEM_PROMPT, prompt, PROPOSAL_JSON_SCHEMA
+                            )
+                            proposal = sanitize_proposal(decode_object(response))
+                        from app.planning_rollout import enabled
+                        if enabled(self.memory.path,project_id) and any(t['title']==proposal.get('title') for t in tasks):
+                            raise ValueError('既存タスクと同じ題名です。今回の達成条件に対応する内容に修正してください')
+                        task = compile_task(index, criterion, proposal, source_ids,
+                                               registered_text=_p0a_registered_text)
+                        tasks.append(task)
+                        self.memory.add_event(
+                            project_id,
+                            "planning_decision_summary",
+                            f"SC{index:02d}の設計判断を確定: {task['title']}",
+                            detail=json.dumps({
+                                "criterion_id": f"SC{index:02d}",
+                                "schema_valid": True,
+                                "heading_count": len(proposal.get("headings", [])),
+                                "dependencies": task.get("depends_on", []),
+                                "source_count": len(source_ids),
+                                "note": "内部思考ではなく、採用した設計条件の要約です",
+                            }, ensure_ascii=False),
+                        )
+                        break
+                    except (ValueError, TypeError, KeyError) as exc:
+                        errors = str(exc)[:1000]
+                        _p04_err = normalize_planning_error(exc)
+                        _p04_last_error = _p04_err
+                        _p04_attempts.append({
+                            "attempt": attempt + 1,
+                            "code": _p04_err.code,
+                            "output_index": _p04_err.output_index,
+                            "field": _p04_err.field,
+                            "candidate_hash": candidate_hash(proposal) if isinstance(proposal, dict) else "",
+                        })
+                        self.memory.add_event(project_id, 'plan_criterion_retry', f'SC{index:02d}の形式補正 {attempt + 1}/3', detail=json.dumps({
+                            "code": _p04_err.code,
+                            "output_index": _p04_err.output_index,
+                            "field": _p04_err.field,
+                            "expected": _p04_err.expected,
+                            "observed": _p04_err.observed,
+                        }, ensure_ascii=False))
+                        if (len(_p04_attempts) >= 2
+                                and _p04_attempts[-1]["candidate_hash"]
+                                and _p04_attempts[-2]["candidate_hash"]
+                                and _p04_attempts[-1]["code"] == _p04_attempts[-2]["code"]
+                                and _p04_attempts[-1]["candidate_hash"] == _p04_attempts[-2]["candidate_hash"]):
+                            self.memory.add_event(project_id, 'planning_blocked', f'SC{index:02d}の無益な再生成を停止', detail=json.dumps({
+                                "criterion_id": f"SC{index:02d}",
+                                "attempts": _p04_attempts,
+                                "switch_candidates": _p04_switch_candidates(self, project_id),
+                            }, ensure_ascii=False))
+                            break
+                if len(tasks) != index:
+                    self.memory.add_event(project_id, 'planning_blocked', f'SC{index:02d}の設計を3回で確定できません', detail=json.dumps({
+                        "criterion_id": f"SC{index:02d}",
+                        "attempts": _p04_attempts,
+                        "switch_candidates": _p04_switch_candidates(self, project_id),
+                    }, ensure_ascii=False))
+                    raise ValueError(f'SC{index:02d}の設計を3回で確定できません: {errors}')
+            # P0-A: 生成直後に正規化を適用する（規則が LLM の指定を上書きする）。
+            # 具体値が原本に無い項目は input_missing として残し、推測で契約を作らない。
+            _p0a_norm_first = normalize_p0a_plan_items(criteria, tasks, _p0a_registered_text)
+            tasks = list(_p0a_norm_first.get("tasks") or tasks)
+            _p0a_item_norm_log = list(_p0a_norm_first.get("log") or [])
+            candidate = compile_plan(criteria, tasks, goal=mission["goal"])
+            from app.planning_rollout import enabled,namespace_tasks,extension_for
+            rollout=enabled(self.memory.path,project_id)
+            if rollout:candidate['tasks']=namespace_tasks(candidate['tasks'],mission['plan_version']+1,prioritize_web=True)
+            from app.plan_feedback import PLANNING_FEEDBACK
+            assessment = validate_plan(
+                candidate, {f'SC{i:02d}' for i in range(1, len(criteria) + 1)},
+                review_count=len(PLANNING_FEEDBACK.get() or []),
+            )
+            if not assessment['passed']:
+                raise ValueError('構造化計画の検証失敗: ' + '; '.join(assessment['issues']))
+            # P0-A 保存前検査: 既存の具体的拒否(validate_plan)は先に検査済みであり、
+            # ここでは P0-A 固有の検査だけを行う(順序を守り、既存理由を隠さない)。
+            # 文意項目の挙動は変えない。要求文自体の語句化は拒否し、取り違えだけ
+            # 限定再生成する(最大2回)。2回でも不一致なら保存しない。
+            _p0a_item_check = validate_p0a_item_contract(candidate)
+            _p0a_item_regen_log: list[dict] = []
+            _p0a_item_regen_attempts = 0
+            _p0a_item_regen_audit_failed = False
+            _p0a_item_regen_audit_error = ""
+            if not _p0a_item_check.get("passed"):
+                _wrong_only = [i for i in _p0a_item_check.get("issues") or []
+                               if "wrong_target" in str(i)]
+                _only_wrong = bool(_wrong_only) and len(_wrong_only) == len(_p0a_item_check.get("issues") or [])
+                if _only_wrong:
+                    for _regen_attempt in range(1, 3):
+                        _failing: list[str] = []
+                        for _issue in _p0a_item_check.get("issues") or []:
+                            _m = re.match(r"(SC\d+): wrong_target: (SC\d+-R\d+)", str(_issue))
+                            if _m and _m.group(2) not in _failing:
+                                _failing.append(_m.group(2))
+                        if not _failing:
+                            break
+                        try:
+                            _fixed = normalize_p0a_plan_items(criteria, tasks, _p0a_registered_text)
+                            tasks = list(_fixed.get("tasks") or tasks)
+                            _p0a_item_norm_log = list(_fixed.get("log") or [])
+                        except (ValueError, TypeError, KeyError, AttributeError) as _exc:
+                            _p0a_item_regen_log.append({"attempt": _regen_attempt,
+                                                        "result": "regenerator_error",
+                                                        "error": type(_exc).__name__})
+                            break
+                        candidate = compile_plan(criteria, tasks, goal=mission["goal"])
+                        if rollout:
+                            candidate['tasks'] = namespace_tasks(
+                                candidate['tasks'], mission['plan_version'] + 1, prioritize_web=True)
+                        assessment = validate_plan(
+                            candidate, {f'SC{i:02d}' for i in range(1, len(criteria) + 1)},
+                            review_count=len(PLANNING_FEEDBACK.get() or []),
+                        )
+                        if not assessment['passed']:
+                            _p0a_item_regen_log.append({"attempt": _regen_attempt,
+                                                        "result": "structure_failed",
+                                                        "issues": list(assessment.get("issues") or [])[:3]})
+                            break
+                        _p0a_item_check = validate_p0a_item_contract(candidate)
+                        _p0a_item_regen_log.append({"attempt": _regen_attempt,
+                                                    "result": "passed" if _p0a_item_check.get("passed") else "still_missing",
+                                                    "missing": list(_p0a_item_check.get("issues") or [])[:3]})
+                        try:
+                            self.memory.add_event(
+                                project_id, 'p0a_item_target_regen',
+                                f'item対象パス取り違えのため限定的に再生成({_regen_attempt}/2)',
+                                detail=json.dumps({"attempt": _regen_attempt,
+                                                   "passed": bool(_p0a_item_check.get("passed")),
+                                                   "issues": list(_p0a_item_check.get("issues") or [])[:3]},
+                                                  ensure_ascii=False)[:2000])
+                        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as _audit_exc:
+                            _p0a_item_regen_audit_failed = True
+                            _p0a_item_regen_audit_error = type(_audit_exc).__name__
+                        if _p0a_item_check.get("passed"):
+                            break
+                    _p0a_item_regen_attempts = len(_p0a_item_regen_log)
+                if not _p0a_item_check.get("passed"):
+                    bad = list(_p0a_item_check.get("issues") or [])[:3]
+                    regen_note = (f" (item_regen_attempts={_p0a_item_regen_attempts})"
+                                  if _p0a_item_regen_log else "")
+                    audit_note = (f" (item_regen_audit_failed=true:{_p0a_item_regen_audit_error})"
+                                  if _p0a_item_regen_audit_failed else "")
+                    raise ValueError('検証契約の不正のため保存前に不合格とします: '
+                                     + ' / '.join(bad)[:300] + regen_note + audit_note)
+            # P0-A: 保存前の事実整合検査と成果物分離検査。矛盾・統合は保存・承認の前に停止。
+            # 出典のない値は「未確認」と記録し、正しい値を補完しない。誤検出で正しい
+            # 計画を拒否しないよう、登録コンテキストに同種の値が明示ある場合だけ矛盾とする。
+            from app.structured_planning import (
+                check_p0a_fact_consistency as _p0a_facts,
+                check_p0a_separate_artifacts as _p0a_split,
+            )
+            _p0a_plan_text = json.dumps(
+                {"criteria": criteria,
+                 "tasks": [{"task_key": t.get("task_key"), "title": t.get("title"),
+                            "description": t.get("description")} for t in tasks]},
+                ensure_ascii=False)
+            _p0a_fact_check = _p0a_facts(_p0a_plan_text, _p0a_registered_text)
+            _p0a_split_check = _p0a_split(criteria, tasks)
+            _p0a_unconfirmed = list(_p0a_fact_check.get("unconfirmed") or [])
+            _prefacts_audit_failed = False
+            _prefacts_audit_error = ""
+            try:
+                self.memory.add_event(
+                    project_id, 'p0a_plan_prefacts',
+                    '保存前の事実整合・成果物分離検査',
+                    detail=json.dumps({"fact_check": _p0a_fact_check,
+                                       "artifact_check": _p0a_split_check},
+                                      ensure_ascii=False)[:6000])
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+                _prefacts_audit_failed = True
+                _prefacts_audit_error = type(exc).__name__
+                self._last_prefacts_audit_meta = {
+                    "prefacts_audit_failed": True,
+                    "prefacts_audit_error": _prefacts_audit_error,
+                }
+            else:
+                self._last_prefacts_audit_meta = {
+                    "prefacts_audit_failed": False,
+                    "prefacts_audit_error": "",
+                }
+            if not _p0a_fact_check.get("passed"):
+                bad = list(_p0a_fact_check.get("conflicts") or [])[:3]
+                audit_note = (f" (prefacts_audit_failed=true:{_prefacts_audit_error})"
+                              if _prefacts_audit_failed else "")
+                raise ValueError('登録事実との矛盾のため保存前に停止します(人の確認待ち): '
+                                 + ' / '.join(f"{b.get('kind')}:{b.get('value')}" for b in bad)[:300]
+                                 + audit_note)
+            _p0a_regen_log: list[dict] = []
+            _p0a_regen_attempts = 0
+            _slot_regen_audit_failed = False
+            _slot_regen_audit_error = ""
+            if not _p0a_split_check.get("passed") and not any(
+                    "contradictory" in str(issue)
+                    for issue in _p0a_split_check.get("issues") or []):
+                # P0-0: 不足スロットを明示して最大2回だけ限定的に再生成する。
+                # 矛盾する達成条件は再生成せず保存しない。文意項目の挙動は変えない。
+                from app.structured_planning import (
+                    normalize_p0a_artifact_requirement as _p0a_norm,
+                    _p0a_required_or_raise,
+                )
+                _p0a_regen_log: list[dict] = []
+                for _regen_attempt in range(1, 3):
+                    if _p0a_split_check.get("passed"):
+                        break
+                    _failing_keys: list[str] = []
+                    for _issue in _p0a_split_check.get("issues") or []:
+                        _m = re.match(r"(SC\d+):", str(_issue))
+                        if _m and _m.group(1) not in _failing_keys:
+                            _failing_keys.append(_m.group(1))
+                    if not _failing_keys:
+                        break
+                    _regen_ok = True
+                    for _key in _failing_keys:
+                        try:
+                            _idx = int(_key[2:]) - 1
+                            _criterion = criteria[_idx]
+                        except (ValueError, IndexError):
+                            _regen_ok = False
+                            continue
+                        _norm = _p0a_norm(_criterion)
+                        # 欠落・None・不正値・矛盾のときは判定不能として再生成せず拒否する。
+                        try:
+                            _required = _p0a_required_or_raise(_norm, where="slot_regen")
+                        except ValueError:
+                            _regen_ok = False
+                            _p0a_regen_log.append({"attempt": _regen_attempt, "result": "undetermined",
+                                                   "criterion_id": _key})
+                            continue
+                        if not 2 <= _required <= 4:
+                            continue
+                        _regen_prompt = (
+                            '次の1件の達成条件を満たす作業内容を設計する。日本語のJSONだけを返す。\n'
+                            '{"title":"タスク名","scope":"内容設計","headings":["必須見出し1","必須見出し2"],'
+                            '"depends_on":[],"outputs":[{"kind":"document","required_headings":["必須見出し1","必須見出し2"]}]}\n'
+                            f'この達成条件は独立した完成ファイルが{_required}件必要である。'
+                            f'outputsを必ず{_required}件にし、別ファイル・別の検証見出しにすること。'
+                            '1件への統合は禁止である。\n'
+                            f'達成条件 {_key}: {_criterion}\n'
+                            f'全体の達成条件: {json.dumps(criteria, ensure_ascii=False)}\n'
+                            + '\n登録原本（ローカルのみ）:\n' + source_context
+                        )
+                        try:
+                            _regen_response = await self._local_complete(
+                                PLANNER_SYSTEM_PROMPT, _regen_prompt, PROPOSAL_JSON_SCHEMA)
+                            _regen_proposal = sanitize_proposal(decode_object(_regen_response))
+                            _new_task = compile_task(_idx + 1, _criterion, _regen_proposal, source_ids,
+                                                        registered_text=_p0a_registered_text)
+                            tasks[_idx] = _new_task
+                        except (ValueError, TypeError, KeyError, RuntimeError) as _exc:
+                            _regen_ok = False
+                            _p0a_regen_log.append({"attempt": _regen_attempt, "result": "regenerator_error",
+                                                   "criterion_id": _key, "error": type(_exc).__name__})
+                            continue
+                    _p0a_split_check = _p0a_split(criteria, tasks)
+                    _p0a_regen_log.append({"attempt": _regen_attempt,
+                                           "result": "passed" if _p0a_split_check.get("passed") else "still_missing",
+                                           "missing": list(_p0a_split_check.get("issues") or [])[:3]})
+                    try:
+                        self.memory.add_event(
+                            project_id, 'p0a_slot_regen',
+                            f'成果物スロット不足のため限定的に再生成({_regen_attempt}/2)',
+                            detail=json.dumps({"attempt": _regen_attempt,
+                                               "passed": bool(_p0a_split_check.get("passed")),
+                                               "issues": list(_p0a_split_check.get("issues") or [])[:3]},
+                                              ensure_ascii=False)[:2000])
+                    except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as _audit_exc:
+                        # 監査イベントの記録失敗を黙殺せず、応答/監査用の戻り値に残す(判定自体は変えない)。
+                        _slot_regen_audit_failed = True
+                        _slot_regen_audit_error = type(_audit_exc).__name__
+                _p0a_regen_attempts = len(_p0a_regen_log)
+            if not _p0a_split_check.get("passed"):
+                bad = list(_p0a_split_check.get("issues") or [])[:3]
+                audit_note = (f" (prefacts_audit_failed=true:{_prefacts_audit_error})"
+                              if _prefacts_audit_failed else "")
+                regen_note = (f" (slot_regen_attempts={_p0a_regen_attempts})"
+                              if _p0a_regen_log else "")
+                slot_audit_note = (f" (slot_regen_audit_failed=true:{_slot_regen_audit_error})"
+                                   if _slot_regen_audit_failed else "")
+                raise ValueError('成果物の分離不足のため保存前に不合格とします(再生成の対象): '
+                                 + ' / '.join(bad)[:300]
+                                 + audit_note + regen_note + slot_audit_note)
+            # 再生成後は最初のcandidateを保存しない。新版で構造と登録事実を再検証する。
+            if _p0a_regen_attempts:
+                candidate = compile_plan(criteria, tasks, goal=mission["goal"])
+                if rollout:
+                    candidate['tasks'] = namespace_tasks(
+                        candidate['tasks'], mission['plan_version'] + 1, prioritize_web=True)
+                assessment = validate_plan(
+                    candidate, {f'SC{i:02d}' for i in range(1, len(criteria) + 1)},
+                    review_count=len(PLANNING_FEEDBACK.get() or []),
+                )
+                if not assessment['passed']:
+                    raise ValueError('再生成後の構造化計画の検証失敗: ' + '; '.join(assessment['issues']))
+                _p0a_plan_text = json.dumps(
+                    {"criteria": criteria,
+                     "tasks": [{"task_key": t.get("task_key"), "title": t.get("title"),
+                                "description": t.get("description")} for t in tasks]},
+                    ensure_ascii=False)
+                _p0a_fact_check = _p0a_facts(_p0a_plan_text, _p0a_registered_text)
+                if not _p0a_fact_check.get("passed"):
+                    bad = list(_p0a_fact_check.get("conflicts") or [])[:3]
+                    raise ValueError('再生成案に登録事実との矛盾があります: '
+                                     + ' / '.join(f"{b.get('kind')}:{b.get('value')}" for b in bad)[:300])
+            # P1(原本外の事実): 矛盾・分離の既存停止を先に保つ。新検査は保存を拒否せず、
+            # 原本外の値を unverified_assumptions として記録し応答へ返す。判定不能は記録する。
+            # LLM出力の自己申告フラグは入力として読まない(規則で判定を上書きしない)。
+            # 存在しない達成条件IDは既存の validate_plan の被覆不一致で拒否されるため、
+            # ここでは重複した被覆実装を作らない。
+            from app.structured_planning import P0A_UNSUPPORTED_VERSION as _unsupported_version
+            _unsupported_check = check_p0a_unsupported_values(_p0a_plan_text, _p0a_registered_text)
+            _unsupported_unreadable = not _unsupported_check.get("checkable")
+            _unsupported_audit_failed = False
+            _unsupported_audit_error = ""
+            try:
+                self.memory.add_event(
+                    project_id, 'p1_unsupported_values',
+                    '原本外の値の検査(確定扱いにしない)',
+                    detail=json.dumps({"unsupported_check": _unsupported_check},
+                                      ensure_ascii=False)[:6000])
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+                _unsupported_audit_failed = True
+                _unsupported_audit_error = type(exc).__name__
+            # The complete manifest is retained in the summary and each task contract in
+            # acceptance_criteria: existing SQLite persistence preserves both exactly.
+            manifest = {'schema': SCHEMA, 'criteria': criteria, 'additional_success_criteria': mission['success_criteria'],
+                        'constraints': mission['constraints_text'],
+                        'prefacts_audit_failed': _prefacts_audit_failed,
+                        'prefacts_audit_error': _prefacts_audit_error,
+                        'slot_regen_attempts': _p0a_regen_attempts,
+                        'slot_regen_log': _p0a_regen_log,
+                        'slot_regen_audit_failed': _slot_regen_audit_failed,
+                        'slot_regen_audit_error': _slot_regen_audit_error,
+                        'unsupported_check_version': _unsupported_version,
+                        'unsupported_values': _unsupported_check.get("unsupported_values") or [],
+                        'unsupported_count': len(_unsupported_check.get("unsupported_values") or []),
+                        'unverified_assumptions': _unsupported_check.get("unverified_assumptions") or [],
+                        'out_of_scope_values': _unsupported_check.get("out_of_scope") or [],
+                        'unsupported_check_passed': bool(_unsupported_check.get("passed")) and not _unsupported_audit_failed,
+                        'unsupported_checkable': bool(_unsupported_check.get("checkable")),
+                        'unsupported_check_reason': str(_unsupported_check.get("reason") or ""),
+                        'unsupported_unreadable': _unsupported_unreadable,
+                        'unsupported_audit_failed': _unsupported_audit_failed,
+                        'unsupported_audit_error': _unsupported_audit_error,
+                        'artifacts': [{'task_key': task['task_key'], **contract_of(task)} for task in candidate['tasks']]}
+            candidate['summary'] += '\n\n構造検証: 合格（内容品質・営業成果の達成を意味しません）。\n\n' + json.dumps(manifest, ensure_ascii=False, indent=2)
+            self.memory.add_event(project_id, 'structured_plan_validated', '達成条件・成果物契約・依存関係を検証しました', detail=json.dumps(assessment, ensure_ascii=False))
+            self._check_plan_snapshot(project_id, mission)
+            self.memory.replace_plan(project_id, candidate['summary'], candidate['tasks'],task_extensions={t['task_key']:extension_for(t) for t in candidate['tasks']} if rollout else None)
+            self._sync_memos(project_id)
+            out_mission = self.memory.get_mission(project_id)
+            if isinstance(out_mission, dict):
+                out_mission['prefacts_audit_failed'] = _prefacts_audit_failed
+                out_mission['prefacts_audit_error'] = _prefacts_audit_error
+                out_mission['slot_regen_attempts'] = _p0a_regen_attempts
+                out_mission['slot_regen_audit_failed'] = _slot_regen_audit_failed
+                out_mission['slot_regen_audit_error'] = _slot_regen_audit_error
+                out_mission['unsupported_check_version'] = _unsupported_version
+                out_mission['unsupported_values'] = _unsupported_check.get("unsupported_values") or []
+                out_mission['unsupported_count'] = len(_unsupported_check.get("unsupported_values") or [])
+                out_mission['unverified_assumptions'] = _unsupported_check.get("unverified_assumptions") or []
+                out_mission['out_of_scope_values'] = _unsupported_check.get("out_of_scope") or []
+                out_mission['unsupported_check_passed'] = bool(_unsupported_check.get("passed")) and not _unsupported_audit_failed
+                out_mission['unsupported_checkable'] = bool(_unsupported_check.get("checkable"))
+                out_mission['unsupported_check_reason'] = str(_unsupported_check.get("reason") or "")
+                out_mission['unsupported_unreadable'] = _unsupported_unreadable
+                out_mission['unsupported_audit_failed'] = _unsupported_audit_failed
+                out_mission['unsupported_audit_error'] = _unsupported_audit_error
+                self._last_unsupported_check_meta = {
+                    "unsupported_check_version": _unsupported_version,
+                    "unsupported_checkable": bool(_unsupported_check.get("checkable")),
+                    "unsupported_check_passed": bool(_unsupported_check.get("passed")) and not _unsupported_audit_failed,
+                    "unsupported_count": len(_unsupported_check.get("unsupported_values") or []),
+                    "out_of_scope_count": len(_unsupported_check.get("out_of_scope") or []),
+                    "unsupported_unreadable": _unsupported_unreadable,
+                    "unsupported_audit_failed": _unsupported_audit_failed,
+                    "unsupported_audit_error": _unsupported_audit_error,
+                }
+            return out_mission
 
+        finally:
+            _reset_contact_ctx(_contact_context_token)
     @project_experience
-    async def generate_plan(self, project_id: str) -> dict:
+    async def generate_plan(self, project_id: str, external_hint=None) -> dict:
         if project_id in self.planning_projects:
             raise ValueError('このプロジェクトの計画は生成中です')
         self.planning_projects.add(project_id)
@@ -1128,20 +1675,41 @@ class ProjectOrchestrator:
             PLANNING_FEEDBACK, issues_for, finish_generation, normalize_planning_feedback,
         )
         from app.goal_review import plan_snapshot
+        from app.external_draft_hint import EXTERNAL_DRAFT_HINT
         token=None
+        hint_token=None
         try:
+            if external_hint is not None:
+                if (not isinstance(external_hint, dict)
+                        or "job_id" not in external_hint
+                        or "draft_sha256" not in external_hint
+                        or "task_count" not in external_hint
+                        or "text" not in external_hint
+                        or not isinstance(external_hint.get("text"), str)
+                        or external_hint.get("text") == ""):
+                    raise ValueError("hint_invalid")
+                hint_token=EXTERNAL_DRAFT_HINT.set(external_hint)
             source_signature=plan_snapshot(self,project_id)[1]
             raw_issues=issues_for(self,project_id,source_signature)
             # Compact deltas only. Full review bodies never enter plan generation.
             token=PLANNING_FEEDBACK.set(normalize_planning_feedback(raw_issues, source_signature))
             from app.goal_completion_hooks import before_generate, after_generate
             before_generate(self, project_id)
-            await self._generate_plan_impl(project_id)
+            generated_mission = await self._generate_plan_impl(project_id)
             PLANNING_FEEDBACK.reset(token);token=None
             await finish_generation(self,project_id,raw_issues,source_signature)
             after_generate(self, project_id)
-            return self.memory.get_mission(project_id)
+            out_mission = self.memory.get_mission(project_id)
+            if isinstance(out_mission, dict) and isinstance(generated_mission, dict):
+                if 'prefacts_audit_failed' in generated_mission:
+                    out_mission['prefacts_audit_failed'] = generated_mission['prefacts_audit_failed']
+                    out_mission['prefacts_audit_error'] = generated_mission.get('prefacts_audit_error', '')
+                for key in ('slot_regen_attempts', 'slot_regen_audit_failed', 'slot_regen_audit_error', 'unsupported_check_version', 'unsupported_values', 'unsupported_count', 'unverified_assumptions', 'out_of_scope_values', 'unsupported_check_passed', 'unsupported_checkable', 'unsupported_check_reason', 'unsupported_unreadable', 'unsupported_audit_failed', 'unsupported_audit_error'):
+                    if key in generated_mission:
+                        out_mission[key] = generated_mission[key]
+            return out_mission
         finally:
+            if hint_token is not None:EXTERNAL_DRAFT_HINT.reset(hint_token)
             if token is not None:PLANNING_FEEDBACK.reset(token)
             self.planning_projects.discard(project_id)
 
@@ -1204,6 +1772,23 @@ class ProjectOrchestrator:
         mission = self.memory.get_mission(project_id)
         if mission['status'] == 'running':
             raise ValueError('実行中の計画は置き換えできません')
+        from app.external_draft_hint import EXTERNAL_DRAFT_HINT
+        if EXTERNAL_DRAFT_HINT.get() is not None:
+            from app.vehicle_workflow import applicable as _g3b_applicable
+            if not (self.workspace and self._effective_planning_criteria(mission)
+                    and not _g3b_applicable(mission)):
+                raise ValueError('unsupported_plan_path')
+            # 生成開始時に1回だけ記録する。本文は入れない。
+            _g3b_hint = EXTERNAL_DRAFT_HINT.get() or {}
+            if isinstance(_g3b_hint, dict):
+                self.memory.add_event(
+                    project_id, 'external_draft_hint_used', '外部骨子を参考情報として使用',
+                    detail=json.dumps({
+                        "job_id": _g3b_hint.get("job_id"),
+                        "draft_sha256": _g3b_hint.get("draft_sha256"),
+                        "task_count": _g3b_hint.get("task_count"),
+                    }, ensure_ascii=False),
+                )
         criteria = self._effective_planning_criteria(mission)
         from app.vehicle_workflow import applicable, make_plan
         if self.workspace and applicable(mission):
@@ -1346,18 +1931,32 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                 "success_criteria": mission["success_criteria"],
                 "constraints": mission["constraints_text"], "draft_plan": plan,
             }, ensure_ascii=False, indent=2)
-            try:
-                reviews = await self.plan_review_runner(draft_for_review, reviewers)
-            except Exception as exc:
+            guard = self._outbound_guard(project_id, "plan_review", draft_for_review, reviewers)
+            if not guard.get("ok"):
                 reviews = [{
-                    "id": "review_runner", "label": "計画評価", "model": "",
-                    "ok": False, "error": str(exc)[:2000],
+                    "id": "privacy_guard", "label": "送信前検査", "model": "",
+                    "ok": False,
+                    "error": "送信保留: privacy_check_failed:" + ",".join(
+                        str(code) for code in (guard.get("codes") or [])),
                 }]
                 self.memory.add_event(
                     project_id, "plan_review_failed",
-                    "外部AI評価を取得できなかったためローカル草案を維持しました",
-                    detail=str(exc)[:2000],
+                    "送信前検査のため外部AI評価を保留しローカル草案を維持しました",
+                    detail="privacy_guard",
                 )
+            else:
+                try:
+                    reviews = await self.plan_review_runner(draft_for_review, reviewers)
+                except Exception as exc:
+                    reviews = [{
+                        "id": "review_runner", "label": "計画評価", "model": "",
+                        "ok": False, "error": str(exc)[:2000],
+                    }]
+                    self.memory.add_event(
+                        project_id, "plan_review_failed",
+                        "外部AI評価を取得できなかったためローカル草案を維持しました",
+                        detail=str(exc)[:2000],
+                    )
             self.memory.set_plan_reviews(project_id, reviews)
             successful = [item for item in reviews if item.get("ok")]
             self.memory.add_event(
@@ -1540,7 +2139,40 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
             raise ValueError("現在の状態では計画を承認できません")
         from app.goal_completion_hooks import before_approve
         before_approve(self, project_id)
-        gate=execution_gate(self,project_id)
+        try:
+            from app.plan_gate_decision import decide as _approve_gate_decide
+            from app.plan_gate_decision import enabled_for_project as _approve_gate_v2
+            _approve_gate_v2_enabled = bool(_approve_gate_v2(project_id))
+        except (ValueError, KeyError, TypeError, AttributeError, OSError):
+            _approve_gate_v2_enabled = False
+            _approve_gate_decide = None
+        if _approve_gate_v2_enabled:
+            _approve_gate_result = None
+            try:
+                _approve_gate_result = _approve_gate_decide(self, project_id)
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                _approve_gate_result = None
+            if isinstance(_approve_gate_result, dict) and _approve_gate_result.get("mode") == "v2":
+                if _approve_gate_result.get("verdict") == "passed":
+                    gate = {'blocked': False, 'reason': ''}
+                else:
+                    gate = {'blocked': True,
+                            'reason': '計画の人間承認は記録できます。外部検証が未完了または未合格のため、実行開始はできません。'}
+                if not gate['blocked']:
+                    try:
+                        from app.capability_gap import blocks_execution_approval as _blocks_execution
+                        _capability_block = _blocks_execution(self, project_id)
+                    except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                        _capability_block = {'blocked': True}
+                    if not isinstance(_capability_block, dict) or _capability_block.get('blocked'):
+                        gate = {'blocked': True,
+                                'reason': str((_capability_block or {}).get('reason') or
+                                              '実行能力の事前確認が未完了のため、実行開始はできません。')}
+            else:
+                gate = {'blocked': True,
+                        'reason': '計画の人間承認は記録できます。外部検証が未完了または未合格のため、実行開始はできません。'}
+        else:
+            gate=execution_gate(self,project_id)
         self.memory.set_mission_status(
             project_id, "ready", "計画の人間承認を記録しました。外部検証待ちで実行は保留です" if gate['blocked'] else "計画が承認され、実行待ちになりました", "approved"
         )
@@ -1550,10 +2182,83 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         return result
 
     async def start(self, project_id: str) -> dict:
-        from app.goal_review import require_review
-        require_review(self, project_id)
-        from app.plan_repair_loop import approval_gate
-        approval_gate(self, project_id)
+        from app.plan_gate_decision import decide as _plan_gate_decide
+        from app.plan_gate_decision import enabled_for_project as _plan_gate_v2
+        try:
+            _plan_gate_v2_enabled = bool(_plan_gate_v2(project_id))
+        except (ValueError, KeyError, TypeError, AttributeError, OSError):
+            _plan_gate_v2_enabled = False
+        _shadow_v2_result = None
+        if not _plan_gate_v2_enabled:
+            try:
+                from app.plan_gate_decision import decide_v2_for_shadow as _shadow_v2
+                _shadow_v2_result = _shadow_v2(self, project_id)
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                _shadow_v2_result = None
+            try:
+                _shadow_v2_verdict = _shadow_v2_result.get("verdict") if isinstance(_shadow_v2_result, dict) else None
+                _shadow_v2_reason = _shadow_v2_result.get("reason") if isinstance(_shadow_v2_result, dict) else ""
+                _shadow_v2_mode = _shadow_v2_result.get("mode") if isinstance(_shadow_v2_result, dict) else ""
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                _shadow_v2_verdict = None
+                _shadow_v2_reason = ""
+                _shadow_v2_mode = ""
+        _use_legacy_gate = not _plan_gate_v2_enabled
+        if _plan_gate_v2_enabled:
+            _v2_result = None
+            try:
+                _v2_result = _plan_gate_decide(self, project_id)
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                _v2_result = None
+            if not isinstance(_v2_result, dict):
+                raise ValueError("gate_check_error")
+            _v2_mode = _v2_result.get("mode")
+            _v2_verdict = _v2_result.get("verdict")
+            _v2_reason = _v2_result.get("reason")
+            if _v2_mode == "legacy":
+                _use_legacy_gate = True
+            elif _v2_mode != "v2":
+                raise ValueError("gate_check_error")
+            elif _v2_verdict != "passed":
+                raise ValueError(str(_v2_reason or "gate_check_error"))
+        if _use_legacy_gate:
+            from app.goal_review import require_review
+            try:
+                require_review(self, project_id)
+            except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
+                if not _plan_gate_v2_enabled:
+                    if _shadow_v2_verdict == "passed" and _shadow_v2_mode == "v2" and _shadow_v2_reason == "ok_v2":
+                        try:
+                            self.memory.add_event(
+                                project_id, "plan_gate_shadow_diff",
+                                "plan gate shadow diff",
+                                detail="legacy=blocked;v2=passed:ok_v2",
+                            )
+                        except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                            pass
+                raise ValueError(str(exc)) from exc
+            from app.plan_repair_loop import approval_gate
+            approval_gate(self, project_id)
+            try:
+                from app.independent_review_gate import gate_error
+                _legacy_code = gate_error(self, project_id)
+            except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                _legacy_code = "independent_review_check_error"
+            if _legacy_code is not None:
+                if not _plan_gate_v2_enabled:
+                    if _shadow_v2_verdict == "passed" and _shadow_v2_mode == "v2" and _shadow_v2_reason == "ok_v2":
+                        try:
+                            self.memory.add_event(
+                                project_id, "plan_gate_shadow_diff",
+                                "plan gate shadow diff",
+                                detail="legacy=blocked;v2=passed:ok_v2",
+                            )
+                        except (ValueError, KeyError, TypeError, AttributeError, OSError):
+                            pass
+                raise ValueError(str(_legacy_code))
+        else:
+            from app.plan_repair_loop import approval_gate
+            approval_gate(self, project_id)
         if project_id in self.planning_projects:
             raise ValueError('計画生成中は実行を開始できません')
         existing = self.workers.get(project_id)
@@ -1824,6 +2529,32 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
             (contract_of(item) or {}).get("final_verification")
             for item in mission["tasks"]
         )
+        if has_structured_final:
+            from app.requirement_item_ledger import latest_ledger
+            from app.requirement_verification import summarize_criterion
+            final_task = next((item for item in mission["tasks"]
+                               if (contract_of(item) or {}).get("final_verification")), None)
+            required_ids = set((contract_of(final_task) or {}).get("criterion_ids") or []) if final_task else set()
+            saved_ledger = latest_ledger(self.memory.path, project_id)
+            ledger_rows = saved_ledger.get("rows") if isinstance(saved_ledger, dict) else None
+            verdicts = summarize_criterion(ledger_rows or [])
+            if final_task and (not ledger_rows or any(verdicts.get(cid) != "PASS" for cid in required_ids)):
+                failures_by_key.setdefault(final_task["task_key"], []).append(
+                    "項目別台帳で達成条件がPASSではありません: "
+                    + ", ".join(f"{cid}={verdicts.get(cid, 'UNTESTABLE')}" for cid in sorted(required_ids))
+                )
+                for row in ledger_rows or []:
+                    if not isinstance(row, dict) or row.get("result") != "FAIL":
+                        continue
+                    path = str(row.get("artifact_path") or "")
+                    for producer in mission["tasks"]:
+                        if producer["id"] == final_task["id"]:
+                            continue
+                        outputs = (contract_of(producer) or {}).get("outputs") or []
+                        if any(isinstance(output, dict) and output.get("path") == path for output in outputs):
+                            failures_by_key.setdefault(producer["task_key"], []).append(
+                                f"項目別検証FAIL: {row.get('item_id')} ({path})"
+                            )
         if mission.get("final_report") and not has_structured_final:
             _, final_status, unmet = self._decode_final_assessment(mission["final_report"])
             if final_status != "passed" and completed:
@@ -2023,11 +2754,409 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
         self._sync_memos(project_id)
         return True
 
-    async def _run(self, project_id: str) -> None:
-        self.memory.set_mission_status(
-            project_id, "running", "依存関係を確認し並列エージェント実行を開始しました", "started"
+    def _evaluate_completion_gate(self, project_id: str) -> dict:
+        """完了ゲートの結果を読むだけ。達成条件は緩めない。通過しなければ {} を返す。"""
+        try:
+            from app.completion_gate import evaluate
+        except (ImportError, AttributeError, ValueError):
+            return {}
+        try:
+            result = evaluate(self, project_id, persist=False)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    def _run_result_basis(self, project_id: str, goal_verdict: str, *,
+                            verification_ref: str = "",
+                            verification_hash: str = "") -> dict:
+        """B4: 最小結果の素案。既存の項目別検証台帳の読み取りから作る。
+
+        新しい判定は作らない。集計は台帳の行の result の数え直しだけ。
+        読めない・欠落のときは counts を入れず理由だけを残し、finish_run 側で
+        unavailable として保存する(空の集計を 0件として保存しない)。
+        """
+        pid = str(project_id or "")
+        try:
+            from app.requirement_item_ledger import (
+                LedgerReadError, latest_ledger,
+            )
+            saved = latest_ledger(self.memory.path, pid)
+        except Exception as exc:
+            return {"counts": None,
+                    "reason": f"ledger unreadable: {type(exc).__name__}"}
+        if not isinstance(saved, dict) or not isinstance(saved.get("rows"), list):
+            return {"counts": None, "reason": "ledger empty"}
+        try:
+            import app.run_cycles as _basis_runs
+            counts = _basis_runs.build_counts_from_ledger_rows(saved.get("rows"))
+        except Exception as exc:
+            return {"counts": None,
+                    "reason": f"counts unavailable: {type(exc).__name__}"}
+        if counts is None:
+            return {"counts": None, "reason": "rows unreadable"}
+        return {"counts": counts,
+                "goal_verdict": str(goal_verdict or ""),
+                "verification_ref": str(verification_ref or ""),
+                "verification_hash": str(verification_hash or "")}
+
+    @staticmethod
+    def _classify_run_failure(exc: BaseException) -> str:
+        """基盤障害は stopped_error。時間切れ・取消は別値。finished に倒さない。"""
+        from app.requirement_item_ledger import LedgerReadError
+        from app.workspace_files import ContractPathConflictError
+
+        if isinstance(exc, LedgerReadError):
+            return "stopped_error"
+        if isinstance(exc, ContractPathConflictError):
+            return "stopped_error"
+        if isinstance(exc, asyncio.CancelledError):
+            return "cancelled"
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            return "stopped_time_limit"
+        return "stopped_error"
+
+    def _close_run_cycle(
+        self, project_id: str, run_id: str | None, run_started: bool, *,
+        execution_state: str, goal_verdict: str, pending_kind: str = "none",
+        stop_reason: str = "", completion_gate_result: dict | None = None,
+        result_basis: dict | None = None,
+    ) -> dict | None:
+        """finish_run を必ず一度だけ呼ぶ。最終検証書があれば版を束縛する。"""
+        if not run_started or not run_id:
+            return None
+        import app.run_cycles as _run_cycles
+
+        verification_ref = ""
+        verification_hash = ""
+        verification_note = ""
+        try:
+            mission = self.memory.get_mission(project_id)
+            final_task = next((
+                item for item in mission.get("tasks", [])
+                if (contract_of(item) or {}).get("final_verification")
+            ), None)
+            final_contract = contract_of(final_task) if final_task else {}
+            if not final_contract:
+                final_task = next((
+                    item for item in mission.get("tasks", [])
+                    if str(item.get("task_key") or "") == "final_verification"
+                ), None)
+                try:
+                    final_contract = json.loads(
+                        str((final_task or {}).get("acceptance_criteria") or "{}"))
+                except (TypeError, ValueError):
+                    final_contract = {}
+            output = next((
+                item for item in (final_contract or {}).get("outputs", [])
+                if isinstance(item, dict) and item.get("path")
+            ), None)
+            project = self.memory.get_project(project_id)
+            if output and project and self.workspace:
+                relative = str(output["path"])
+                target = self.workspace.resolve_file(
+                    project.get("workspace_path", ""), project_id, relative,
+                    must_exist=True,
+                )[2]
+                if not target.is_file():
+                    raise ValueError("verification artifact is not a file")
+                verification_ref = relative
+                verification_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+            elif output:
+                verification_note = "検証書なし"
+        except FileNotFoundError:
+            verification_ref = ""
+            verification_hash = ""
+            verification_note = "検証書なし"
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            verification_ref = ""
+            verification_hash = ""
+            verification_note = f"検証書を読めない: {type(exc).__name__}"
+        effective_stop_reason = str(stop_reason or "")
+        if verification_note:
+            effective_stop_reason = (effective_stop_reason + " / " + verification_note).strip(" /")
+
+        # B4: 最小結果は既存の台帳の読み取りから作る(新しい判定は作らない)。
+        # 取れなければ unavailable として残す(0件として保存しない)。
+        if isinstance(result_basis, dict):
+            basis = result_basis
+        else:
+            basis = self._run_result_basis(
+                project_id, goal_verdict,
+                verification_ref=verification_ref,
+                verification_hash=verification_hash)
+
+        try:
+            ended = _run_cycles.finish_run(
+                self.memory.path, str(run_id),
+                execution_state=str(execution_state),
+                goal_verdict=str(goal_verdict),
+                pending_kind=str(pending_kind or "none"),
+                stop_reason=effective_stop_reason[:2000],
+                verification_ref=verification_ref,
+                verification_hash=verification_hash,
+                completion_gate_result=completion_gate_result,
+                result_basis=basis,
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            try:
+                self.memory.add_event(
+                    project_id, "run_cycle_close_failed",
+                    f"実行サイクルの終了記録に失敗: {type(exc).__name__}",
+                    detail=str(exc)[:2000],
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as event_exc:
+                raise RuntimeError(
+                    "run cycle close failed and failure event recording failed: "
+                    f"{type(exc).__name__}/{type(event_exc).__name__}"
+                ) from exc
+            raise RuntimeError(
+                f"run cycle close failed: {type(exc).__name__}") from exc
+        try:
+            self.memory.add_event(
+                project_id, "run_cycle_closed",
+                f"実行サイクルを終了: {execution_state}/{goal_verdict}",
+                detail=__import__("json").dumps({
+                    "run_id": str(run_id), "execution_state": str(execution_state),
+                    "goal_verdict": str(goal_verdict),
+                    "pending_kind": str(pending_kind or "none"),
+                }, ensure_ascii=False)[:2000],
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as event_exc:
+            ended = dict(ended)
+            ended["closure_event_recorded"] = False
+            ended["closure_event_error"] = type(event_exc).__name__
+        else:
+            ended = dict(ended)
+            ended["closure_event_recorded"] = True
+        return ended
+
+    def _close_run_cycle_from_ledger(
+        self, project_id: str, run_id: str | None, run_started: bool, *,
+        stop_reason: str = "",
+    ) -> dict | None:
+        """最終検証後の終了規則。未達が残っても次に安全な処理が無ければ閉じる。
+
+        台帳読取失敗・契約パス衝突は finished にせず stopped_error。
+        旧式追補へ迂回しない。LLM出力の自己申告で状態を上書きしない。
+        """
+        import app.run_cycles as _run_cycles
+        from app.run_closure import (
+            P02_MAX_AUTO_REPAIR_PER_ITEM,
+            build_open_item_params,
+            decide_verdict,
         )
-        self._sync_memos(project_id)
+
+        if not run_started or not run_id:
+            return None
+        rid = str(run_id)
+        try:
+            from app.requirement_item_ledger import (
+                LedgerReadError,
+                latest_ledger,
+            )
+            from app.requirement_verification import classify_item_failure
+            from app.workspace_files import ContractPathConflictError
+        except (ImportError, AttributeError, ValueError) as exc:
+            return self._close_run_cycle(
+                project_id, rid, run_started,
+                execution_state="stopped_error", goal_verdict="undetermined",
+                pending_kind="verification",
+                stop_reason=f"終了規則の部品を読めない: {type(exc).__name__}",
+            )
+        try:
+            saved = latest_ledger(self.memory.path, project_id)
+        except LedgerReadError as exc:
+            # 台帳の読取失敗は『空』に倒さず旧式追補へ迂回しない。異常停止。
+            try:
+                self.memory.add_event(
+                    project_id, "run_cycle_ledger_unreadable",
+                    f"台帳読取不能のため異常停止: {exc.kind}",
+                    detail=f"path_kind={exc.path_kind}; sqlite_error={exc.sqlite_error}"[:2000],
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                pass
+            return self._close_run_cycle(
+                project_id, rid, run_started,
+                execution_state="stopped_error", goal_verdict="undetermined",
+                pending_kind="verification",
+                stop_reason=f"台帳読取不能のため異常停止: {exc.kind}",
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            return self._close_run_cycle(
+                project_id, rid, run_started,
+                execution_state="stopped_error", goal_verdict="undetermined",
+                pending_kind="verification",
+                stop_reason=f"台帳読取不能のため異常停止: {type(exc).__name__}",
+            )
+        rows = []
+        if isinstance(saved, dict) and isinstance(saved.get("rows"), list):
+            rows = [
+                row for row in saved.get("rows", [])
+                if isinstance(row, dict)
+                and str(row.get("result") or "") in ("FAIL", "UNTESTABLE")
+                and row.get("required", True)
+            ]
+        classified_rows: list[dict] = []
+        for row in rows:
+            kind = classify_item_failure(row)
+            if kind is None:
+                continue
+            enriched = dict(row)
+            enriched["_failure_kind"] = kind
+            classified_rows.append(enriched)
+        if not classified_rows:
+            # 未達行が無いのに呼ばれた場合は finished+unmet ではなく undetermined。
+            # PASS への読み替えはしない。
+            return self._close_run_cycle(
+                project_id, rid, run_started,
+                execution_state="finished", goal_verdict="undetermined",
+                pending_kind="none",
+                stop_reason=str(stop_reason or "最終検証の未達行が無いため判定待ちとして終了")[:2000],
+            )
+        verdict, pending = decide_verdict(classified_rows)
+        # B4: 当時の最小結果の素案。最終検証台帳の既存の検証結果だけを数える
+        # (新しい判定は作らない)。分類済みの未達行だけではなく台帳全体の行を
+        # 数える。渡せなければ unavailable として保存する。
+        ledger_basis: dict | None = None
+        try:
+            import app.run_cycles as _basis_runs
+            _basis_counts = _basis_runs.build_counts_from_ledger_rows(
+                saved.get("rows") if isinstance(saved, dict) else None)
+            if _basis_counts is None:
+                ledger_basis = {"counts": None,
+                                "reason": "ledger rows unreadable"}
+            else:
+                ledger_basis = {"counts": _basis_counts}
+        except Exception as exc:
+            ledger_basis = {"counts": None,
+                            "reason": f"basis unavailable: {type(exc).__name__}"}
+        # 残件を項目単位で保存する。冪等キーで二重追加しない。
+        for row in classified_rows:
+            kind = str(row.get("_failure_kind") or "unclassified")
+            params = build_open_item_params(
+                run_id=rid, row=row, failure_kind=kind, signature="",
+            )
+            try:
+                _run_cycles.add_open_item(self.memory.path, rid, **params)
+            except ContractPathConflictError as exc:
+                return self._close_run_cycle(
+                    project_id, rid, run_started,
+                    execution_state="stopped_error", goal_verdict="undetermined",
+                    pending_kind="verification",
+                    stop_reason=f"契約ファイルパス衝突のため異常停止: {type(exc).__name__}",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+                # 実行サイクルの記録失敗は成功/終了として扱わない。例外で表に出す。
+                raise RuntimeError(
+                    f"run open item record failed: {type(exc).__name__}") from exc
+        _ = P02_MAX_AUTO_REPAIR_PER_ITEM
+        return self._close_run_cycle(
+            project_id, rid, run_started,
+            execution_state="finished", goal_verdict=verdict,
+            pending_kind=pending,
+            stop_reason=str(stop_reason or "最終検証の未達を残件として終了")[:2000],
+            result_basis=ledger_basis,
+        )
+
+    def _record_early_open_items(
+        self, project_id: str, run_id: str | None, run_started: bool, *,
+        tasks: list[dict] | None = None, external_result: bool = False,
+    ) -> None:
+        """早期終了の残件を終了記録より先に保存する。失敗は呼出側へ送出する。"""
+        if not run_started or not run_id:
+            return
+        import app.run_cycles as _run_cycles
+        from app.run_closure import build_open_item_params
+        from app.requirement_verification import classify_item_failure
+
+        if external_result:
+            rows = [{
+                "item_id": "external-execution", "criterion_id": "",
+                "artifact_path": "", "method": "external_result",
+                "result": "UNTESTABLE",
+                "reason": "承認付き外部実行の実測値と実在する証拠が未登録",
+            }]
+            kinds = ["external_result"]
+        else:
+            rows = []
+            kinds = []
+            for task in tasks or []:
+                status = str(task.get("status") or "")
+                reason = str(task.get("error") or "依存タスクの失敗により未実行")
+                row = {
+                    "item_id": str(task.get("task_key") or task.get("id") or "task"),
+                    "criterion_id": "", "artifact_path": "", "method": "task",
+                    "result": "FAIL", "reason": reason,
+                }
+                kind = classify_item_failure(row) or (
+                    "system_error" if status == "failed" else "artifact_missing"
+                )
+                rows.append(row)
+                kinds.append(kind)
+        for row, kind in zip(rows, kinds):
+            params = build_open_item_params(
+                run_id=str(run_id), row=row, failure_kind=kind,
+                signature=f"early:{row.get('item_id')}:{kind}",
+            )
+            _run_cycles.add_open_item(self.memory.path, str(run_id), **params)
+
+    async def _run(
+        self, project_id: str, *, _run_id: str | None = None,
+        _run_started: bool = False,
+    ) -> None:
+        # P0-2: 実行サイクルの開始と終了を接続する。再帰時は同じサイクルを引き継ぐ。
+        # finish_run は必ず一度だけ呼ぶ。記録の失敗は成功/終了として扱わない。
+        from app.run_closure import new_run_id
+        run_id: str | None = _run_id
+        run_started = bool(_run_started and _run_id)
+        cancel_requested = False
+        try:
+            mission_preview = self.memory.get_mission(project_id)
+            plan_version = mission_preview.get("plan_version") or 0
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            plan_version = 0
+        try:
+            import app.run_cycles as _run_cycles
+            if run_started:
+                _run_cycles = _run_cycles
+            else:
+                from app.goal_review import plan_snapshot as _run_plan_snapshot
+            from app.vehicle_workflow import (
+                digest as _run_digest,
+                sources as _run_sources,
+            )
+            if not run_started:
+                try:
+                    _run_plan_signature = _run_plan_snapshot(self, project_id)[1]
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                    _run_plan_signature = ""
+                try:
+                    _run_source_hash = _run_digest(_run_sources(self, project_id))
+                except (OSError, ValueError, RuntimeError, TypeError, AttributeError, KeyError):
+                    _run_source_hash = "unknown:unreadable"
+                run_id = new_run_id(project_id, plan_version)
+                try:
+                    _run_cycles.start_run(
+                        self.memory.path, project_id, run_id,
+                        plan_signature=str(_run_plan_signature or "")[:500],
+                        source_hash=str(_run_source_hash or "")[:256],
+                    )
+                    run_started = True
+                except ValueError as exc:
+                    # 二重開始は既存の run_id を再利用せず、新しい run_id で試さない。
+                    # 記録の開始失敗は成功/終了として扱わず、例外で表に出す。
+                    raise RuntimeError(
+                        f"run cycle start failed: {type(exc).__name__}") from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"run cycle start failed: {type(exc).__name__}") from exc
+        if not _run_started:
+            self.memory.set_mission_status(
+                project_id, "running", "依存関係を確認し並列エージェント実行を開始しました", "started"
+            )
+            self._sync_memos(project_id)
         try:
             while True:
                 current = self.memory.get_mission(project_id)
@@ -2036,6 +3165,12 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                     self._sync_memos(project_id)
                     return
                 if current["status"] != "running":
+                    self._close_run_cycle(
+                        project_id, run_id, run_started,
+                        execution_state=("cancelled" if current["status"] == "cancelled" else "finished"),
+                        goal_verdict="undetermined", pending_kind="none",
+                        stop_reason=f"mission status changed: {current['status']}",
+                    )
                     return
                 pending = [task for task in current["tasks"] if task["status"] == "pending"]
                 if not pending:
@@ -2101,18 +3236,69 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                     message="一部タスクが失敗または依存停止となり、未解決事項レポートを保存しました",
                 )
                 self._sync_memos(project_id)
+                self._record_early_open_items(
+                    project_id, run_id, run_started, tasks=incomplete,
+                )
+                self._close_run_cycle(
+                    project_id, run_id, run_started,
+                    execution_state="finished", goal_verdict="unmet",
+                    pending_kind="artifact",
+                    stop_reason="一部タスクが失敗または依存停止のため未達として終了",
+                )
                 return
             if latest["tasks"]:
                 if requires_real_world_execution(
                     latest["goal"], latest["success_criteria"]
                 ) and not self._external_execution_evidence(project_id):
                     self._pause_for_external_execution(project_id)
+                    self._record_early_open_items(
+                        project_id, run_id, run_started, external_result=True,
+                    )
+                    self._close_run_cycle(
+                        project_id, run_id, run_started,
+                        execution_state="finished", goal_verdict="undetermined",
+                        pending_kind="external_result",
+                        stop_reason="承認付き外部実行の証拠待ちのため外部結果待ちとして終了",
+                    )
                     return
                 report, goal_status, unmet = await self._final_report(project_id)
                 if goal_status != "passed":
-                    if self._append_goal_supplement(project_id, unmet, report):
+                    # P0-2: 同じ未達を無制限に追補しない。P0-B の上限付き再試行の
+                    # 結果、追補が発生したら再帰せず終了規則へ(再試行は P0-B 側)。
+                    # 旧式追補(_legacy)は P0-2 では迂回しない(呼び出さない)。
+                    supplemented = await self._append_goal_supplement_async(
+                        project_id, unmet, report)
+                    if supplemented:
+                        latest_after = self.memory.get_mission(project_id)
+                        still_open = [
+                            task for task in latest_after["tasks"]
+                            if task["status"] not in {"completed", "skipped"}
+                        ]
+                        if not still_open:
+                            gate_after = self._evaluate_completion_gate(project_id)
+                            if gate_after.get("achieved") is True:
+                                self._close_run_cycle(
+                                    project_id, run_id, run_started,
+                                    execution_state="finished", goal_verdict="achieved",
+                                    pending_kind="none",
+                                    completion_gate_result=gate_after,
+                                )
+                            else:
+                                self._close_run_cycle_from_ledger(
+                                    project_id, run_id, run_started,
+                                    stop_reason="P0-B修復後に未達が残ったため残件として終了",
+                                )
+                            self._sync_memos(project_id)
+                            return
+                        self.memory.set_mission_status(
+                            project_id, "running",
+                            "P0-B追補を同じ実行サイクルで継続します",
+                            "supplement_continued",
+                        )
                         self._sync_memos(project_id)
-                        return await self._run(project_id)
+                        return await self._run(
+                            project_id, _run_id=run_id, _run_started=run_started,
+                        )
                     last_task = latest["tasks"][-1]
                     error = "最終目標の達成を実証できません: " + (
                         "; ".join(unmet) if unmet else "最終評価が未達または部分達成です"
@@ -2122,23 +3308,898 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                         project_id, report[:200000], status="failed",
                         message="最終目標の未達を検出したため完了扱いにしませんでした",
                     )
+                    self._close_run_cycle_from_ledger(
+                        project_id, run_id, run_started,
+                        stop_reason="最終検証の未達が残ったため残件として終了",
+                    )
                 else:
                     self.memory.set_final_report(
                         project_id, report[:200000], status="completed",
                     )
+                    gate = self._evaluate_completion_gate(project_id)
+                    if gate.get("achieved") is True:
+                        # 必ず完了ゲートの結果を渡す。通っていなければ achieved は書けない。
+                        self._close_run_cycle(
+                            project_id, run_id, run_started,
+                            execution_state="finished", goal_verdict="achieved",
+                            pending_kind="none",
+                            completion_gate_result=gate,
+                        )
+                    else:
+                        self._close_run_cycle_from_ledger(
+                            project_id, run_id, run_started,
+                            stop_reason="最終報告は完了だが完了ゲート未達のため残件として終了",
+                        )
                 self._sync_memos(project_id)
         except asyncio.CancelledError:
+            self._close_run_cycle(
+                project_id, run_id, run_started,
+                execution_state="cancelled", goal_verdict="undetermined",
+                pending_kind="none",
+                stop_reason="利用者による停止/キャンセル",
+            )
             raise
         except Exception as exc:
             self.memory.add_event(project_id, "run_error", "計画実行エラー", detail=str(exc)[:4000])
+            # P0-2: 基盤障害で信頼できる判定を保存できない場合は stopped_error。
+            # 台帳読取失敗・契約パス衝突は finished にしない。旧式追補へ迂回しない。
+            terminal = self._classify_run_failure(exc)
             self.memory.set_final_report(
                 project_id, self._failure_report(project_id, str(exc))[:200000],
                 status="failed",
                 message="計画実行で予期しないエラーが発生し、未解決事項レポートを保存しました",
             )
+            self._close_run_cycle(
+                project_id, run_id, run_started,
+                execution_state=terminal, goal_verdict="undetermined",
+                pending_kind="none",
+                stop_reason=f"実行時異常のため終了: {type(exc).__name__}",
+            )
             self._sync_memos(project_id)
 
+    async def _append_goal_supplement_async(
+        self, project_id: str, unmet: list[str], final_report: str,
+    ) -> bool:
+        """P0-B同期処理をworkerへ移し、LLMだけ元のloopへ安全に戻す。"""
+        loop = asyncio.get_running_loop()
+
+        def invoke() -> bool:
+            previous = getattr(self, "_p0b_main_loop", None)
+            self._p0b_main_loop = loop
+            try:
+                return self._append_goal_supplement(project_id, unmet, final_report)
+            finally:
+                self._p0b_main_loop = previous
+
+        return await asyncio.to_thread(invoke)
+
+    def _p0b_local_complete_sync(self, system: str, prompt: str) -> str:
+        """P0-B workerから、所有イベントループ上のLLMを一度だけ待機する。"""
+        loop = getattr(self, "_p0b_main_loop", None)
+        if loop is not None and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self._local_complete(system, prompt), loop)
+            return str(future.result(timeout=100.0))
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and running.is_running():
+            raise RuntimeError("P0-B synchronous LLM call requires worker thread")
+        return str(asyncio.run(self._local_complete(system, prompt)))
+
     def _append_goal_supplement(
+        self, project_id: str, unmet: list[str], final_report: str,
+    ) -> bool:
+        """P0-B: 失敗理由別の修正ループ。元成果物の版管理修正と再検証が中心。
+
+        追補ファイル(goal_supplement_*.md)は補足として残すが、項目の合否には
+        使わない。自動修復するのは元成果物パスと失敗項目が特定でき、必要な値が
+        原本/登録事実にある phrase_missing だけ。人確認・外部実行・原本外断定・
+        不明・システム異常は自動修復せず理由と人の操作を記録する。同じ失敗署名
+        での再試行は上限2回で判断待ちに移り、無限に追補を作らない。修正前後の
+        項目結果と成果物ハッシュを台帳に保存する。P0-A の検証契約や文意項目の
+        挙動は変えない。
+        """
+        from app.goal_review import plan_snapshot
+        from app.requirement_item_ledger import (
+            LedgerReadError,
+            _stop_ledger_read_failed,
+            count_repair_attempts,
+            latest_ledger,
+            list_repair_runs,
+            record_ledger,
+            record_repair_run,
+        )
+        from app.requirement_verification import (
+            P0B_AUTO_REPAIRABLE_KINDS,
+            P0B_MAX_REPAIR_ATTEMPTS,
+            P0B_MAX_REPAIR_ROUNDS,
+            P0B_SEMANTIC_REQUOTE_MAX,
+            classify_item_failure,
+            failure_operator_hint,
+            failure_signature,
+            ledger_invalidated,
+            ledger_payload,
+            verify_requirement_items,
+        )
+        from app.vehicle_workflow import (
+            digest as _source_digest,
+            sources as _current_sources,
+        )
+        try:
+            saved = latest_ledger(self.memory.path, project_id)
+        except LedgerReadError as exc:
+            # 台帳の読取失敗は『空』に倒さず旧式追補へ迂回しない。異常停止。
+            _stop_ledger_read_failed(self.memory, project_id, exc)
+            return True
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            # 台帳の種別不明の失敗も『空』に倒さない。異常停止側に倒す。
+            from app.requirement_item_ledger import LedgerReadError as _LedgerReadError
+
+            _stop_ledger_read_failed(
+                self.memory, project_id,
+                _LedgerReadError("connect_failed", sqlite_error=type(exc).__name__),
+            )
+            return True
+        if not isinstance(saved, dict) or not isinstance(saved.get("rows"), list) or not saved.get("rows"):
+            return self._append_goal_supplement_legacy(project_id, unmet, final_report)
+        unmet_failures: list[dict] = [
+            row for row in saved.get("rows", [])
+            if isinstance(row, dict) and str(row.get("result") or "") in ("FAIL", "UNTESTABLE")
+            and row.get("required", True)
+        ]
+        if not unmet_failures:
+            return False
+        mission = self.memory.get_mission(project_id, event_limit=500)
+        project = self.memory.get_project(project_id)
+        if project is None:
+            return False
+        try:
+            plan_signature = plan_snapshot(self, project_id)[1]
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            return self._append_goal_supplement_legacy(project_id, unmet, final_report)
+        try:
+            source_hash = _source_digest(_current_sources(self, project_id))
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError, KeyError):
+            source_hash = "unknown:unreadable"
+
+        def _resolve(relative: str):
+            return self.workspace.resolve_file(
+                project.get("workspace_path", ""), project_id, relative,
+                must_exist=True,
+            )[2]
+
+        def _artifact_hash(relative: str) -> str:
+            try:
+                return _source_digest(_resolve(relative).read_bytes())
+            except (OSError, ValueError):
+                return "unknown:unreadable"
+
+        artifact_hashes: dict[str, str] = {}
+        for row in saved.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            path = str(row.get("artifact_path") or "")
+            if path and path not in artifact_hashes:
+                artifact_hashes[path] = _artifact_hash(path)
+        try:
+            repairs_so_far = list_repair_runs(self.memory.path, project_id, limit=200)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            repairs_so_far = []
+        repair_rounds = sum(
+            1 for entry in repairs_so_far
+            if isinstance(entry, dict) and str(entry.get("decision") or "") in (
+                "repaired", "repair_failed", "requote_failed")
+        )
+        if repair_rounds >= P0B_MAX_REPAIR_ROUNDS:
+            try:
+                self.memory.add_event(
+                    project_id, "p0b_repair_rounds_exhausted",
+                    "修正ループの上限に達したため判断待ちへ移しました",
+                    detail=__import__("json").dumps({
+                        "repair_rounds": repair_rounds,
+                        "failed_items": sorted(str(row.get("item_id") or "") for row in unmet_failures),
+                    }, ensure_ascii=False)[:2000],
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                pass
+            self._record_p0b_awaiting_decision(
+                project_id, kind_summary="repair_rounds_exhausted",
+                rows=unmet_failures, signature="rounds_exhausted",
+                reason=f"修正ループの上限({P0B_MAX_REPAIR_ROUNDS}回)に達しました",
+            )
+            return True
+
+        # 失敗を分類し、自動修復できるものと人の操作が必要なものに分ける。
+        # 同じ失敗署名での再試行上限は台帳の実測で数える。
+        classified: list[dict] = []
+        for row in unmet_failures:
+            kind = classify_item_failure(row)
+            if kind is None:
+                continue
+            signature = failure_signature(
+                str(row.get("item_id") or ""), kind,
+                artifact_hashes.get(str(row.get("artifact_path") or ""), "unknown"),
+                source_hash,
+            )
+            try:
+                attempts = count_repair_attempts(self.memory.path, project_id, signature)
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                # 読み取れなければ安全側(上限扱い)で判断待ちにする。
+                attempts = P0B_MAX_REPAIR_ATTEMPTS
+            classified.append({
+                "row": row, "kind": kind, "signature": signature, "attempts": int(attempts or 0),
+            })
+        if not classified:
+            return False
+
+        def _record(kind: str, signature: str, row: dict, decision: str,
+                    before: str, after: str, reason: str,
+                    hash_before: str = "", hash_after: str = "") -> dict:
+            try:
+                return record_repair_run(
+                    self.memory.path, project_id=project_id,
+                    item_id=str(row.get("item_id") or ""), failure_kind=kind,
+                    failure_signature=signature, plan_signature=plan_signature,
+                    source_hash=source_hash,
+                    artifact_path=str(row.get("artifact_path") or ""),
+                    artifact_hash_before=hash_before, artifact_hash_after=hash_after,
+                    item_result_before=before, item_result_after=after,
+                    decision=decision, operator_action=failure_operator_hint(kind),
+                    reason=reason,
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+                # 記録の失敗は握りつぶさず、修復側を停止させて呼び出し側に残す。
+                raise RuntimeError(
+                    f"repair record unavailable: {type(exc).__name__}") from exc
+
+        # semantic_quote_mismatch は既存本文からの再試行(最大1回)だけ許可する。
+        # 引用が一致しないものを理由なしに PASS にしない。
+        for entry in classified:
+            if entry["kind"] != "semantic_quote_mismatch":
+                continue
+            row = entry["row"]
+            requote_runs = sum(
+                1 for past in repairs_so_far
+                if isinstance(past, dict)
+                and str(past.get("item_id") or "") == str(row.get("item_id") or "")
+                and str(past.get("failure_kind") or "") == "semantic_quote_mismatch"
+                and str(past.get("decision") or "") in ("requoted", "requote_failed")
+            )
+            before = str(row.get("result") or "")
+            if requote_runs >= P0B_SEMANTIC_REQUOTE_MAX:
+                _record(entry["kind"], entry["signature"], row, "requote_failed",
+                        before, "UNTESTABLE",
+                        f"引用の再試行上限({P0B_SEMANTIC_REQUOTE_MAX}回)に達しました。人に提示します")
+                continue
+            retry = self._retry_semantic_quote_once(project_id, project, row)
+            if retry is None:
+                _record(entry["kind"], entry["signature"], row, "requote_failed",
+                        before, "UNTESTABLE",
+                        f"引用の抽出し直し({requote_runs + 1}/{P0B_SEMANTIC_REQUOTE_MAX})でも一致しません。人に提示します")
+                continue
+            _record(entry["kind"], entry["signature"], row, "requoted",
+                      before, str(retry.get("result") or ""),
+                      f"既存本文から引用を抽出し直しました({requote_runs + 1}/{P0B_SEMANTIC_REQUOTE_MAX})",
+                      artifact_hashes.get(str(row.get("artifact_path") or ""), ""),
+                      artifact_hashes.get(str(row.get("artifact_path") or ""), ""))
+            if str(retry.get("result") or "") == "PASS":
+                # 再試行で一致した引用だけ PASS を採用する。台帳に保存し直す。
+                self._refresh_ledger_after_p0b(project_id, plan_signature, source_hash)
+                mission = self.memory.get_mission(project_id, event_limit=500)
+                latest = self.memory.get_mission(project_id, event_limit=500)
+                refreshed = latest_ledger(self.memory.path, project_id) or {}
+                check = [
+                    item for item in refreshed.get("rows", [])
+                    if isinstance(item, dict)
+                    and str(item.get("item_id") or "") == str(row.get("item_id") or "")
+                ]
+                if check and all(str(item.get("result") or "") == "PASS" for item in check):
+                    try:
+                        self.memory.add_event(
+                            project_id, "p0b_semantic_requote_passed",
+                            f"引用の抽出し直しで確認: {row.get('item_id')}",
+                            detail=str(entry["signature"])[:500],
+                        )
+                    except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                        pass
+        # 上限に達した失敗は判断待ちに移し、無限に追補を作らない。
+        exhausted = [entry for entry in classified if entry["attempts"] >= P0B_MAX_REPAIR_ATTEMPTS]
+        for entry in exhausted:
+            row = entry["row"]
+            _record(entry["kind"], entry["signature"], row, "awaiting_decision",
+                      str(row.get("result") or ""), str(row.get("result") or ""),
+                      f"同じ失敗署名での再試行上限({P0B_MAX_REPAIR_ATTEMPTS}回)に達しました")
+        if exhausted:
+            self._record_p0b_awaiting_decision(
+                project_id, kind_summary="repair_attempts_exhausted",
+                rows=[entry["row"] for entry in exhausted],
+                signature="; ".join(sorted(entry["signature"] for entry in exhausted))[:2000],
+                reason=f"同じ失敗署名での再試行上限({P0B_MAX_REPAIR_ATTEMPTS}回)に達しました",
+            )
+            return True
+        # 自動修復できる失敗だけを元成果物の版管理修正で直す。
+        repairable = [
+            entry for entry in classified
+            if entry["kind"] in P0B_AUTO_REPAIRABLE_KINDS and entry["attempts"] < P0B_MAX_REPAIR_ATTEMPTS
+        ]
+        manual_only = [
+            entry for entry in classified if entry not in repairable and entry not in exhausted
+        ]
+        repaired_any = False
+        for entry in repairable:
+            row = entry["row"]
+            outcome = self._repair_phrase_missing_once(
+                project_id, project, row, plan_signature, source_hash,
+                entry["signature"], artifact_hashes,
+            )
+            if outcome == "repaired":
+                repaired_any = True
+            elif outcome == "record_failed":
+                # 記録不能は判断待ちとして残すが、修復の続行は止める。
+                self._record_p0b_awaiting_decision(
+                    project_id, kind_summary="repair_record_failed",
+                    rows=[row], signature=entry["signature"],
+                    reason="修復記録の保存に失敗したため判断待ちへ移しました",
+                )
+                return True
+        if repaired_any:
+            # 修正後は原本・計画・成果物のハッシュが変わったら台帳を無効化して
+            # 項目別検証をやり直す(古い台帳の使い回しをしない)。
+            self._refresh_ledger_after_p0b(project_id, plan_signature, source_hash)
+            return True
+        if manual_only:
+            for entry in manual_only:
+                row = entry["row"]
+                _record(entry["kind"], entry["signature"], row, "awaiting_decision",
+                        str(row.get("result") or ""), str(row.get("result") or ""),
+                        "自動修復の対象外です。人の操作が必要です")
+            self._record_p0b_awaiting_decision(
+                project_id, kind_summary="manual_action_required",
+                rows=[entry["row"] for entry in manual_only],
+                signature="; ".join(sorted(entry["signature"] for entry in manual_only))[:2000],
+                reason="自動修復の対象外の失敗だけが残りました",
+            )
+            return True
+        return False
+
+    def _record_p0b_awaiting_decision(
+        self, project_id: str, *, kind_summary: str, rows: list[dict],
+        signature: str, reason: str,
+    ) -> None:
+        """判断待ちの記録。無限追補の代わりに理由・失敗項目・試し手・人の操作を残す。"""
+        from app.requirement_verification import classify_item_failure, failure_operator_hint
+        detail = {
+            "kind_summary": kind_summary,
+            "reason": reason,
+            "signature": signature,
+            "items": [],
+        }
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            kind = classify_item_failure(row) or "unclassified"
+            detail["items"].append({
+                "item_id": str(row.get("item_id") or ""),
+                "criterion_id": str(row.get("criterion_id") or ""),
+                "artifact_path": str(row.get("artifact_path") or ""),
+                "method": str(row.get("method") or ""),
+                "result": str(row.get("result") or ""),
+                "reason": str(row.get("reason") or "")[:500],
+                "kind": kind,
+                "operator_action": failure_operator_hint(kind),
+            })
+        try:
+            action_kind = "awaiting_decision"
+            if any(str((row or {}).get("result") or "") == "FAIL" for row in rows or []):
+                action_kind = "awaiting_human"
+            self.memory.add_event(
+                project_id, "p0b_awaiting_decision",
+                f"P0-B 判断待ち: {reason}",
+                detail=__import__("json").dumps(detail, ensure_ascii=False)[:12000],
+            )
+            self.memory.set_mission_status(
+                project_id, "paused", f"P0-B 判断待ち: {reason}", action_kind,
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            pass
+
+    def _retry_semantic_quote_once(
+        self, project_id: str, project: dict, row: dict,
+    ) -> dict | None:
+        """文意判定の引用を既存本文から抽出し直す判定の再試行。LLMの自己申告で上書きしない。
+
+        成功時は再検査の行(dict)を返し、一致しなければ None(UNTESTABLE のまま)。
+        """
+        from app.requirement_verification import verify_requirement_items
+        path = str(row.get("artifact_path") or "")
+        if not path or self.workspace is None:
+            return None
+
+        def _resolve(relative: str):
+            return self.workspace.resolve_file(
+                project.get("workspace_path", ""), project_id, relative,
+                must_exist=True,
+            )[2]
+
+        mission = self.memory.get_mission(project_id, event_limit=500)
+        task = next((
+            item for item in mission.get("tasks", [])
+            if any(
+                isinstance(candidate, dict)
+                and str(candidate.get("item_id") or "") == str(row.get("item_id") or "")
+                for candidate in self._contract_matrix(item)
+            )
+        ), None)
+        if task is None:
+            return None
+        # 1回の再試行: 既存のローカル judge を同じスレッド規則で使う。
+        # judge が無ければ人の確認待ち(引用の捏造はしない)。
+        try:
+            from app.requirement_verification import build_local_semantic_judge
+        except (ImportError, AttributeError, ValueError):
+            return None
+        try:
+            judge = build_local_semantic_judge(self._p0b_local_complete_sync)
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
+            return None
+        try:
+            retried = verify_requirement_items(task, _resolve, semantic_judge=judge)
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError, KeyError):
+            return None
+        for candidate in retried:
+            if str(candidate.get("item_id") or "") != str(row.get("item_id") or ""):
+                continue
+            if str(candidate.get("result") or "") == "PASS" and str(candidate.get("quote") or ""):
+                try:
+                    content = _resolve(path).read_text(encoding="utf-8-sig")
+                except (OSError, ValueError):
+                    return None
+                if str(candidate.get("quote") or "") not in content:
+                    return None
+                return candidate
+            return None
+        return None
+
+    @staticmethod
+    def _contract_matrix(task: dict) -> list[dict]:
+        try:
+            import json as _json
+
+            contract = _json.loads(task.get("acceptance_criteria", ""))
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(contract, dict):
+            return []
+        matrix = contract.get("requirement_matrix")
+        return list(matrix) if isinstance(matrix, list) else []
+
+    def _repair_phrase_missing_once(
+        self, project_id: str, project: dict, row: dict,
+        plan_signature: str, source_hash: str, signature: str,
+        artifact_hashes: dict[str, str],
+    ) -> str:
+        """phrase_missing を元成果物の版管理修正で1回直す。原本に値が無ければ直さない。
+
+        戻り値: 'repaired' | 'skipped' | 'record_failed' | 'awaiting'。
+        追補ファイルで達成扱いにしない。LLMの『直した』自己申告を信じず、
+        修正後は必ず項目別検証をやり直す。
+        """
+        from app.requirement_item_ledger import record_repair_run
+        path = str(row.get("artifact_path") or "")
+        item_id = str(row.get("item_id") or "")
+        needed = self._missing_values_for_item(project_id, row)
+        before_hash = artifact_hashes.get(path, "unknown")
+        before_result = str(row.get("result") or "")
+        if not path or self.workspace is None:
+            try:
+                record_repair_run(
+                    self.memory.path, project_id=project_id, item_id=item_id,
+                    failure_kind="phrase_missing", failure_signature=signature,
+                    plan_signature=plan_signature, source_hash=source_hash,
+                    artifact_path=path, artifact_hash_before=before_hash,
+                    artifact_hash_after=before_hash,
+                    item_result_before=before_result, item_result_after=before_result,
+                    decision="awaiting_decision",
+                    operator_action="元成果物のパスが特定できません。人に提示します",
+                    reason="元成果物パス不明のため自動修復しません",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return "record_failed"
+            return "awaiting"
+        if not needed:
+            # 必要な値が原本に無い(推測できない)なら自動修復の対象外。
+            try:
+                record_repair_run(
+                    self.memory.path, project_id=project_id, item_id=item_id,
+                    failure_kind="phrase_missing", failure_signature=signature,
+                    plan_signature=plan_signature, source_hash=source_hash,
+                    artifact_path=path, artifact_hash_before=before_hash,
+                    artifact_hash_after=before_hash,
+                    item_result_before=before_result, item_result_after=before_result,
+                    decision="awaiting_decision",
+                    operator_action="原本に必要な値がありません。人に提示します",
+                    reason="原本/登録事実に必要な値が無いため自動修復しません",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return "record_failed"
+            return "awaiting"
+        # 版管理された下書き: 修正前を .v1 などの別名で保全してから同じ失敗項目と
+        # 欠けている具体値を明示した修正依頼で同じタスクを再実行/再生成する。
+        try:
+            target = self.workspace.resolve_file(
+                project.get("workspace_path", ""), project_id, path, must_exist=True,
+            )[2]
+            before_text = target.read_text(encoding="utf-8-sig")
+        except (OSError, ValueError) as exc:
+            try:
+                record_repair_run(
+                    self.memory.path, project_id=project_id, item_id=item_id,
+                    failure_kind="phrase_missing", failure_signature=signature,
+                    plan_signature=plan_signature, source_hash=source_hash,
+                    artifact_path=path, artifact_hash_before=before_hash,
+                    artifact_hash_after=before_hash,
+                    item_result_before=before_result, item_result_after=before_result,
+                    decision="awaiting_decision",
+                    operator_action="成果物を読み取れません。人に提示します",
+                    reason=f"読み取り失敗のため自動修復しません: {type(exc).__name__}",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return "record_failed"
+            return "awaiting"
+        try:
+            preserved = self._preserve_artifact_version(project_id, project, path, before_text)
+        except (OSError, ValueError, RuntimeError) as exc:
+            try:
+                record_repair_run(
+                    self.memory.path, project_id=project_id, item_id=item_id,
+                    failure_kind="phrase_missing", failure_signature=signature,
+                    plan_signature=plan_signature, source_hash=source_hash,
+                    artifact_path=path, artifact_hash_before=before_hash,
+                    artifact_hash_after=before_hash,
+                    item_result_before=before_result, item_result_after=before_result,
+                    decision="awaiting_decision",
+                    operator_action="保全に失敗しました。人に提示します",
+                    reason=f"修正前の保全に失敗したため自動修復しません: {type(exc).__name__}",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return "record_failed"
+            return "awaiting"
+        # 同じタスクを再実行/再生成する: LLMに修正後全文を作らせ、検証は規則で行う。
+        repaired_text = self._regenerate_artifact_with_values(
+            project_id, path, before_text, row, needed, preserved,
+        )
+        if repaired_text is None:
+            try:
+                record_repair_run(
+                    self.memory.path, project_id=project_id, item_id=item_id,
+                    failure_kind="phrase_missing", failure_signature=signature,
+                    plan_signature=plan_signature, source_hash=source_hash,
+                    artifact_path=path, artifact_hash_before=before_hash,
+                    artifact_hash_after=before_hash,
+                    item_result_before=before_result, item_result_after=before_result,
+                    decision="repair_failed",
+                    operator_action="再生成に失敗しました。人に提示します",
+                    reason="再生成が失敗または空応答のため修正しません",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return "record_failed"
+            return "awaiting"
+        from app.vehicle_workflow import digest as _digest
+        try:
+            self.workspace.apply_operations(
+                project.get("workspace_path", ""), project_id,
+                [{"action": "write_text", "path": path, "content": repaired_text}],
+            )
+        except (OSError, ValueError) as exc:
+            try:
+                record_repair_run(
+                    self.memory.path, project_id=project_id, item_id=item_id,
+                    failure_kind="phrase_missing", failure_signature=signature,
+                    plan_signature=plan_signature, source_hash=source_hash,
+                    artifact_path=path, artifact_hash_before=before_hash,
+                    artifact_hash_after=before_hash,
+                    item_result_before=before_result, item_result_after=before_result,
+                    decision="repair_failed",
+                    operator_action="保存に失敗しました。人に提示します",
+                    reason=f"修正後の保存に失敗: {type(exc).__name__}",
+                )
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return "record_failed"
+            return "awaiting"
+        artifact_hashes[path] = "unknown:recomputed"
+        try:
+            self.memory.add_event(
+                project_id, "p0b_artifact_repaired",
+                f"元成果物を版管理して修正: {path}",
+                detail=__import__("json").dumps({
+                    "item_id": item_id, "failure_kind": "phrase_missing",
+                    "signature": signature, "preserved": preserved,
+                    "missing_values": needed,
+                }, ensure_ascii=False)[:2000],
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            pass
+        return "repaired"
+
+    def _missing_values_for_item(self, project_id: str, row: dict) -> list[str]:
+        """不足している必須値のうち、原本/登録事実にあるものだけを返す。推測しない。
+
+        A1: 連絡先の核語化項目は resolve_contact_values の実値で判定する。
+        核語化で keywords が実値に置換済みでも、原本に実値があれば修復可能。
+        """
+        if str(row.get("method") or "") != "phrase":
+            return []
+        expected = row.get("expected") if isinstance(row.get("expected"), dict) else {}
+        keywords = [str(k) for k in (expected.get("keywords") or []) if str(k)]
+        if not keywords:
+            # 台帳の行は expected を持たない場合がある。理由から不足値を抜く。
+            reason = str(row.get("reason") or "")
+            marker = "必須語句なし: "
+            if marker in reason:
+                tail = reason.split(marker, 1)[1]
+                # 理由は「必須語句なし: A、B」の形。空要素は落とす。
+                keywords = [part.strip(" 、,") for part in __import__("re").split(r"[、,]", tail)]
+                keywords = [keyword for keyword in keywords if keyword]
+        if not keywords:
+            return []
+        try:
+            files = self.memory.list_context_files(project_id, include_content=True)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            return []
+        registered = "\n".join(
+            str(item.get("content") or "")
+            for item in files or [] if isinstance(item, dict) and item.get("source") != "memo"
+        )
+        # 必須値の核(末尾の要求動詞を除いた形)が原本にあれば修復可能とする。
+        # 例: 必須値「終了後確認を含める」→核「終了後確認」が原本にあれば対象。
+        import re as _re
+        needed: list[str] = []
+        for keyword in keywords:
+            if not keyword:
+                continue
+            if keyword in registered:
+                needed.append(keyword)
+                continue
+            core = _re.sub(
+                r"(を含める|を含む|について|として|を確認|を作成|を記載|を載せ|を明記|を掲載|を説明|には|とは)$",
+                "", keyword).strip()
+            if core and core in registered:
+                needed.append(keyword)
+        return needed
+
+    def _preserve_artifact_version(
+        self, project_id: str, project: dict, path: str, content: str,
+    ) -> str:
+        """修正前を .v1 などの別名で保全する。追補ファイルは合否に使わない。"""
+        base = path.rsplit(".", 1)
+        version = 1
+        while True:
+            candidate = f"{base[0]}.v{version}.{base[1]}" if len(base) == 2 else f"{path}.v{version}"
+            try:
+                self.workspace.resolve_file(
+                    project.get("workspace_path", ""), project_id, candidate, must_exist=True,
+                )
+            except (OSError, ValueError, FileNotFoundError):
+                break
+            version += 1
+            if version > 50:
+                raise ValueError("version slots exhausted")
+        audit = self.workspace.apply_operations(
+            project.get("workspace_path", ""), project_id,
+            [{"action": "write_text", "path": candidate, "content": content}],
+        )
+        if not audit:
+            raise ValueError("preservation failed")
+        return candidate
+
+    def _regenerate_artifact_with_values(
+        self, project_id: str, path: str, before_text: str, row: dict,
+        needed: list[str], preserved: str,
+    ) -> str | None:
+        """同じ失敗項目と欠けている具体値を明示した修正依頼で再生成する。LLM出力は本文だけ。"""
+        requirement = str(row.get("requirement") or "")
+        missing = "、".join(needed)
+        prompt = (
+            f"次の成果物ファイルの修正版の全文だけを返してください。説明は不要です。\n"
+            f"対象: {path}\n"
+            f"失敗した検証項目: {row.get('item_id')} ({requirement})\n"
+            f"不足している必須値(原本にある値だけを使うこと): {missing}\n"
+            f"既存の内容は維持し、不足分だけを自然な位置に追記してください。"
+            f"原本にない値を推測で作らないでください。\n\n"
+            f"修正前の全文(保全先: {preserved}):\n{before_text[:12000]}"
+        )
+        try:
+            text = self._p0b_local_complete_sync(
+                "あなたはローカルで動作する成果物の修正者です。指定された不足値だけを原本の値で補い、全文を返します。",
+                prompt,
+            )
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError):
+            return None
+        cleaned = str(text or "").strip()
+        if len(cleaned) < 20:
+            return None
+        # LLMの自己申告(直した等)で判定を上書きしない。修正後の検証は規則で行う。
+        for marker in ("直しました", "修正しました", "合格", "PASS"):
+            if cleaned.strip() == marker:
+                return None
+        # 欠落した必須語の核(末尾の要求動詞を除いた形)が入っていれば修復とみなす。
+        # 例: 必須値「終了後確認を含める」→「終了後確認」が本文にあれば修復。
+        import re as _re
+        for value in needed:
+            # 検証契約の phrase 判定は完全な keyword を要求する。原本照合では
+            # 核語を用いても、修正版には契約上の値そのものが必要。
+            if value not in cleaned:
+                return cleaned
+        return cleaned
+
+    def _refresh_ledger_after_p0b(
+        self, project_id: str, plan_signature: str, source_hash: str,
+    ) -> None:
+        """修正後に原本・計画・成果物のいずれかのハッシュが変わったら台帳を無効化して再検証する。"""
+        from app.goal_review import plan_snapshot
+        from app.requirement_item_ledger import latest_ledger, record_ledger
+        from app.requirement_verification import (
+            ledger_invalidated,
+            ledger_payload,
+            verify_requirement_items,
+        )
+        from app.vehicle_workflow import (
+            digest as _source_digest,
+            sources as _current_sources,
+        )
+        mission = self.memory.get_mission(project_id, event_limit=500)
+        project = self.memory.get_project(project_id)
+        if project is None:
+            raise RuntimeError("project missing for ledger refresh")
+        try:
+            current_plan = plan_snapshot(self, project_id)[1]
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError) as exc:
+            raise RuntimeError(f"plan snapshot failed: {type(exc).__name__}") from exc
+        try:
+            current_source = _source_digest(_current_sources(self, project_id))
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError, KeyError) as exc:
+            raise RuntimeError(f"source digest failed: {type(exc).__name__}") from exc
+
+        def _resolve(relative: str):
+            return self.workspace.resolve_file(
+                project.get("workspace_path", ""), project_id, relative,
+                must_exist=True,
+            )[2]
+
+        def _artifact_hash(relative: str) -> str:
+            try:
+                return _source_digest(_resolve(relative).read_bytes())
+            except (OSError, ValueError):
+                return "unknown:unreadable"
+
+        artifact_hashes: dict[str, str] = {}
+        for task in mission.get("tasks", []):
+            for row in self._contract_matrix(task):
+                path = str((row or {}).get("artifact_path") or "")
+                if path and path not in artifact_hashes:
+                    artifact_hashes[path] = _artifact_hash(path)
+        saved = None
+        try:
+            saved = latest_ledger(self.memory.path, project_id)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            saved = None
+        if isinstance(saved, dict):
+            invalidated = ledger_invalidated(
+                {
+                    "plan_signature": str(saved.get("plan_signature") or ""),
+                    "source_hash": str(saved.get("source_hash") or ""),
+                    "artifact_hashes": __import__("json").loads(
+                        str(saved.get("artifact_hashes_json") or "{}")),
+                },
+                current_plan, current_source, artifact_hashes,
+            )
+            if invalidated:
+                try:
+                    self.memory.add_event(
+                        project_id, "p0b_ledger_invalidated",
+                        "修正前後でハッシュが変わったため該当台帳を無効化して再検証します",
+                        detail=__import__("json").dumps(
+                            {"invalidated": invalidated}, ensure_ascii=False)[:2000],
+                    )
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                    pass
+        all_rows: list[dict] = []
+        for task in mission.get("tasks", []):
+            if not self._contract_matrix(task):
+                continue
+            try:
+                # P0-C: 再検証でも保存後の成果物本文を照合する(既存の後に追加)。
+                from app.structured_planning import (
+                    build_p0c_registered_text as _p0c_re_text,
+                )
+                try:
+                    _p0c_files = self.memory.list_context_files(
+                        project_id, include_content=True)
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                    _p0c_files = []
+                try:
+                    _p0c_registered = _p0c_re_text(mission, _p0c_files, "")
+                except (ValueError, TypeError, AttributeError):
+                    _p0c_registered = ""
+                all_rows.extend(verify_requirement_items(task, _resolve, semantic_judge=None,
+                                                         registered_text=_p0c_registered))
+            except (OSError, ValueError, RuntimeError, TypeError, AttributeError, KeyError) as exc:
+                raise RuntimeError(
+                    f"reverification failed: {type(exc).__name__}") from exc
+        if not all_rows:
+            raise RuntimeError("reverification produced no rows")
+        record_ledger(
+            self.memory.path,
+            ledger_payload(project_id, current_plan, current_source, all_rows, artifact_hashes),
+        )
+        # 修正前後の項目結果と成果物ハッシュを修復記録に残す(追補ファイルは合否に使わない)。
+        try:
+            from app.requirement_item_ledger import list_repair_runs, record_repair_run
+            from app.requirement_verification import (
+                classify_item_failure,
+                failure_signature,
+            )
+            before_by_id = {
+                str(row.get("item_id") or ""): row
+                for row in (saved.get("rows") if isinstance(saved, dict) else []) or []
+                if isinstance(row, dict)
+            }
+            before_hashes = {}
+            if isinstance(saved, dict):
+                try:
+                    before_hashes = __import__("json").loads(
+                        str(saved.get("artifact_hashes_json") or "{}"))
+                except (TypeError, ValueError):
+                    before_hashes = {}
+            try:
+                past = list_repair_runs(self.memory.path, project_id, limit=200)
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                past = []
+            recorded = {
+                (str(entry.get("item_id") or ""), str(entry.get("decision") or ""),
+                 str(entry.get("item_result_after") or ""))
+                for entry in past if isinstance(entry, dict)
+            }
+            for row in all_rows:
+                if not isinstance(row, dict):
+                    continue
+                item_id = str(row.get("item_id") or "")
+                before = before_by_id.get(item_id)
+                after_result = str(row.get("result") or "")
+                before_result = str((before or {}).get("result") or "") if before else ""
+                path = str(row.get("artifact_path") or "")
+                key = (item_id, "reverified", after_result)
+                if key in recorded:
+                    continue
+                kind = classify_item_failure(row)
+                use_kind = kind if kind else "unclassified"
+                if before is not None and before_result not in ("FAIL", "UNTESTABLE"):
+                    continue
+                try:
+                    record_repair_run(
+                        self.memory.path, project_id=project_id, item_id=item_id,
+                        failure_kind=use_kind,
+                        failure_signature=failure_signature(
+                            item_id, use_kind,
+                            str((before_hashes or {}).get(path) or "unknown"),
+                            str((saved or {}).get("source_hash") or "unknown")),
+                        plan_signature=current_plan, source_hash=current_source,
+                        artifact_path=path,
+                        artifact_hash_before=str((before_hashes or {}).get(path) or "unknown"),
+                        artifact_hash_after=str(artifact_hashes.get(path) or "unknown"),
+                        item_result_before=before_result, item_result_after=after_result,
+                        decision="reverified",
+                        operator_action="修正後に項目別検証をやり直しました",
+                        reason="修正前後の項目結果と成果物ハッシュの保存",
+                    )
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                    continue
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError, ImportError):
+            pass
+
+    def _append_goal_supplement_legacy(
         self, project_id: str, unmet: list[str], final_report: str,
     ) -> bool:
         from app.vehicle_workflow import applicable
@@ -2562,6 +4623,7 @@ researchは外部情報の調査が本当に必要なタスクだけにしてく
                 audit = self.workspace.apply_operations(
                     project.get("workspace_path", ""), project_id, safe_operations
                 )
+                self._record_execution_manifests(project_id, project, task_id, audit)
             for item in audit:
                 self.memory.add_event(
                     project_id, "workspace_operation",
@@ -3191,6 +5253,85 @@ Do not return a Markdown code fence, an operation list, Python, shell, SQL, or p
                     f"操作JSONの再整形と実証に成功しました: {task['title']}", task["id"],
                     detail=json.dumps(corrected_metadata, ensure_ascii=False)[:12000],
                 )
+        # A combined JSON response can omit the second deliverable when the
+        # local model runs near its context limit. Repair each failing Markdown
+        # file independently, then re-run the unchanged backend contract.
+        if corrected_failures and markdown_paths:
+            try:
+                artifact_contract = json.loads(str(task.get("acceptance_criteria") or "{}"))
+            except (TypeError, ValueError):
+                artifact_contract = {}
+            output_specs = {
+                str(item.get("path")): item
+                for item in artifact_contract.get("outputs", [])
+                if isinstance(item, dict) and item.get("path")
+            }
+            attempted_paths: set[str] = set()
+            while corrected_failures and len(attempted_paths) < min(4, len(markdown_paths)):
+                # Re-evaluate after each repair. A second file can become the
+                # remaining blocker only after the first has been corrected.
+                failed_paths = [
+                    path for path in markdown_paths
+                    if path not in attempted_paths and (
+                        path in corrected_metadata.get("missing_contract_paths", [])
+                        or any(path in str(reason) for reason in corrected_failures)
+                    )
+                ]
+                if not failed_paths:
+                    break
+                path = failed_paths[0]
+                attempted_paths.add(path)
+                spec = output_specs.get(path, {})
+                headings = [str(x) for x in spec.get("required_headings", [])]
+                minimum = int(spec.get("minimum_characters") or 0)
+                self.memory.add_event(
+                    project_id, "task_single_artifact_repair_started",
+                    f"成果物を1件ずつ補正します: {path}", task["id"],
+                )
+                target_length = max(minimum + 500, 900)
+                single_prompt = f"""# 成果物1件の補正
+このタスクでは `{path}` だけを作成します。別の成果物は作りません。
+
+## タスクの依頼
+{str(task.get('description') or '')[:4500]}
+
+## このファイルの保存契約
+{json.dumps(spec, ensure_ascii=False)}
+必須見出しをすべてそのままMarkdown見出しに使用してください: {json.dumps(headings, ensure_ascii=False)}
+本文全体を最低{target_length}字で具体的に書いてください。短い要約は禁止です。各見出しの下に実務で読める説明を複数文入れ、架空・仮定・未確認を区別してください。
+バックエンドの直前の不合格理由: {json.dumps(corrected_failures, ensure_ascii=False)}
+
+## 登録原本からのローカル資料と利用可能な操作
+{base_prompt[-5000:]}
+
+JSONオブジェクト1件だけを返してください。operationsには action=write_text、path={path}、content=完成したMarkdown本文の1件を必ず入れてください。resultだけで完了を主張しないでください。原本refはsource_referencesに記載してください。
+"""
+                try:
+                    single_response = await self._local_complete(
+                        EXECUTOR_SYSTEM_PROMPT, single_prompt, EXECUTION_JSON_SCHEMA
+                    )
+                    single_report, single_gaps, single_evidence = self._apply_execution_response(
+                        project, project_id, task["id"], single_response,
+                        allowed_source_ids, presented_source_ids,
+                    )
+                    merged = self._merge_execution_evidence(merged, single_evidence)
+                    corrected_failures, corrected_metadata = self._verify_execution_evidence(
+                        project, project_id, task, single_report, merged, context_files
+                    )
+                    corrected_report += "\n\n## Single artifact repair\n" + single_report
+                    if single_gaps:
+                        corrected_failures.append(
+                            "成果物個別補正後も機能不足が残りました: "
+                            + "; ".join(str(item.get("description", "")) for item in single_gaps)
+                        )
+                except Exception as exc:
+                    self.memory.add_event(
+                        project_id, "task_single_artifact_repair_failed",
+                        f"成果物個別補正に失敗しました: {path}", task["id"],
+                        detail=str(exc)[:2000],
+                    )
+                if not corrected_failures:
+                    break
         if corrected_failures:
             self._reject_unverified_artifacts(
                 project, project_id, task["id"], merged,
@@ -3228,6 +5369,177 @@ Do not return a Markdown code fence, an operation list, Python, shell, SQL, or p
         return list(dict.fromkeys(
             provider for provider in mission["external_providers"] if provider in configured
         ))
+
+    def _outbound_guard(self, project_id: str, purpose: str, text: object,
+                        providers: object = ()) -> dict:
+        """外部AI送信前の関門。純粋検査+監査イベント1件。送信本文・検出値は記録しない。"""
+        import sqlite3 as _sqlite3
+
+        from app.planning_privacy import check_outbound_text as _check
+
+        if isinstance(text, str):
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        else:
+            digest = hashlib.sha256(b"").hexdigest()
+        try:
+            from app.goal_review import ReviewStore as _ReviewStore
+
+            from app import planning_settings as _planning_settings
+
+            _route_store = _ReviewStore(self.memory.path)
+            _route_raw = _route_store.get(project_id, "planning_settings", project_id)
+            if _route_raw is not None and (
+                    not isinstance(_route_raw, dict)
+                    or _route_raw.get("method") not in _planning_settings.METHODS):
+                _route_settings = None
+            else:
+                _route_settings = _planning_settings.get_settings(_route_store, project_id)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError,
+                TypeError, UnicodeError, _sqlite3.Error):
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        _route_method = _route_settings.get("method") if isinstance(_route_settings, dict) else None
+        if not isinstance(_route_settings, dict) or not isinstance(_route_method, str):
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        if _route_method == "external_guarded":
+            result = {"ok": False, "codes": ["method_external_guarded"],
+                      "details": {"method_external_guarded": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        if _route_method != "local_only":
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        try:
+            items = self.memory.list_context_files(project_id, include_content=False)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError,
+                TypeError, UnicodeError, re.error, _sqlite3.Error):
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        terms: list[str] = []
+        try:
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("source") == "memo":
+                    continue
+                for key in ("filename", "id"):
+                    value = item.get(key)
+                    if value is not None and str(value).strip():
+                        terms.append(str(value))
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError,
+                TypeError, UnicodeError, re.error, _sqlite3.Error):
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        source_texts: list[str] = []
+        try:
+            content_items = self.memory.list_context_files(project_id, include_content=True)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError,
+                TypeError, UnicodeError, re.error, _sqlite3.Error):
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        try:
+            for content_item in content_items or []:
+                if not isinstance(content_item, dict):
+                    continue
+                if content_item.get("source") == "memo":
+                    continue
+                content_value = content_item.get("content")
+                if isinstance(content_value, str) and content_value.strip():
+                    source_texts.append(content_value)
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError,
+                TypeError, UnicodeError, re.error, _sqlite3.Error):
+            result = {"ok": False, "codes": ["check_error"], "details": {"check_error": True}}
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": list(result["codes"]),
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        result = _check(text, blocked_terms=tuple(terms), source_texts=source_texts)
+        codes = [str(code) for code in (result.get("codes") or [])]
+        if not result.get("ok"):
+            self.memory.add_event(
+                project_id, "external_send_blocked_privacy",
+                "送信前検査のため外部送信を保留しました",
+                detail=json.dumps({
+                    "purpose": str(purpose), "codes": codes,
+                    "sha256": digest[:16],
+                }, ensure_ascii=False),
+            )
+            return result
+        try:
+            provider_list = [str(p) for p in (providers or [])]
+        except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+            provider_list = []
+        chars = len(text) if isinstance(text, str) else 0
+        self.memory.add_event(
+            project_id, "external_send_audited",
+                        "送信前検査を通過した外部送信を記録しました",
+            detail=json.dumps({
+                "purpose": str(purpose), "providers": provider_list,
+                "sha256": digest, "chars": int(chars),
+            }, ensure_ascii=False),
+        )
+        return result
 
     @project_experience
     async def _retry_failed_task_with_alternate_ai(
@@ -3275,30 +5587,39 @@ Do not return a Markdown code fence, an operation list, Python, shell, SQL, or p
         }, ensure_ascii=False, indent=2)
         external_critique = ""
         if mission["allow_external_ai"] and reviewers and self.capability_review_runner:
-            self.memory.add_event(
-                project_id, "task_ai_failover_started",
+            guard = self._outbound_guard(
+                project_id, "failover_review", failure_payload, reviewers)
+            if not guard.get("ok"):
+                self.memory.add_event(
+                    project_id, "task_ai_failover_skipped",
+                    "外部AIの明示許可・選択・接続がないためローカルだけで再調整します",
+                    task["id"], detail=f"fingerprint={fingerprint}",
+                )
+            else:
+                self.memory.add_event(
+                    project_id, "task_ai_failover_started",
                 f"失敗を受け、許可済みの別AIへ再調整を依頼: {', '.join(reviewers)}",
                 task["id"], detail=f"fingerprint={fingerprint}",
             )
-            try:
-                reviews = await self.capability_review_runner(failure_payload, reviewers)
-            except Exception as exc:
-                reviews = [{"id": "review_runner", "label": "別AI再調整", "model": "",
-                            "ok": False, "error": str(exc)[:2000]}]
-            successful = [item for item in reviews if item.get("ok")]
-            external_critique = "\n\n".join(
-                f"## {item.get('label', item.get('id', 'AI'))} ({item.get('model', '')})\n"
-                f"{item.get('review', '')}" for item in successful
-            )
-            self.memory.add_event(
-                project_id, "task_ai_failover_reviewed",
-                f"別AIによる再調整案の取得完了: {len(successful)}/{len(reviews)} AI",
-                task["id"], detail="\n".join(
-                    f"{item.get('label', item.get('id', 'AI'))}: "
-                    + (item.get("review", "")[:1000] if item.get("ok") else item.get("error", "失敗"))
-                    for item in reviews
-                )[:12000],
-            )
+                try:
+                    reviews = await self.capability_review_runner(failure_payload, reviewers)
+                except Exception as exc:
+                    reviews = [{"id": "review_runner", "label": "別AI再調整", "model": "",
+                                "ok": False, "error": str(exc)[:2000]}]
+                successful = [item for item in reviews if item.get("ok")]
+                external_critique = "\n\n".join(
+                    f"## {item.get('label', item.get('id', 'AI'))} ({item.get('model', '')})\n"
+                    f"{item.get('review', '')}" for item in successful
+                )
+                self.memory.add_event(
+                    project_id, "task_ai_failover_reviewed",
+                    f"別AIによる再調整案の取得完了: {len(successful)}/{len(reviews)} AI",
+                    task["id"], detail="\n".join(
+                        f"{item.get('label', item.get('id', 'AI'))}: "
+                        + (item.get("review", "")[:1000] if item.get("ok") else item.get("error", "失敗"))
+                        for item in reviews
+                    )[:12000],
+                )
         else:
             self.memory.add_event(
                 project_id, "task_ai_failover_skipped",
@@ -3476,28 +5797,34 @@ strategy={strategy}
         reviewers = self._selected_reviewers(mission)
         reviews: list[dict] = []
         if mission["allow_external_ai"] and reviewers and self.capability_review_runner:
-            self.memory.add_event(
-                project_id, "capability_review_started",
+            guard = self._outbound_guard(
+                project_id, "capability_review", review_payload, reviewers)
+            if not guard.get("ok"):
+                reason = "外部AIの明示許可・選択・接続のいずれかがないためローカルだけで検討します"
+                self.memory.add_event(project_id, "capability_review_skipped", reason, task["id"])
+            else:
+                self.memory.add_event(
+                    project_id, "capability_review_started",
                 f"実現手段を複数AIで検討中: {', '.join(reviewers)}", task["id"],
                 detail=json.dumps(gaps, ensure_ascii=False)[:4000],
             )
-            try:
-                reviews = await self.capability_review_runner(review_payload, reviewers)
-            except Exception as exc:
-                reviews = [{
-                    "id": "review_runner", "label": "実現手段評価", "model": "",
-                    "ok": False, "error": str(exc)[:2000],
-                }]
-            successful = [item for item in reviews if item.get("ok")]
-            self.memory.add_event(
-                project_id, "capability_review_completed",
-                f"実現手段の外部AI評価完了: {len(successful)}/{len(reviews)} AI", task["id"],
-                detail="\n".join(
-                    f"{item.get('label', item.get('id'))}: "
-                    + (item.get("review", "")[:1000] if item.get("ok") else item.get("error", "失敗"))
-                    for item in reviews
-                )[:12000],
-            )
+                try:
+                    reviews = await self.capability_review_runner(review_payload, reviewers)
+                except Exception as exc:
+                    reviews = [{
+                        "id": "review_runner", "label": "実現手段評価", "model": "",
+                        "ok": False, "error": str(exc)[:2000],
+                    }]
+                successful = [item for item in reviews if item.get("ok")]
+                self.memory.add_event(
+                    project_id, "capability_review_completed",
+                    f"実現手段の外部AI評価完了: {len(successful)}/{len(reviews)} AI", task["id"],
+                    detail="\n".join(
+                        f"{item.get('label', item.get('id'))}: "
+                        + (item.get("review", "")[:1000] if item.get("ok") else item.get("error", "失敗"))
+                        for item in reviews
+                    )[:12000],
+                )
         else:
             reason = "外部AIの明示許可・選択・接続のいずれかがないためローカルだけで検討します"
             self.memory.add_event(project_id, "capability_review_skipped", reason, task["id"])
@@ -3551,8 +5878,39 @@ strategy={strategy}
     def _execute_structured_final_verification(
         self, project: dict, project_id: str, task: dict,
     ) -> str:
-        """Generate final verification only from backend-observed state."""
+        """Generate final verification only from the item ledger.
+
+        修正B: 形式検査は前段として保持し、最終検証レポートは項目別検証台帳
+        からのみ生成する。形式検査だけのPASSを達成条件のPASSへ昇格させない。
+        SCのPASS/FAIL/UNTESTABLE、成果物パスとハッシュ、原本ハッシュ、計画署名、
+        未確認理由を記録する。計画・原本・成果物の変更で該当判定を無効化して再検査する。
+        """
+        from app.goal_review import plan_snapshot
+        from app.requirement_item_ledger import latest_ledger, record_ledger
+        from app.requirement_verification import (
+            build_local_semantic_judge,
+            ledger_invalidated,
+            ledger_payload,
+            summarize_criterion,
+            verify_requirement_items,
+        )
         mission = self.memory.get_mission(project_id, event_limit=500)
+
+        # P0-C: 保存後の成果物本文の根拠確認。登録事実と原本から抽出した事実と照合する。
+        # 既存のライブ再検査の後に追加し、既存のFAIL/拒否理由を隠さない。要確認は
+        # 自動修復の対象外(unsupported_fact→判断待ち)。修正候補は提示のみ。
+        def _p0c_registered() -> str:
+            try:
+                from app.structured_planning import (
+                    build_p0c_registered_text as _p0c_text,
+                )
+                files = self.memory.list_context_files(project_id, include_content=True)
+            except (OSError, ValueError, RuntimeError, AttributeError, KeyError, TypeError):
+                return ""
+            try:
+                return _p0c_text(mission, files, "")
+            except (ValueError, TypeError, AttributeError):
+                return ""
 
         def resolve(relative: str):
             return self.workspace.resolve_file(
@@ -3560,80 +5918,239 @@ strategy={strategy}
                 must_exist=True,
             )[2]
 
-        from app.vehicle_workflow import goal_failures
+        def artifact_hash(relative: str) -> str:
+            try:
+                return hashlib.sha256(resolve(relative).read_bytes()).hexdigest()
+            except (OSError, ValueError):
+                return "unknown:unreadable"
+
+        from app.vehicle_workflow import goal_failures, digest as source_digest, sources as current_sources
         business_failures = goal_failures(self, project_id)
-        criterion_sections: list[str] = []
+        _, plan_signature = plan_snapshot(self, project_id)
+        try:
+            # 完了ゲートと同じ原本ハッシュを台帳に保存する。
+            source_hash = source_digest(current_sources(self, project_id))
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError):
+            source_hash = "unknown:unreadable"
+        saved = latest_ledger(self.memory.path, project_id)
+        # 先行タスクの形式検査(前段)は保持する。
+        format_failures: list[str] = []
+        artifact_hashes: dict[str, str] = {}
         artifact_rows: list[str] = []
-        unmet: list[str] = list(business_failures)
-        predecessor_count = 0
-        artifact_count = 0
         for previous in mission["tasks"]:
             if previous["id"] == task["id"]:
                 continue
             contract = contract_of(previous)
             if not contract:
                 continue
-            predecessor_count += 1
-            failures = verify_outputs(previous, resolve)
-            state_ok = previous.get("status") in {"completed", "skipped"}
-            passed = state_ok and not failures
-            verdict = "PASS" if passed else "FAIL"
-            criteria = contract.get("criterion_ids") or [previous.get("task_key", "準備")]
-            criterion_text = str(
-                contract.get("criterion") or previous.get("title") or "準備タスク"
-            )
-            paths = [str(item.get("path", "")) for item in contract.get("outputs", [])]
-            backend_judgement = (
-                "契約された成果物の実在・形式・必須項目を確認済み。"
-                if passed else " / ".join(
-                    failures or ["タスクが完了状態ではありません。"]
-                )
-            )
-            criterion_sections.append(
-                f"### {', '.join(criteria)} — {verdict}\n\n"
-                f"- 達成条件・対象: {criterion_text}\n"
-                f"- タスク状態: {previous.get('status', 'unknown')}\n"
-                f"- 根拠パス: {', '.join(paths) or 'なし'}\n"
-                f"- バックエンド判定: {backend_judgement}\n"
-                "- 実活動の扱い: 資料作成の完了のみを判定し、顧客接触・送信・"
-                "面談・契約締結を実施済みとは扱いません。"
-            )
-            if not passed:
-                unmet.append(
-                    f"{previous.get('task_key', previous.get('title', 'task'))}: "
-                    + "; ".join(
-                        failures or [f"status={previous.get('status', 'unknown')}"]
-                    )
-                )
-            for output in contract.get("outputs", []):
-                artifact_count += 1
+            for output in contract.get("outputs") or []:
                 path = str(output.get("path", ""))
-                output_failures = verify_outputs(
-                    {"acceptance_criteria": json.dumps({
-                        "schema": SCHEMA,
-                        "outputs": [output],
-                    }, ensure_ascii=False)},
-                    resolve,
-                )
-                artifact_rows.append(
-                    f"- `{path}` — {'PASS' if not output_failures else 'FAIL'}"
-                    + ("（実在し、構造契約を満たす）" if not output_failures
-                       else "（" + "; ".join(output_failures) + "）")
-                )
+                if not path:
+                    continue
+                digest = artifact_hash(path)
+                artifact_hashes[path] = digest
+                output_failures = verify_outputs(previous, resolve)
+                if output_failures:
+                    format_failures.extend(output_failures)
+        # 変更検出: 計画・原本・成果物の変更で該当判定を無効化して再検査する。
+        invalidated: list[str] = []
+        if saved is not None and isinstance(saved, dict):
+            invalidated = ledger_invalidated(
+                {
+                    "plan_signature": str(saved.get("plan_signature") or ""),
+                    "source_hash": str(saved.get("source_hash") or ""),
+                    "artifact_hashes": json.loads(str(saved.get("artifact_hashes_json") or "{}")),
+                },
+                plan_signature, source_hash, artifact_hashes,
+            )
+        # 項目別検証(台帳の材料)。文意の項目はローカルLLMで判定する。
+        # LLMが使えない・失敗・曖昧・引用不一致 → UNTESTABLE(PASSにしない)。
+        # 外部AIは使わない。同期経路のため、llm が無い場合は人待ちに倒す。
+        def _sync_local_complete(system: str, prompt: str) -> str:
+            import asyncio as _asyncio
 
-        overall = "PASS" if not unmet else "FAIL"
+            try:
+                loop = _asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and loop.is_running():
+                raise RuntimeError("semantic verification requires a worker thread")
+            # 本番のOllama.completeはasync。実行器の非同期入口からto_threadで
+            # 呼び、worker thread内で完了まで待つ。失敗はUNTESTABLEへ倒す。
+            verdict_schema = {
+                "type": "object",
+                "properties": {
+                    "result": {"type": "string", "enum": ["PASS", "FAIL", "UNTESTABLE"]},
+                    "quote": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "line": {"type": "integer"},
+                },
+                "required": ["result", "quote", "reason", "line"],
+                "additionalProperties": False,
+            }
+            text = str(_asyncio.run(_asyncio.wait_for(
+                self._local_complete(system, prompt, verdict_schema), timeout=90.0,
+            )) or "").strip()
+            if not text:
+                raise RuntimeError("local LLM returned empty response")
+            return text
+
+        try:
+            _semantic_judge = build_local_semantic_judge(_sync_local_complete)
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
+            _semantic_judge = None
+        registered_text = _p0c_registered()
+        all_rows: list[dict] = []
+        for previous in mission["tasks"]:
+            if previous["id"] == task["id"]:
+                continue
+            contract = contract_of(previous)
+            if not contract or not contract.get("criterion_ids"):
+                continue
+            all_rows.extend(verify_requirement_items(previous, resolve, semantic_judge=_semantic_judge,
+                                                     registered_text=registered_text))
+        # 前回の人確認は、計画・原本・成果物がすべて同一で、
+        # 今回も文意判定だけがUNTESTABLEのときに限り引き継ぐ。
+        if isinstance(saved, dict) and not invalidated and str(saved.get("plan_signature") or "") == plan_signature and str(saved.get("source_hash") or "") == source_hash:
+            confirmed = {
+                str(row.get("item_id") or ""): row
+                for row in saved.get("rows") or []
+                if isinstance(row, dict) and str(row.get("method") or "") == "llm_semantic"
+                and str(row.get("result") or "") == "HUMAN_CONFIRMED"
+            }
+            for row in all_rows:
+                if str(row.get("method") or "") == "llm_semantic" and str(row.get("result") or "") == "UNTESTABLE" and str(row.get("item_id") or "") in confirmed:
+                    row["result"] = "HUMAN_CONFIRMED"
+                    row["reason"] = "同一計画・原本・成果物で記録済みの人確認を継承"
+        verdicts = summarize_criterion(all_rows)
+        payload = ledger_payload(project_id, plan_signature, source_hash, all_rows, artifact_hashes)
+        record_ledger(self.memory.path, payload)
+        preparation_rows = []
+        preparation_gate_passed = True
+        for previous in mission["tasks"]:
+            previous_contract = contract_of(previous) or {}
+            if previous_contract.get("role") != "preparation":
+                continue
+            if previous.get("status") != "completed" or verify_outputs(previous, resolve):
+                preparation_gate_passed = False
+            preparation_rows.append(
+                f"- {previous.get('task_key')}: {previous.get('status')} "
+                f"(退出検査={','.join(previous_contract.get('exit_checks') or [])}; "
+                f"成果物={','.join(str(o.get('path') or '') for o in previous_contract.get('outputs') or [])})"
+            )
+        unmet: list[str] = list(business_failures)
+        if not preparation_rows:
+            preparation_gate_passed = False
+            unmet.append("準備工程の記録が存在しません")
+        if not preparation_gate_passed:
+            unmet.append("内部準備ゲート PREP00 が不合格です")
+        for previous in mission["tasks"]:
+            if (contract_of(previous) or {}).get("role") == "preparation" and previous.get("status") != "completed":
+                unmet.append(f"準備工程未完了: {previous.get('task_key')} ({previous.get('status')})")
+        unmet.extend(f"形式検査: {item}" for item in format_failures)
+        for criterion_id in sorted(verdicts):
+            if verdicts[criterion_id] != "PASS":
+                reasons = "; ".join(
+                    f"{row.get('item_id')}:{row.get('result')}:{row.get('reason')}"
+                    for row in all_rows if str(row.get("criterion_id") or "") == criterion_id
+                )
+                unmet.append(f"{criterion_id}: {verdicts[criterion_id]} ({reasons})")
+        if invalidated:
+            # 無効化は記録として残し、再検査の結果で判定する。
+            # 無効化されたことだけで未達にしない(再検査でFAILなら未達)。
+            self.memory.add_event(
+                project_id, "requirement_ledger_invalidated",
+                "判定の無効化を検出し、再検査の結果で判定しました",
+                task["id"],
+                detail=json.dumps({"invalidated": invalidated}, ensure_ascii=False)[:2000],
+            )
+        # 台帳からのみ生成する。形式PASSの昇格はしない。
+        criterion_sections: list[str] = []
+        for criterion_id in sorted(verdicts):
+            rows = [row for row in all_rows if str(row.get("criterion_id") or "") == criterion_id]
+            lines = [
+                f"### {criterion_id} — {verdicts[criterion_id]}",
+                "",
+                f"- 判定根拠: 項目別検証台帳(ledger_digest={payload['ledger_digest']})",
+            ]
+            for row in rows:
+                lines.append(
+                    f"- {row.get('item_id')}: {row.get('result')} "
+                    f"(対象={row.get('artifact_path')}, 方法={row.get('method')}, "
+                    f"位置={row.get('line')}, 引用={str(row.get('quote') or '')[:80]}, "
+                    f"理由={row.get('reason')})"
+                )
+            unconfirmed = [row for row in rows if str(row.get("result") or "") != "PASS"]
+            if unconfirmed:
+                lines.append("- 未確認理由: " + "; ".join(
+                    f"{row.get('item_id')}:{row.get('reason')}" for row in unconfirmed))
+            criterion_sections.append("\n".join(lines))
+        for row in all_rows:
+            artifact_rows.append(
+                f"- `{row.get('artifact_path')}` — {row.get('result')} "
+                f"(項目={row.get('item_id')}, ハッシュ={artifact_hashes.get(str(row.get('artifact_path') or ''), '')[:12]})"
+            )
+        overall_by_items = "PASS" if all_rows and all(
+            verdict == "PASS" for verdict in verdicts.values()) and not unmet else "FAIL"
+        # 台帳が無い計画の最終検証は理由を明示した FAIL(PASSにも理由なしにもしない)。
+        ledger_missing_note = ""
+        if saved is None and not all_rows:
+            overall_by_items = "FAIL"
+            ledger_missing_note = "項目別検証台帳が無い: 再計画が必要"
+            unmet.append(ledger_missing_note)
+        # 未確認の項目の一覧と確認の方法を日本語で示す。
+        pending_items = [row for row in all_rows if str(row.get("result") or "") == "UNTESTABLE"]
+        pending_section = ""
+        if pending_items:
+            pending_lines = [
+                f"- {row.get('item_id')}: {row.get('requirement')} (理由={row.get('reason')})"
+                for row in pending_items
+            ]
+            pending_section = (
+                "\n\n## 未確認の項目と確認の方法\n\n"
+                "次の項目は人の確認待ちです。内容を確認した担当者が、"
+                "POST /api/projects/{project_id}/plan/requirement-items/{item_id}/confirm "
+                "へ担当者名(actor)・理由(reason)・引用(quote)を送って記録してください。"
+                "確認は文意の項目(llm_semantic)にだけ適用でき、数・見出し・語句の項目は"
+                "人が上書きできません。記録は機械のPASSとは別の結果(HUMAN_CONFIRMED)です。\n\n"
+                + "\n".join(pending_lines) + "\n"
+            )
+        final_contract = contract_of(task) or {}
+        final_headings = list(
+            (final_contract.get("outputs") or [{}])[0].get("required_headings")
+            or ["達成条件別判定", "成果物検証", "未達条件と承認待ち"]
+        )
+        responsibility_section = (
+            "## 検証レポートの作成責任と証拠\n\n"
+            "- 作成責任: システム（項目別検証台帳からのみ生成）\n"
+            "- 人間の承認: 別の承認ゲートで行う。未承認を完了扱いにしない\n"
+            "- 形式検査だけのPASSを達成条件のPASSへ昇格させない\n"
+            "- 検証に失敗した場合は最大2回まで再作成し、それでも不合格なら停止する\n"
+            f"- 計画署名: {plan_signature}\n"
+            f"- 原本ハッシュ: {source_hash}\n"
+            f"- 台帳ダイジェスト: {payload['ledger_digest']}\n"
+        )
+        verdict_section = "## 条件別PASS/FAIL\n\n" + "\n".join(
+            f"- {criterion_id}: {verdict}" for criterion_id, verdict in sorted(verdicts.items())
+        )
         report = (
             "# 最終検証・達成条件別の判定\n\n"
-            "このレポートは生成AIの自己申告ではなく、保存済みタスク状態と構造化契約、"
-            "Workspace上の実ファイルをバックエンドが再読込して作成した。"
-            "販売資料の作成と実際の営業活動を分離し、未実施の外部活動を実績として数えない。\n\n"
+            "このレポートは生成AIの自己申告ではなく、項目別検証台帳からのみ生成した。"
+            "形式検査は前段として保持し、形式だけのPASSを達成条件のPASSへ昇格させない。"
+            "販売資料の作成と実際の営業活動を分離し、未実施の外部活動を実績として数えない。"
+            "顧客接触・送信・面談・契約締結を実施済みとは扱いません。\n\n"
             "## 達成条件別判定\n\n"
             + "\n\n".join(criterion_sections)
+            + "\n\n## 準備段階の検査結果\n\n"
+            + f"- PREP00: {'PASS' if preparation_gate_passed else 'FAIL'} (準備工程の完了状態と保存済み成果物の形式検査)\n"
+            + "\n".join(preparation_rows)
             + "\n\n## 成果物検証\n\n"
-            + f"先行タスク{predecessor_count}件、契約成果物{artifact_count}件を検査した。\n\n"
-            + "\n".join(artifact_rows)
+            + f"項目{len(all_rows)}件を検査した。\n\n"
+            + "\n".join(sorted(set(artifact_rows)))
+            + "\n\n" + responsibility_section
+            + "\n" + verdict_section
             + "\n\n## 未達条件と承認待ち\n\n"
-            + ("### 機械検証上の未達\n\n- なし。全先行成果物が構造契約を満たしている。"
+            + ("### 機械検証上の未達\n\n- なし。配下の必須項目がすべてPASSしている。"
                if not unmet else "### 機械検証上の未達\n\n"
                + "\n".join(f"- {item}" for item in unmet))
             + "\n\n### 人間の承認または外部実行が必要な事項\n\n"
@@ -3641,10 +6158,14 @@ strategy={strategy}
               "- 見積提示、個別条件の確定、契約締結、請求、個人情報・秘密情報の外部送信は、明示承認後に別工程で行う。\n"
               "- テンプレートや計画の作成を、受注件数・面談件数・契約実績へ読み替えない。\n"
               "- 外部実行後は、承認記録と実在する結果を追加し、同じ検証を再実行する。\n\n"
-            f"## 総合判定\n\n成果物契約のバックエンド検証結果: **{overall}**。"
-            "この判定は成果物品質の最低条件に対するものであり、未実施の営業成果を保証しない。\n"
+            f"## 総合判定\n\n項目別検証台帳からの判定結果: **{overall_by_items}**。"
+            "この判定は項目別の証拠に対するものであり、未実施の営業成果を保証しない。\n"
+            + (f"\n{ledger_missing_note}\n" if ledger_missing_note else "")
+            + pending_section
         )
-        final_contract = contract_of(task) or {}
+        for required_heading in final_headings:
+            if f"## {required_heading}" not in report:
+                report += f"\n## {required_heading}\n\n- 契約の必須見出しに対応する検証結果は上記の各節に記載した。\n"
         output_path = str((final_contract.get("outputs") or [{}])[0].get(
             "path", "result/final_verification.md"
         ))
@@ -3661,7 +6182,7 @@ strategy={strategy}
         evidence = {
             "workspace_operations": audit,
             "table_operations": [],
-            "source_references": [],
+            "source_references": [{"reference": ref} for ref in (final_contract.get("source_refs") or []) if isinstance(ref, str) and ref],
         }
         failures, metadata = self._verify_execution_evidence(
             project, project_id, task, report, evidence, []
@@ -3803,8 +6324,9 @@ strategy={strategy}
         task = next(item for item in mission["tasks"] if item["id"] == task_id)
         contract = contract_of(task)
         if contract and contract.get("final_verification"):
-            return self._execute_structured_final_verification(
-                project, project_id, task
+            return await asyncio.to_thread(
+                self._execute_structured_final_verification,
+                project, project_id, task,
             )
         collected_web_ids = await self._collect_public_web_evidence(
             project, project_id, task, contract or {}
@@ -3939,11 +6461,6 @@ Workspaceの許可操作は mkdir, write_text, append_text, copy, move のみ。
         if use_external_research:
             providers = self._selected_reviewers(mission)
             if providers:
-                synthesizer = "chatgpt" if "chatgpt" in providers else providers[0]
-                self.memory.add_event(
-                    project_id, "external_ai",
-                    f"外部AIへ明示許可済み調査を依頼: {', '.join(providers)}", task_id,
-                )
                 public_prompt = (
                     "公開情報だけを対象に次の調査タスクを評価してください。"
                     "資料原本、Workspace、試算表、個人情報は提供されていません。"
@@ -3951,18 +6468,31 @@ Workspaceの許可操作は mkdir, write_text, append_text, copy, move のみ。
                     f"タスク: {task['title']}\n"
                     f"条件: {(contract or {}).get('criterion', task['description'])[:4000]}"
                 )
-                result = await self.research_runner(
-                    public_prompt, providers, synthesizer, "report", ""
-                )
-                external_result = result.get("synthesis")
-                if not external_result:
-                    successful = [item for item in result.get("results", []) if item.get("ok")]
-                    external_result = "\n\n".join(
-                        f"## {item['label']}\n{item['answer']}" for item in successful
+                guard = self._outbound_guard(
+                    project_id, "research", public_prompt, providers)
+                if not guard.get("ok"):
+                    self.memory.add_event(
+                        project_id, "external_fallback",
+                        "利用可能な外部AIがないためローカルLLMで実行します", task_id,
                     )
-                if not external_result:
-                    raise RuntimeError(result.get("synthesis_error") or "外部AI調査の回答を取得できませんでした")
-                prompt += "\n\n# 外部AI調査結果（ローカルで検証してから採否を決定）\n" + external_result[:50000]
+                else:
+                    synthesizer = "chatgpt" if "chatgpt" in providers else providers[0]
+                    self.memory.add_event(
+                        project_id, "external_ai",
+                        f"外部AIへ明示許可済み調査を依頼: {', '.join(providers)}", task_id,
+                    )
+                    result = await self.research_runner(
+                        public_prompt, providers, synthesizer, "report", ""
+                    )
+                    external_result = result.get("synthesis")
+                    if not external_result:
+                        successful = [item for item in result.get("results", []) if item.get("ok")]
+                        external_result = "\n\n".join(
+                            f"## {item['label']}\n{item['answer']}" for item in successful
+                        )
+                    if not external_result:
+                        raise RuntimeError(result.get("synthesis_error") or "外部AI調査の回答を取得できませんでした")
+                    prompt += "\n\n# 外部AI調査結果（ローカルで検証してから採否を決定）\n" + external_result[:50000]
             else:
                 self.memory.add_event(
                     project_id, "external_fallback",
@@ -4199,6 +6729,14 @@ Workspaceの許可操作は mkdir, write_text, append_text, copy, move のみ。
             except (OSError, ValueError) as exc:
                 failures.append(f"{final_path}: 読み取り失敗 {exc}")
                 verified_report = str(structured_final.get("result", "")).strip()
+            from app.requirement_item_ledger import latest_ledger
+            from app.requirement_verification import summarize_criterion
+            saved_ledger = latest_ledger(self.memory.path, project_id)
+            ledger_rows = saved_ledger.get("rows") if isinstance(saved_ledger, dict) else None
+            verdicts = summarize_criterion(ledger_rows or [])
+            for criterion_id in (final_contract.get("criterion_ids") or []):
+                if not ledger_rows or verdicts.get(criterion_id) != "PASS":
+                    failures.append(f"項目別台帳の達成判定: {criterion_id}={verdicts.get(criterion_id, 'UNTESTABLE')}")
             status = "passed" if not failures else "failed"
             executed_actions = self._external_execution_evidence(project_id)
             if requires_real_world_execution(mission["goal"], mission["success_criteria"]) \
@@ -4269,3 +6807,6 @@ Python/pandas等、許可されていない実行を実施済みと記載して�
             )
             report = f"# {project['name']} 未完了報告\n\n## 目標\n{mission['goal']}\n\n## タスク成果\n\n{results}"
             return report, "failed", ["最終目標評価を生成できませんでした"]
+
+
+

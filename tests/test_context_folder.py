@@ -18,3 +18,4 @@ def test_context_folder_path_preserves_safe_relative_structure():
 def test_context_folder_path_rejects_unsafe_or_non_markdown_paths(relative_path):
     with pytest.raises(ValueError):
         normalize_context_filename("note.md", relative_path)
+

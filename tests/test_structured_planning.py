@@ -214,11 +214,31 @@ def test_large_plan_reserves_final_capacity_without_dropping_conditions():
         compile_plan(['条件'] * 19, [task(i) for i in range(1, 20)])
 
 
+def test_multiple_markdown_outputs_do_not_invent_tracker_csv():
+    proposal = {
+        "title": "架空の催しの資料",
+        "scope": "案内文と当日チェックリストを別々に作成する",
+        "headings": ["日時", "場所"],
+        "outputs": [
+            {"kind": "document", "required_headings": ["日時", "場所"]},
+            {"kind": "checklist", "required_headings": ["準備", "受付"]},
+        ],
+    }
+    task = compile_task(
+        1, "案内文1ファイルとチェックリスト1ファイル、合計2ファイルを作る",
+        proposal, [],
+    )
+    assert len(contract_of(task)["outputs"]) == 2
+    assert all(output["path"].endswith(".md") for output in contract_of(task)["outputs"])
+    assert "案件管理CSV" not in task["description"]
+
+
 def test_tracker_contract_includes_csv_and_final_inventory():
     current = compile_task(1, '案件管理表を作成する', {'title': '管理表', 'scope': '商談記録を記入する表を用意', 'headings': ['目的', '記入方法']}, [])
     plan = compile_plan(['案件管理表を作成する'], [current])
     assert validate_plan(plan, {'SC01'})['passed']
     assert contract_of(current)['outputs'][1]['path'] == 'result/sc01_tracker.csv'
+    assert '案件管理CSV' in current['description']
     assert 'result/sc01_tracker.csv' in contract_of(plan['tasks'][-1])['inputs']
 
 
@@ -256,6 +276,16 @@ async def test_structured_final_verification_is_backend_generated(tmp_path):
     project = memory.create_project('最終検証テスト')
     memory.save_mission(project['id'], '## 達成条件\n1. 販売資料を作成', '', '', False, [])
     plan = compile_plan(['販売資料を作成'], [task(1)])
+    import hashlib
+    source_body = ('架空原本の確認済み本文です。' * 30).encode('utf-8')
+    source = memory.add_context_file(
+        project['id'], 'fictional_source.md', source_body.decode('utf-8'),
+        len(source_body), data=source_body, mime_type='text/markdown',
+        file_kind='markdown', sha256=hashlib.sha256(source_body).hexdigest(),
+    )
+    final_contract = contract_of(plan['tasks'][-1])
+    final_contract['source_refs'] = ['context:' + source['id']]
+    plan['tasks'][-1]['acceptance_criteria'] = json.dumps(final_contract, ensure_ascii=False)
     mission = memory.replace_plan(project['id'], plan['summary'], plan['tasks'])
     workspace = WorkspaceSandbox(tmp_path / 'workspace')
     for current in mission['tasks'][:-1]:
@@ -298,6 +328,14 @@ async def test_structured_final_verification_is_backend_generated(tmp_path):
     assert goal_status == 'passed'
     assert unmet == []
     assert '最終検証・達成条件別の判定' in final_report
+    from unittest.mock import patch
+    with patch('app.requirement_item_ledger.latest_ledger', return_value={
+        'rows': [{'criterion_id': 'SC01', 'required': True,
+                  'method': 'headings', 'result': 'FAIL'}],
+    }):
+        _, failed_status, failed_reasons = await manager._final_report(project['id'])
+    assert failed_status == 'failed'
+    assert any('SC01=FAIL' in reason for reason in failed_reasons)
     assert any(
         event['kind'] == 'structured_goal_assessment'
         for event in memory.get_mission(project['id'])['events']
@@ -487,7 +525,10 @@ def test_completion_evidence_and_pre_action_semantic_confirmation():
     assert external['semantic_review_required'] is True
     assert final.get('action_requirements') is None
     assert final['evidence_required'] is True
-    assert len(final['exit_checks']) == 3
+    # NEXT_FIX 20261017: 最終検証は条件別PASS/FAILの記録を必須化したため4件。
+    # 旧い固定3件の前提だけを更新し、安全ゲート自体は変えない。
+    assert len(final['exit_checks']) == 4
+    assert "per_criterion_verdicts_recorded" in final['exit_checks']
 
 
 def test_generic_external_actions_have_safe_operation_category():

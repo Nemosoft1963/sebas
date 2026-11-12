@@ -425,6 +425,8 @@ _REPLAN_CLEAR = {
     "experience:retrievals", "experience:candidate_events",
     "experience:experience_index_state",
 }
+# B3: 運用区分は世代切替では変えない。replan/rerun/fresh のいずれのクリア対象にも
+# 含めない。fresh の全件走査では item_ledger:operating_modes を除外する。
 _RERUN_CLEAR = {
     "main:detailed_reviews",
     "main:task_attempts", "main:validation_runs", "main:failure_records",
@@ -639,6 +641,9 @@ def switch_to_new_generation(memory_path: str | Path, pid: str, mode: str,
             if entry.db_label == "generation":
                 continue
             if entry.kind in ("directory", "other"):
+                continue
+            if entry.name == "item_ledger:operating_modes":
+                # B3: 運用区分は世代切替では変えない。fresh でも現行版を残す。
                 continue
             if entry.db_label == "main" and entry.table in ("projects",):
                 continue

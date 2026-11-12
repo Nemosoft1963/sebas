@@ -12,3 +12,4 @@ class EnergyVAD:
         if audio.size == 0:
             return False
         return float(np.sqrt(np.mean(np.square(audio.astype(np.float32))))) >= self.threshold
+

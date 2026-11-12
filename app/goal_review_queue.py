@@ -5,7 +5,12 @@ import time
 from app.goal_review import ReviewStore,plan_snapshot,selected_detail,review_plan,finish_job,save_orchestration,approved_packet
 
 
-def public_draft(snapshot):
+def public_draft(snapshot, public_summary_allowed: str = ""):
+    """公開用の計画概要。既定は構造情報だけ。原本本文は含めない。
+
+    完全架空・公開可の原本がある場合でも、明示許可された公開用要約
+    (public_summary_allowed)があるときだけ含める。許可が無ければ空のまま。
+    """
     from app.structured_planning import contract_of
     tasks=snapshot.get('tasks',[])
     kinds={(contract_of(t) or {}).get('execution_kind') for t in tasks}
@@ -18,18 +23,31 @@ def public_draft(snapshot):
     # Structural facts only: goal text, filenames and titles can contain private data.
     contracts=[contract_of(t) or {} for t in tasks]
     outputs=sum(len(c.get('outputs') or []) for c in contracts)
+    deliverables=sum(
+        len(c.get('outputs') or []) for c in contracts
+        if c.get('role') not in {'preparation', 'final_verification'} and not c.get('final_verification')
+    )
+    internal_outputs=outputs-deliverables
+    criterion_ids={
+        cid for c in contracts for cid in (c.get('criterion_ids') or [])
+        if isinstance(cid,str) and cid.startswith('SC')
+    }
     dependencies=sum(len(t.get('depends_on') or []) for t in tasks)
     approvals=sum(1 for c in contracts if (c.get('approval_required') or c.get('action_requirements')) and not c.get('final_verification'))
     semantic_reviews=sum(1 for c in contracts if c.get('human_confirmation_required'))
     links=sum(len(c.get('criterion_ids') or []) for c in contracts)
     detail_steps=len((snapshot.get('detail') or {}).get('steps') or [])
     detail=f' 詳細計画は{detail_steps}工程です。' if detail_steps else ''
-    return (f'登録済みの目標と達成条件を実行する汎用計画です。全体は{len(tasks)}工程、成果物契約は{outputs}件、'
-            f'工程間依存は{dependencies}件、達成条件との対応は{links}件、外部操作の承認点は{approvals}工程、'
+    allowed_summary = str(public_summary_allowed or "").strip()
+    # 明示許可が無い限り、公開用要約は含めない(既定は従来どおり空)。
+    extra_summary = f" 公開用要約: {allowed_summary[:2000]}" if allowed_summary else ""
+    return (f'登録済みの目標と達成条件を実行する汎用計画です。全体は{len(tasks)}工程、利用者向け完成成果物は{deliverables}件、内部の準備記録・検証レポートは{internal_outputs}件、'
+            f'工程間依存は{dependencies}件、達成条件IDは{len(criterion_ids)}件、工程への対応リンクは{links}件、内容確認または操作承認の境界は{approvals}工程、'
             f'人間による意味確認は{semantic_reviews}工程です。'
             f'{detail} 文書作成と実処理を区別し、公開・送信・顧客連絡・契約確定などの外部操作は人間承認後だけ実行します。'
             '各工程について、目標の網羅、入力と出力、依存関係、実行能力、検証可能な完了条件、承認境界、途中で目標から外れる危険を検証してください。'
-            'この文章は構造情報だけから生成しており、秘密情報、個人情報、原本本文、ファイル名は含みません。必要なら送信前に公開可能な目的説明を追記してください。')
+            'この文章は構造情報だけから生成しており、秘密情報、個人情報、原本本文、ファイル名は含みません。必要なら送信前に公開可能な目的説明を追記してください。'
+            f'{extra_summary}')
 
 
 async def tick(manager):

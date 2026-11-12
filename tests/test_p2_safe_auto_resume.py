@@ -27,6 +27,7 @@ def feature_flag(monkeypatch):
 def approved():
     with patch("app.safe_auto_resume.plan_snapshot", return_value=({}, "sig")), \
          patch("app.safe_auto_resume.ReviewStore.get", return_value={"status": "passed"}), \
+         patch("app.independent_review_gate.gate_error", return_value=None), \
          patch("app.safe_auto_resume.development_blockers", return_value=[]), \
          patch("app.safe_auto_resume.issues_for", return_value=[]), \
          patch("app.safe_auto_resume.require_review", return_value=None):

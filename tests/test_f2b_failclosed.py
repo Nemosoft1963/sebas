@@ -613,3 +613,4 @@ def test_f2b_deployment_unknown_artifact_cannot_be_accepted(monkeypatch):
     manager = SimpleNamespace(memory=SimpleNamespace(get_mission=lambda _pid: {"tasks": []}))
     with pytest.raises(ValueError, match="読取不能"):
         gate.accept(manager, "p", accepted_by="架空担当")
+

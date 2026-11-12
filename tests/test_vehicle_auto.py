@@ -458,3 +458,4 @@ def test_usami_identity_failure_block_excluded_from_source_control():
     ctrl_d = next(c for c in data_d['source_controls'] if c['source_ref'] == 'context:u_d')
     assert ctrl_d['amount'] == 2400
     assert any('車番小計と印字合計が一致しません' in i.get('message', '') for i in data_d['auto_extraction']['issues'])
+

@@ -581,3 +581,4 @@ def apply_prior_answers(manager, pid):
         'achieved': False,
         'human_accepted': False,
     }
+

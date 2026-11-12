@@ -122,3 +122,24 @@ def test_rejected_ai_write_is_quarantined_and_previous_file_is_restored(tmp_path
     assert rejected[0]["status"] == "restored"
     rejected_path = scope / rejected[0]["rejected_path"]
     assert rejected_path.read_text(encoding="utf-8") == "不合格候補"
+
+
+def test_nested_rewrite_uses_short_recoverable_backup(tmp_path):
+    workspace = WorkspaceSandbox(tmp_path / "workspace")
+    configured = "projects/review"
+    project_id = "review"
+    nested = "premarketing/campaign/social/archive/20261025T000000000000Z/post_kit.md"
+    workspace.apply_operations(configured, project_id, [
+        {"action": "write_text", "path": nested, "content": "before"},
+    ])
+    audit = workspace.apply_operations(configured, project_id, [
+        {"action": "write_text", "path": nested, "content": "after"},
+    ])
+    backup = audit[0]["backup"]
+    assert backup.startswith(".local_cowork_backups/")
+    assert len(backup) < 100
+    scope = tmp_path / "workspace" / configured
+    assert (scope / backup).read_text(encoding="utf-8") == "before"
+    restored = workspace.reject_operations(configured, project_id, audit)
+    assert restored[0]["status"] == "restored"
+    assert (scope / nested).read_text(encoding="utf-8") == "before"

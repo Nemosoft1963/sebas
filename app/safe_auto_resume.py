@@ -233,6 +233,16 @@ def _approved(manager, project_id: str, signature: str, mission: dict) -> bool:
     feedback = store.get(project_id, "plan_feedback", signature) or {}
     if feedback.get("issues"):
         return False
+    try:
+        from app.plan_gate_decision import decide as _gate_decide
+        from app.plan_gate_decision import enabled_for_project as _gate_enabled
+        decision = _gate_decide(manager, project_id) if _gate_enabled(project_id) else None
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
+        return False
+    if isinstance(decision, dict) and decision.get("mode") == "v2":
+        return decision.get("verdict") == "passed"
+    if decision is not None and (not isinstance(decision, dict) or decision.get("mode") != "legacy"):
+        return False
     review = store.get(project_id, "plan", signature) or {}
     if review.get("status") != "passed":
         return False
@@ -588,6 +598,33 @@ async def resume(manager, project_id: str, executor=None, retry_limit: int = MAX
         return {"status": "disabled", "reason": "server feature flag is off", "executed": [], "waiting_human": [], "failed": []}
     if not enabled(manager, project_id):
         return {"status": "disabled", "executed": [], "waiting_human": [], "failed": []}
+    try:
+        from app.plan_gate_decision import decide as _plan_gate_decide
+        from app.plan_gate_decision import enabled_for_project as _plan_gate_v2
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
+        _plan_gate_decide = None
+        _plan_gate_v2 = None
+    _plan_gate_result = None
+    try:
+        if _plan_gate_decide is not None and _plan_gate_v2 is not None and _plan_gate_v2(project_id):
+            _plan_gate_result = _plan_gate_decide(manager, project_id)
+    except (ValueError, KeyError, TypeError, AttributeError, OSError):
+        _plan_gate_result = None
+    if isinstance(_plan_gate_result, dict) and _plan_gate_result.get("mode") == "v2":
+        _plan_gate_verdict = _plan_gate_result.get("verdict")
+        _plan_gate_reason = _plan_gate_result.get("reason")
+        if _plan_gate_verdict != "passed":
+            return {"status": "blocked", "reason": str(_plan_gate_reason or "gate_check_error"),
+                    "executed": [], "waiting_human": [], "failed": []}
+    else:
+        try:
+            from app.independent_review_gate import gate_error
+            gate_code = gate_error(manager, project_id)
+        except Exception:
+            gate_code = "independent_review_check_error"
+        if gate_code is not None:
+            return {"status": "blocked", "reason": gate_code,
+                    "executed": [], "waiting_human": [], "failed": []}
     mission = manager.memory.get_mission(project_id)
     _snapshot, signature = plan_snapshot(manager, project_id)
     try:

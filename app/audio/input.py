@@ -33,3 +33,4 @@ class Microphone:
     def _put(queue: asyncio.Queue[np.ndarray], data: np.ndarray) -> None:
         if not queue.full():
             queue.put_nowait(data)
+

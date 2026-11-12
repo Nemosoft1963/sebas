@@ -4,3 +4,4 @@ $ErrorActionPreference = 'Stop'
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
   nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv
 }
+

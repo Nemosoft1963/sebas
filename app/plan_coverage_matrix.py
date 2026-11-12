@@ -61,15 +61,33 @@ def _delta_refs(changes, targets: list) -> list:
 
 
 def coverage_gate_error(matrix) -> str | None:
-    """全行 covered_candidate でなければ日本語の拒否理由を返す。行列が無ければ None。"""
+    """全行 covered_candidate でなければ日本語の拒否理由を返す。行列が無ければ None。
+
+    段階3-a: 未確定(ambiguous/invalid_reference)由来の未被覆だけの場合は、
+    汎用の被覆不足ではなく『未確定の指摘N件: 指摘ID一覧』で始める。
+    拒否自体は維持し、未確定のまま適用は通さない。
+    """
     rows = matrix.get("rows") if isinstance(matrix, dict) else None
     if not rows:
         return None
     bad = [r for r in rows if isinstance(r, dict) and r.get("coverage") != "covered_candidate"]
     if not bad:
         return None
+    unconfirmed = []
+    for r in bad:
+        reason = str(r.get("reason") or "")
+        if "対応表がambiguous" in reason or "対応表がinvalid_reference" in reason:
+            issue_id = str(r.get("parent_issue_id") or r.get("issue_id") or "")
+            if issue_id and issue_id not in unconfirmed:
+                unconfirmed.append(issue_id)
     parts = [f"{r.get('issue_id', '?')}({r.get('coverage', '?')}: {r.get('reason', '')})"
              for r in bad]
+    detail = "未被覆: " + " / ".join(parts)
+    if unconfirmed:
+        head = f"未確定の指摘{len(unconfirmed)}件: " + ", ".join(unconfirmed)
+        return (head + "。人の対応先確定後に再実行してください。"
+                "被覆不足のため適用できません。全ての指摘が covered_candidate である必要があります。"
+                + detail)
     return ("被覆不足のため適用できません。全ての指摘が covered_candidate である必要があります。"
             "未被覆: " + " / ".join(parts))
 

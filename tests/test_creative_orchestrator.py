@@ -18,3 +18,4 @@ def test_public_creative_data_excludes_private_fields():
     encoded = str(result)
     assert "never-send" not in encoded
     assert "private@example.test" not in encoded
+

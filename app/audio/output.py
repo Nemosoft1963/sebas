@@ -16,3 +16,4 @@ class Speaker:
 
     def stop(self) -> None:
         sd.stop()
+

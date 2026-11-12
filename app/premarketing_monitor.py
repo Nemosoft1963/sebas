@@ -10,8 +10,31 @@ def _stage(key: str, label: str, state: str, detail: str) -> dict[str, str]:
 
 
 def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
-                               leads: list[dict]) -> dict[str, Any]:
-    events = campaign_evidence(campaign, shares, leads)
+                               leads: list[dict], memory_path: object = None,
+                               project_id: str = "") -> dict[str, Any]:
+    selected_channels = None
+    selection_unreadable = False
+    selection_reason = ""
+    if memory_path is not None and project_id:
+        try:
+            from app.social_premarketing import resolve_channel_selection
+            selection = resolve_channel_selection(
+                memory_path, project_id, str(campaign.get("id") or ""))
+            status = str(selection.get("status") or "") if isinstance(selection, dict) else "unreadable"
+            if status == "selected":
+                selected_channels = list(selection.get("channels") or [])
+            elif status == "none_needed":
+                selected_channels = []
+            elif status != "not_configured":
+                selected_channels = []
+                selection_unreadable = True
+                selection_reason = str(selection.get("reason_ja") or "媒体の選択を読めません")
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, ImportError) as exc:
+            selected_channels = []
+            selection_unreadable = True
+            selection_reason = f"{type(exc).__name__}: {exc}"
+    events = campaign_evidence(campaign, shares, leads,
+                               selected_channels=selected_channels)
     by_kind = {}
     for event in events:
         by_kind.setdefault(event["kind"], set()).add(event.get("id"))
@@ -134,4 +157,6 @@ def campaign_execution_monitor(campaign: dict[str, Any], shares: list[dict],
                                    and int(lead.get("score") or 0) >= 60),
         },
         "last_activity_at": max(updated_values),
+        "social_selection_unreadable": selection_unreadable,
+        "social_selection_reason": selection_reason,
     }

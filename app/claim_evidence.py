@@ -82,3 +82,4 @@ def document_gates(verdicts, document, output, document_type):
         else:
             state['requirement_gate'] = 'passed'
     return state
+

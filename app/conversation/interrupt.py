@@ -14,3 +14,4 @@ class InterruptController:
     def raise_if_requested(self) -> None:
         if self.event.is_set():
             raise asyncio.CancelledError("barge-in")
+
